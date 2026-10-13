@@ -8,8 +8,12 @@
  *
  * 用法：
  *   $env:GITHUB_TOKEN = '你的令牌'      # 不要写进任何文件
- *   node tools/publish-github.mjs        # 真正发布
- *   node tools/publish-github.mjs --dry  # 只看会改哪些文件
+ *   node --use-system-ca tools/publish-github.mjs        # 真正发布
+ *   node --use-system-ca tools/publish-github.mjs --dry  # 只看会改哪些文件
+ *
+ * 必须带 --use-system-ca：这类网络环境通常有一个本地 HTTPS 拦截代理，
+ * 它的根 CA 只装在 Windows 证书库里，Node 自带的 CA 列表不认它，会报
+ * UNABLE_TO_VERIFY_LEAF_SIGNATURE。--use-system-ca 让 Node 改用系统证书库。
  *
  * 行为：
  *   - 以本地 HEAD 的树为准，只上传与远端 SHA 不同的 blob（GitHub 的 blob
@@ -71,12 +75,27 @@ function readLocalTree() {
 
 const local = readLocalTree();
 console.log(`本地 HEAD blob: ${local.size}`);
-// 保险：读不到文件时立刻中止。否则下面的 removed 会等于远端全部文件，
+// 保险一：读不到文件时立刻中止。否则下面的 removed 会等于远端全部文件，
 // 一次误跑就会把整个仓库删空。
 if (local.size === 0) {
   console.error('中止：本地 HEAD 一个文件都读不到，可能是 git 状态异常。');
   process.exit(1);
 }
+
+// 保险二：有未被跟踪的文件就中止。
+// 项目已经因此出过一次线上事故——src/main.js 引用了新建的 src/plugins/index.js，
+// 但那个文件没被 git add，于是发布出去的站点缺少模块、整个模块图崩掉、
+// 应用直接起不来（本地正常，线上全黑）。本脚本只发布被跟踪的内容，
+// 所以「本地有、索引里没有」的文件必须在这里被拦下。
+const untracked = git('ls-files', '--others', '--exclude-standard').split('\n').filter(Boolean);
+if (untracked.length) {
+  console.error(`中止：有 ${untracked.length} 个文件未被 git 跟踪，它们不会进入仓库。`);
+  for (const f of untracked.slice(0, 40)) console.error('  ? ' + f);
+  if (untracked.length > 40) console.error(`  … 另有 ${untracked.length - 40} 个`);
+  console.error('处理：需要发布的先 git add；确认无关的加进 .gitignore。');
+  process.exit(1);
+}
+console.log('未跟踪文件检查：通过（0 个）');
 
 // 远端现状
 let remoteCommit = null;
