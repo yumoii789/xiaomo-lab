@@ -77,6 +77,70 @@ fr.addEventListener('load', () => {
           log(kind + ': ' + (reg && reg.size !== undefined ? reg.size : (reg && reg.list ? reg.list().length : '?')));
         } catch (e) { log(kind + ': 取不到（' + e.message + '）'); }
       }
+
+      // ── 交互特效自检：涟漪与拖尾是否真的生成 ──
+      // 用户手写要求里的「点击放大 + 拖尾」。这两处的监听器注册在
+      // ui.interaction 的 setup 里，一旦该插件装载失败就整块消失，
+      // 所以必须机械验证「元素真的被造出来」，而不是只看插件状态。
+      log('');
+      log('=== 交互特效（涟漪 / 拖尾）===');
+      try {
+        const it = app.interaction;
+        log('app.interaction: ' + (it
+          ? '存在  tool=' + it.tool + '  setTool=' + typeof it.setTool
+          : '缺失'));
+        const d = fr.contentDocument;
+        const stage = d.getElementById('stage');
+        if (!stage) { log('  ✗ 找不到 #stage'); return; }
+        if (it && it.setTool) it.setTool('select');
+        const r = stage.getBoundingClientRect();
+        const PE = fr.contentWindow.PointerEvent;
+        const N = 6, DX = 26, DY = 18;
+        const x0 = r.left + 240, y0 = r.top + 200;
+        const mk = (x, y) => ({
+          clientX: x, clientY: y, bubbles: true, cancelable: true,
+          pointerId: 1, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1,
+        });
+        const fire = (type, x, y) => stage.dispatchEvent(new PE(type, mk(x, y)));
+        // 事件之间留 60ms：既越过拖尾的 46ms 节流，又让每次 pointermove 都有
+        // 真实位移——否则算不出方向，--tx/--ty 会恒为 0，验证就成了空转。
+        let i = 0;
+        fire('pointerdown', x0, y0);
+        const step = () => {
+          if (i >= N) {
+            fire('pointerup', x0 + N * DX, y0 + N * DY);
+            const ripple = stage.querySelectorAll('.fx-ripple');
+            const trail = stage.querySelectorAll('.fx-trail');
+            log('  已派发 ' + (N + 1) + ' 次 pointerdown + ' + N +
+                ' 次 pointermove（间隔 60ms，每次右下移 ' + DX + '/' + DY + 'px）+ 1 次 pointerup');
+            // 涟漪与拖尾都在 animationend 时自我移除，所以「存活数」反映的是
+            // 寿命与事件间隔之比（涟漪约 200ms、间隔 60ms → 约 3 个），并不等于
+            // 派发次数。判据只能是「>0 且随派发持续存在」，不能拿它跟派发数比。
+            log('  .fx-ripple 数量: ' + ripple.length +
+                (ripple.length > 0
+                  ? '  ✓ 涟漪随点击生成（存活 ' + ripple.length + '/' + (N + 1) + '，其余已按动画结束自行清理）'
+                  : '  ✗ 涟漪完全缺失'));
+            log('  .fx-trail  数量: ' + trail.length +
+                (trail.length > 0 ? '  ✓ 拖尾生成' : '  ✗ 没有拖尾'));
+            const t = trail[trail.length - 1];
+            if (t) {
+              const tx = t.style.getPropertyValue('--tx'), ty = t.style.getPropertyValue('--ty');
+              const ok = parseFloat(tx) < 0 && parseFloat(ty) < 0;
+              log('  末个拖尾的 --tx / --ty: ' + (tx || '(空)') + ' / ' + (ty || '(空)') +
+                  (ok ? '  ✓ 指向位移反方向（右下移动 → 双负），拖尾方向契约成立'
+                      : '  ✗ 方向不符：右下移动应得到双负值'));
+            }
+            return;
+          }
+          i++;
+          fire('pointerdown', x0 + i * DX, y0 + i * DY);
+          fire('pointermove', x0 + i * DX, y0 + i * DY);
+          setTimeout(step, 60);
+        };
+        setTimeout(step, 60);
+      } catch (e) {
+        log('特效自检异常: ' + (e && e.stack ? e.stack : e));
+      }
     } catch (e) {
       log('探针自身异常: ' + (e && e.stack ? e.stack : e));
     }

@@ -20,52 +20,15 @@ import { CouplingBus } from './coupling/bridge.js';
 import { solveCircuit, fmtA } from './physics/circuit.js';
 
 // ── 插件清单 ──────────────────────────────────────────────
-import { equipmentPlugins } from './equipment/index.js';
-import physicsPlugin from './physics/circuit.js';
-import chemistryPlugin from './chemistry/reactions.js';
-import bridgePlugin from './coupling/bridge.js';
-
-import mintTheme from './plugins/theme.mint.js';
-import graphiteTheme from './plugins/theme.graphite.js';
-import damageRules from './plugins/rules.damage.js';
-import creditSystem from './plugins/system.credit.js';
-
-import uiPalette from './plugins/ui.palette.js';
-import uiInspector from './plugins/ui.inspector.js';
-import uiData from './plugins/ui.data.js';
-import uiLog from './plugins/ui.log.js';
-import uiSidebar from './plugins/ui.sidebar.js';
-import uiInteraction from './plugins/ui.interaction.js';
-import uiToolbar from './plugins/ui.toolbar.js';
-import uiThemeSwitch from './plugins/ui.themeswitch.js';
-import uiManager from './plugins/ui.manager.js';
-import systemDesktop from './plugins/system.desktop.js';
-import systemPack from './plugins/system.pack.js';
-
-import presetsPlugin from './plugins/presets.experiments.js';
+// 名单在 src/plugins/index.js 里（唯一一份），这里只是转手：
+// 启动要用它，tools/check.mjs 的装载守卫也 re-export 同一份，避免两处维护而漂移。
+import { ALL_PLUGINS } from './plugins/index.js';
+export { ALL_PLUGINS };
 
 /**
- * 全部插件清单 —— 导出给 `tools/check.mjs` 的装载守卫复用。
- * 名单只有这一处，守卫装的必须和真正启动的是同一批插件，否则名单会悄悄漂移。
+ * 全部插件清单 —— 由 src/plugins/index.js 定义，这里原样转出，
+ * 供 `tools/check.mjs` 的装载守卫复用（守卫装的必须和真正启动的是同一批插件）。
  */
-export const ALL_PLUGINS = [
-  // 内核能力
-  physicsPlugin, chemistryPlugin, bridgePlugin,
-  // 主题
-  mintTheme, graphiteTheme,
-  // 器材
-  ...equipmentPlugins,
-  // 规则与系统
-  damageRules, creditSystem,
-  // 界面
-  uiSidebar, uiPalette, uiInspector, uiData, uiLog, uiInteraction, uiToolbar, uiThemeSwitch, uiManager,
-  // 桌面版外壳（浏览器里自动静默）
-  systemDesktop,
-  // 器材包：必须排在器材之后，派生时才能找到原型
-  systemPack,
-  // 内容
-  presetsPlugin,
-];
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];

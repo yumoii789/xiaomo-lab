@@ -5,6 +5,8 @@
 // ══════════════════════════════════════════════════════════
 
 import { World } from '../src/core/world.js';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { PluginHost } from '../src/core/plugin.js';
 import { create, list, bindRegistry, equipmentPlugins } from '../src/equipment/index.js';
 import { CouplingBus } from '../src/coupling/bridge.js';
@@ -408,178 +410,52 @@ head('⑩ 全部器材渲染 / 步进不抛异常（Canvas 用替身）');
 }
 
 // ══════════════════════════════════════════════════════════
-head('⑪ 插件装载守卫：真实的 ALL_PLUGINS 全部装得上（对照 main.js 的唯一名单）');
+// ══════════════════════════════════════════════════════════
+head('⑪ 插件装载守卫：真实的 ALL_PLUGINS 全部装得上（本次 bug 的漏检根因）');
 {
-  // 这一项就是本 bug 的漏检根因：上面那些用例只 import 了自己声明的少数插件，
-  // 从不用真实的 ALL_PLUGINS，于是「某个插件 setup 抛错」永远不会被发现。
-  //
-  // 插件在 setup 里会访问 document / matchMedia / getComputedStyle。Node 里没有这些，
-  // 所以下面造一个**能力刚好够**的替身（不是 DOM 实现）：只保证
-  //   createElement / getElementById / querySelector → 元素替身，
-  //   element.style / classList / appendChild / addEventListener / closest → 空操作，
-  //   getComputedStyle → 返回能解析出 duration 的假样式。
-  // 替身能力不足会表现为「题外错误」（例如 xxx is not a function on null），
-  // 与真实缺陷（app.setStatusTool is not a function）在报错串上是分得开的。
-  const makeEl = (tag = 'div') => {
-    const el = {
-      tagName: String(tag).toUpperCase(),
-      id: '', className: '', textContent: '', innerHTML: '',
-      style: { setProperty() {}, removeProperty() {}, getPropertyValue: () => '' },
-      dataset: {},
-      children: [], childNodes: [], parentNode: null,
-      offsetWidth: 120, offsetLeft: 0, offsetTop: 0, offsetHeight: 24,
-      value: '', checked: false, disabled: false, href: '', download: '',
-      classList: {
-        add() {}, remove() {}, toggle() {}, contains: () => false,
-      },
-      setAttribute() {}, getAttribute: () => null, removeAttribute() {},
-      appendChild(c) { this.children.push(c); this.childNodes.push(c); return c; },
-      insertBefore(c) { this.children.push(c); this.childNodes.push(c); return c; },
-      removeChild() {}, replaceChildren() {}, remove() {},
-      addEventListener() {}, removeEventListener() {}, dispatchEvent: () => true,
-      querySelector: () => null, querySelectorAll: () => [],
-      closest: () => null, contains: () => false,
-      getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }),
-      focus() {}, blur() {}, click() {}, select() {}, getContext: () => null,
-      toDataURL: () => 'data:,',
-    };
-    return el;
-  };
-  const norm = (s) => String(s).replace(/[#.][\w-]+|\s+/g, ' ').trim().toLowerCase();
-  const byId = {};
-  const el = (tag, id, cls) => {
-    const e = makeEl(tag);
-    e.id = id || ''; e.className = cls || '';
-    if (id) byId[id] = e;
-    return e;
-  };
-  // index.html 里被插件在 setup 阶段访问到的那几个节点
-  const stageEl = el('section', 'stage');
-  const layerEl = el('div', '', 'stage-fx');
-  stageEl.appendChild(layerEl);
-  const canvasEl = el('canvas', 'canvas');
-  canvasEl.getContext = () => mockCtx();
-  const sideTabs = el('nav', 'sideTabs');
-  const sideInk = el('span', 'sideInk', 'side-ink');
-  const panes = ['inspector', 'data', 'log'].map((p) => el('div', 'pane-' + p, 'pane'));
-  const tabBtns = ['inspector', 'data', 'log'].map((p, i) => {
-    const b = el('button', '', i === 0 ? 'active' : '');
-    b.dataset.pane = p;
-    sideTabs.appendChild(b);
-    return b;
-  });
-  el('div', 'hint', 'hint');
-  el('div', 'toast', 'toast');
-  // 选择器只支持守卫用得上的那几种形状；匹配不到就返回 null（与浏览器一致）
-  const queryOne = (sel, root) => {
-    const normSel = norm(sel);
-    if (sel === '#sideInk') return sideInk;
-    for (const e of Object.values(byId)) {
-      if (e.className && String(sel).includes('.' + e.className)) return e;
-      if (e.textContent && String(sel).includes(e.textContent)) return e;
-    }
-    return null;
-  };
-  const queryAll = (sel, root) => {
-    if (sel === 'button' && root === sideTabs) return tabBtns;
-    if (sel === '#sidebar .pane' || sel === '.pane') return panes;
-    return [];
-  };
-  for (const e of Object.values(byId)) {
-    e.querySelector = (s) => queryOne(s, e);
-    e.querySelectorAll = (s) => queryAll(s, e);
+  // 上面那些用例只 import 了自己声明的少数插件，从不用真实的 ALL_PLUGINS，
+  // 于是「某个插件 setup 抛错」永远不会被发现：ui.interaction 在
+  // `this.app.setStatusTool is not a function` 上中断，涟漪与拖尾监听器从未注册，
+  // 45 项却依然全绿。这里改为装载**真正启动用的那一批插件**（唯一名单）。
+  // 守卫跑在独立进程里（tools/guard-plugins.mjs），它的 DOM 替身与 rAF 循环
+  // 不会污染本套件其余用例。
+  let guardOut = null;
+  let guardErr = '';
+  try {
+    guardErr = execFileSync(process.execPath, ['tools/guard-plugins.mjs', '--quiet'], {
+      cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (err) {
+    guardErr = String(err.stdout || '') + String(err.stderr || '') + (err.message || '');
   }
-  const doc = {
-    body: makeEl('body'),
-    documentElement: makeEl('html'),
-    // 没映射到的 id 也给一个空元素替身：否则 main.js 的引导会到处碰到 null，
-    // 与守卫要抓的「插件 setup 抛错」混在一起，噪声大于信息。
-    getElementById: (id) => byId[id] || (byId[id] = el('div', id)),
-    querySelector: (s) => { const r = queryOne(s); if (!r) console.log('  [guard-debug] querySelector 未命中: ' + s); return r; },
-    querySelectorAll: (s) => queryAll(s),
-    createElement: (tag) => makeEl(tag),
-    createElementNS: (_ns, tag) => makeEl(tag),
-    createTextNode: (t) => ({ nodeType: 3, textContent: t }),
-    createDocumentFragment: () => makeEl('fragment'),
-    addEventListener() {}, removeEventListener() {},
-    hidden: false, visibilityState: 'visible',
-  };
-  // 元素替身也要能当事件目标用（closest 已在 makeEl 里给空实现）
-  for (const e of Object.values(byId)) e.ownerDocument = doc;
-  globalThis.document = doc;
-  globalThis.window = {
-    document: doc,
-    addEventListener() {}, removeEventListener() {},
-    matchMedia: (q) => ({
-      media: q, matches: false, onchange: null,
-      addEventListener() {}, removeEventListener() {},
-      addListener() {}, removeListener() {},
-    }),
-    getComputedStyle: () => ({ getPropertyValue: () => '', animationDuration: '200ms' }),
-    devicePixelRatio: 1, innerWidth: 1280, innerHeight: 820,
-    requestAnimationFrame: (fn) => setTimeout(fn, 0),
-    cancelAnimationFrame: (id) => clearTimeout(id),
-    requestIdleCallback: (fn) => setTimeout(() => fn({ didTimeout: false, timeRemaining: () => 0 }), 0),
-    localStorage: { getItem: () => null, setItem() {}, removeItem() {}, key: () => null, length: 0 },
-    location: { href: 'http://127.0.0.1/', search: '', hash: '', reload() {} },
-    navigator: { userAgent: 'node', platform: 'node', clipboard: { writeText: async () => {} } },
-    performance: globalThis.performance,
-    setTimeout, clearTimeout, setInterval, clearInterval,
-  };
-  globalThis.getComputedStyle = globalThis.window.getComputedStyle;
-  globalThis.matchMedia = globalThis.window.matchMedia;
-  globalThis.localStorage = globalThis.window.localStorage;
-  globalThis.requestAnimationFrame = globalThis.window.requestAnimationFrame;
-  globalThis.cancelAnimationFrame = globalThis.window.cancelAnimationFrame;
-  globalThis.CustomEvent = class CustomEvent { constructor(t, o) { this.type = t; this.detail = o && o.detail; } };
-  globalThis.Blob = class Blob { constructor(p) { this.parts = p; } };
-  globalThis.URL.createObjectURL = () => 'blob:stub';
-  globalThis.URL.revokeObjectURL = () => {};
+  const m = String(guardErr).match(/GUARD_JSON (\{.*\})/);
+  if (m) { try { guardOut = JSON.parse(m[1]); } catch { /* 解析失败按无输出处理 */ } }
 
-  console.log('  [guard-debug] globalThis.document === doc: ' + (globalThis.document === doc)
-    + ' · getElementById(canvas) = ' + String(globalThis.document && globalThis.document.getElementById('canvas'))
-    + ' · ids = ' + Object.keys(byId).join(','));
-  // 动态 import：上面的替身必须先生效，main.js 在模块顶层就要碰 document
-  let mod = null;
-  try { mod = await import('../src/main.js'); }
-  catch (err) {
-    console.log('  main.js 在替身环境里导入失败：' + (err && err.message));
-    console.log('     ' + String(err && err.stack).split('\n').slice(1, 4).join('\n     ').trim());
+  ok(!!guardOut, guardOut ? '装载守卫在独立进程里跑完并回报了结果'
+    : '装载守卫没有产出结果：' + String(guardErr).split('\n').slice(0, 3).join(' | '));
+  if (guardOut) {
+    console.log(`  ${guardOut.installed}/${guardOut.total} 个插件装载成功，失败 ${guardOut.failed} 个`
+      + `（贡献 ${guardOut.stats ? guardOut.stats.contributions : '?'} 条）`);
+    const why = []
+      .concat(guardOut.bootThrew ? ['引导异常: ' + guardOut.bootThrew] : [])
+      .concat((guardOut.failures || []).map(f => `${f.id} — ${f.error}`));
+    ok(guardOut.failed === 0 && (guardOut.failures || []).length === 0,
+      why.length
+        ? '装载失败的插件（真实缺陷）：\n     ' + why.join('\n     ')
+        : `真实的全部 ${guardOut.total} 个插件装入无异常`);
+    ok(guardOut.installed === guardOut.total && guardOut.total > 0,
+      `installed === total（${guardOut.installed} === ${guardOut.total}）`);
+    const it = guardOut.interaction || {};
+    ok(it.id === 'xiaomo.ui.interaction' && it.enabled === true && !it.error,
+      `xiaomo.ui.interaction enabled=${it.enabled} error=${it.error === null ? 'null' : it.error}`);
+    ok(guardOut.interactionLive === true, '涟漪/拖尾所属的 Interaction 实例真的建起来了（app.interaction.setTool 可用）');
+    ok(guardOut.pluginCount === guardOut.total && guardOut.listMismatch === false,
+      `守卫装的名单与 main.js 导出的 ALL_PLUGINS 一致（${guardOut.pluginCount} 个）`);
+    // 退化保护：名单被截断时上面几条会"全绿"，这一条挡住
+    ok(guardOut.total >= 23, `插件总数 ${guardOut.total} ≥ 23（名单没被截断）`);
   }
-  ok(!!mod, 'main.js 能在 DOM 替身下导入（引导过程不崩）');
-  const REAL_PLUGINS = mod && mod.ALL_PLUGINS;
-  ok(Array.isArray(REAL_PLUGINS) && REAL_PLUGINS.length > 0,
-    `从 main.js 拿到真实的 ALL_PLUGINS（${REAL_PLUGINS && REAL_PLUGINS.length} 个插件）`);
-
-  const guardApp = {
-    services: {}, ticks: [], world: null, lastCircuit: null, selected: null,
-    _dirty: false,
-    log: { push() {}, clear() {} },
-    toast() {},
-    addTick(fn) { this.ticks.push(fn); return () => {}; },
-    markDirty() { this._dirty = true; },
-  };
-  const guardHost = new PluginHost(guardApp, { quiet: true });
-  const declared = [];
-  for (const p of REAL_PLUGINS) {
-    try { guardHost.define(p); declared.push(p.id); }
-    catch (err) { declared.push(`定义失败 ${p && p.id}: ${err.message}`); }
-  }
-  const gstats = guardHost.installAll();
-  console.log(`  ${gstats.installed}/${gstats.total} 个插件装载成功，失败 ${gstats.failed} 个`
-    + `（贡献 ${gstats.contributions} 条）`);
-
-  const bad = guardHost.list().filter(r => r.error);
-  ok(bad.length === 0,
-    bad.length
-      ? '装载失败的插件（真实缺陷）：\n     ' + bad.map(r => `${r.id} — ${r.error}`).join('\n     ')
-      : `真实的全部 ${gstats.total} 个插件装入无异常`);
-  ok(gstats.failed === 0, `stats().failed === 0（实际 ${gstats.failed}）`);
-  ok(gstats.installed === gstats.total, `installed === total（${gstats.installed} === ${gstats.total}）`);
-
-  // 退化保护：名单被截断时上面几条会"全绿"，这里挡住
-  ok(gstats.total >= 23, `插件总数 ${gstats.total} ≥ 23（名单没被截断）`);
 }
+
 
 // ══════════════════════════════════════════════════════════
 console.log(`\n${'─'.repeat(56)}`);
