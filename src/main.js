@@ -32,16 +32,8 @@ export { ALL_PLUGINS };
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
+/** 工具标识 → 状态栏 `#stTool` 显示的名字。六段键位提示由 `.hintline` 常驻，不在这里重复。 */
 const TOOL_NAME = { select: '选择', wire: '连线', pour: '倾倒', erase: '删除' };
-/** 状态栏里的六个键位提示。工具段会随当前工具高亮，动作段常驻。 */
-const KEY_HINTS = [
-  { t: 'select', label: 'V 选择' },
-  { t: 'wire', label: 'W 连线' },
-  { t: 'pour', label: 'P 倾倒' },
-  { t: 'erase', label: 'X 删除' },
-  { label: '空格 运行' },
-  { label: 'Ctrl+S 保存' },
-];
 const STORE_KEY = 'xiaomo.scene.v1';
 /** 提示条换文案前的遮蔽时长：旧文案先被 2px 模糊盖住，再落新文案 */
 const TOAST_MASK_MS = 120;
@@ -433,30 +425,32 @@ class App {
   }
 
   // ══════════ 运行控制 ══════════
+  /**
+   * 切换工具。状态栏由 `interaction.setTool` → `setStatusTool` 负责（六段提示常在 +
+   * 当前工具加粗）；这里**不能**再用裸工具名去覆盖它，否则加粗与其余五段会被抹掉。
+   * `app.interaction` 尚未建起（交互插件被停用）时，状态栏保留 index.html 里的静态六段提示。
+   */
   setTool(t) {
     if (this.interaction) this.interaction.setTool(t);
     $$('#toolbar [data-tool]').forEach(b => b.classList.toggle('active', b.dataset.tool === t));
-    const el = $('#stTool');
-    if (el) el.textContent = TOOL_NAME[t] || t;
   }
 
   /**
-   * 状态栏的键位提示（`ui.interaction` 的 setup 会在设完默认工具后立刻调用它）。
+   * 更新状态栏左侧的工具槽位 `#stTool`（`ui.interaction` 的 setup 会在设完默认工具后调用）。
    *
-   * 契约：六段提示**常在**（V 选择 / W 连线 / P 倾倒 / X 删除 / 空格 运行 / Ctrl+S 保存），
-   * 当前工具那一段用 `<b>` 包住以示强调；未知工具值不抛错（只按现状显示常驻动作段）。
-   * 这里复用静态标记里的 `#stTool`，不新增 class 也不需要新 CSS。
+   * 只写这一个元素的文本，理由有两条：
+   * 1. 六段键位提示已经由 `index.html` 的 `.hintline` 常驻在状态栏右侧，
+   *    这里再渲染一遍就会在同一行里出现两次（实测确实重复过）。
+   * 2. `#statusbar` 的 innerHTML 绝不能整体重写——同组的 `#stCount`（器材数）、
+   *    `#stCircuit`（电路状态）、`#stCoupling`（耦合处数）、`#fps`（帧率）
+   *    由其他代码按 id 更新，重写会把它们抹掉。
+   * `.st-tool` 自带 `color:var(--accent)`，本身就是高亮，无需再包 `<b>`。
+   * 未知工具值退化为原样显示，不抛错（无 DOM 的环境直接返回）。
    */
   setStatusTool(t) {
     const el = $('#stTool');
     if (!el) return;
-    el.innerHTML = '';
-    for (const h of KEY_HINTS) {
-      if (el.childNodes.length) el.appendChild(document.createTextNode(' · '));
-      const seg = h.t && h.t === t ? document.createElement('b') : document.createElement('span');
-      seg.textContent = h.label;
-      el.appendChild(seg);
-    }
+    el.textContent = TOOL_NAME[t] || t;
   }
 
   toggleRun() {

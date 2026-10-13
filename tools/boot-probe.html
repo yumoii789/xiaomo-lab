@@ -158,6 +158,33 @@ fr.addEventListener('load', () => {
       } catch (e) {
         log('特效自检异常: ' + (e && e.stack ? e.stack : e));
       }
+
+      // ── 状态栏结构自省 ──
+      // 摸底 #stTool 到底渲染成了什么：是「只有工具名」还是「六段提示 + 当前工具加粗」。
+      // 同时确认 .hintline 那段静态提示是否与 #stTool 重复，以及四个被其他代码按 id
+      // 更新的 span 有没有被误伤——#statusbar 一旦被整体重写，它们就会消失。
+      log('');
+      log('=== 状态栏结构 ===');
+      try {
+        const dd = fr.contentDocument;
+        const st = dd.getElementById('stTool');
+        const hl = dd.querySelector('.hintline');
+        const sb = dd.getElementById('statusbar');
+        const bold = st ? [].map.call(st.querySelectorAll('b'), (b) => b.textContent).join(' | ') : '?';
+        log('  #stTool 文本     : ' + JSON.stringify(st ? st.textContent : '(没有 #stTool)'));
+        log('  #stTool 子节点数 : ' + (st ? st.children.length : '?') + '   <b> 数: ' + (st ? st.querySelectorAll('b').length : '?'));
+        log('  #stTool 加粗内容 : ' + JSON.stringify(bold));
+        log('  .hintline 存在   : ' + !!hl +
+            (hl ? '   可见=' + (fr.contentWindow.getComputedStyle(hl).display !== 'none') +
+                  '   文本=' + JSON.stringify(hl.textContent) : ''));
+        log('  与 .hintline 重复: ' + !!(hl && st && st.textContent === hl.textContent));
+        log('  四个同级 span 健在: ' +
+            ['stCount', 'stCircuit', 'stCoupling', 'fps']
+              .map((id) => id + '=' + !!dd.getElementById(id)).join('  '));
+        log('  #statusbar 整行  : ' + JSON.stringify(sb ? sb.textContent.replace(/\s+/g, ' ').trim() : '(无)'));
+      } catch (e) {
+        log('状态栏自检异常: ' + (e && e.stack ? e.stack : e));
+      }
     } catch (e) {
       log('探针自身异常: ' + (e && e.stack ? e.stack : e));
     }
