@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="mint" data-mode="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark light" />
+<meta name="description" content="小墨实验室 —— 物理与化学器材共处同一张实验台，两种器材可以相互交互" />
+<title>小墨实验室 · XiaoMo Lab</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%23a3e635'/><text x='16' y='23' font-size='19' text-anchor='middle' fill='%230b0f0d' font-family='sans-serif' font-weight='bold'>墨</text></svg>" />
+<link rel="stylesheet" href="styles/main.css" />
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ══ 顶栏 ══ -->
+  <header id="topbar">
+    <div class="brand" data-slot="topbar.brand">
+      <span class="brand-mark">墨</span>
+      <span class="brand-name">小墨实验室</span>
+      <span class="brand-tag">理化一体</span>
+    </div>
+    <div class="tb-group" data-slot="topbar.tools"></div>
+    <div class="tb-group" data-slot="topbar.actions"></div>
+    <div class="tb-spacer"></div>
+    <div class="tb-group tb-right" data-slot="topbar.right"></div>
+    <div class="tb-group wc-group" data-slot="topbar.wincontrols"></div>
+  </header>
+
+  <!-- ══ 主体 ══ -->
+  <main id="body">
+
+    <!-- 左：器材栏 -->
+    <aside id="palette" data-slot="palette"></aside>
+
+    <!-- 中：实验台 -->
+    <section id="stage">
+      <canvas id="canvas"></canvas>
+      <div class="stage-fx" data-slot="stage.overlay"></div>
+
+      <div id="hint" class="hint" style="opacity:0">
+        <div class="hint-title"></div>
+        <div class="hint-sub"></div>
+      </div>
+      <div id="toast" class="toast"></div>
+    </section>
+
+    <!-- 右：检查器 -->
+    <aside id="sidebar">
+      <nav id="sideTabs">
+        <button type="button" data-pane="inspector" class="active">属性</button>
+        <button type="button" data-pane="data">数据</button>
+        <button type="button" data-pane="log">日志</button>
+        <span class="side-ink" id="sideInk"></span>
+      </nav>
+      <div class="pane active" id="pane-inspector" data-slot="sidebar.pane.inspector"></div>
+      <div class="pane" id="pane-data" data-slot="sidebar.pane.data"></div>
+      <div class="pane" id="pane-log" data-slot="sidebar.pane.log"></div>
+    </aside>
+
+  </main>
+
+  <!-- ══ 状态栏 ══ -->
+  <footer id="statusbar">
+    <span class="st st-tool" id="stTool">选择</span>
+    <span class="st-sep"></span>
+    <span class="st" id="stCount">0 件器材</span>
+    <span class="st-sep"></span>
+    <span class="st" id="stCircuit">电路断开</span>
+    <span class="st-sep"></span>
+    <span class="st" id="stCoupling">耦合 0 处</span>
+    <span class="st-spacer"></span>
+    <span class="st hintline">V 选择 · W 连线 · P 倾倒 · X 删除 · 空格 运行 · Ctrl+S 保存</span>
+    <span class="st st-fps" id="fps">– fps</span>
+  </footer>
+
+</div>
+
+<!-- 浮层：管理员弹窗、插件抽屉 -->
+<div class="overlay-layer" data-slot="overlay"></div>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>

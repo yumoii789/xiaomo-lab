@@ -1,0 +1,54 @@
+{
+  "format": "xiaomo.equipment.pack",
+  "version": 1,
+  "id": "xiaomo.sample.pack",
+  "name": "示例器材包",
+  "author": "小墨实验室",
+  "desc": "演示怎么用已有器材派生出新器材：不改一行代码，只写配置",
+  "equipment": [
+    {
+      "type": "sample-big-battery",
+      "proto": "battery",
+      "name": "大号干电池",
+      "desc": "电动势 9 V 的干电池，内阻也更大",
+      "icon": "🔋",
+      "cat": "电源",
+      "domain": "physics",
+      "tags": ["电源", "电池", "高压"],
+      "w": 84,
+      "h": 58,
+      "defaults": {
+        "emf": 9,
+        "internalR": 1.2
+      }
+    },
+    {
+      "type": "sample-wide-beaker",
+      "proto": "beaker",
+      "name": "宽口烧杯",
+      "desc": "容量 500 mL 的宽口烧杯，适合做大剂量反应",
+      "icon": "🥃",
+      "cat": "玻璃器皿",
+      "domain": "chemistry",
+      "tags": ["玻璃器皿", "容器", "大容量"],
+      "w": 92,
+      "h": 84,
+      "defaults": {
+        "capacity": 500
+      }
+    },
+    {
+      "type": "sample-thick-resistor",
+      "proto": "resistor",
+      "name": "大功率定值电阻",
+      "desc": "阻值 2 Ω 的低阻电阻，允许通过较大电流",
+      "icon": "▭",
+      "cat": "电阻",
+      "domain": "physics",
+      "tags": ["电阻", "大功率"],
+      "defaults": {
+        "resistance": 2
+      }
+    }
+  ]
+}

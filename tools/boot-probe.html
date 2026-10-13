@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>启动探针 · 小墨实验室</title>
+<style>
+  body{margin:0;padding:16px;background:#0b0f0d;color:#a3e635;
+       font:12.5px/1.65 Consolas,'Cascadia Mono',monospace}
+  h1{font-size:14px;color:#e7efe9;margin:0 0 10px}
+  pre{margin:0;white-space:pre-wrap;word-break:break-all;color:#cfe8b8}
+  iframe{position:absolute;left:-20000px;top:0;width:1280px;height:820px;border:0}
+</style>
+</head>
+<body>
+<h1>启动探针（仅用于无头诊断，属于仓库外内容：tools/ 不会被打包）</h1>
+<pre id="out">加载中…</pre>
+<iframe id="fr" src="/index.html" title="被测应用"></iframe>
+<script>
+const out = document.getElementById('out');
+const fr = document.getElementById('fr');
+const lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); };
+
+/** 只留下可读的字段，函数与循环引用都压掉 */
+function brief(rec) {
+  try {
+    return JSON.stringify(rec, (k, v) => {
+      if (typeof v === 'function') return '[function]';
+      if (v && typeof v === 'object' && v.constructor && /Map|Set/.test(v.constructor.name)) {
+        return '[' + v.constructor.name + '(' + (v.size ?? '?') + ')]';
+      }
+      return v;
+    });
+  } catch (e) { return '[无法序列化: ' + e.message + ']'; }
+}
+
+fr.addEventListener('load', () => {
+  setTimeout(() => {
+    try {
+      const w = fr.contentWindow;
+      const app = w.xiaomo;
+      if (!app) { log('✗ iframe 里没有 window.xiaomo —— 应用没有启动'); return; }
+
+      const host = app.host;
+      log('=== host.stats() ===');
+      log(brief(host.stats ? host.stats() : null));
+
+      const list = (host.list ? host.list() : []) || [];
+      log('');
+      log('=== 插件记录（' + list.length + ' 条）===');
+      list.forEach((rec, i) => {
+        const p = rec.plugin || rec;
+        const flag = rec.installed ? '已装载' : '未装载';
+        const extra = [
+          'enabled=' + rec.enabled,
+          'skipped=' + rec.skipped,
+          'kind=' + (p.kind || '?'),
+        ].join(' ');
+        log(
+          String(i + 1).padStart(2) + '. [' + flag + '] ' + (p.id || '?') +
+          '  ' + extra + (rec.error ? '  错误=' + rec.error : '')
+        );
+      });
+
+      const bad = list.filter((r) => !r.installed);
+      log('');
+      log('=== 结论 ===');
+      log(bad.length === 0
+        ? '全部 ' + list.length + ' 个插件均已装载'
+        : '未装载 ' + bad.length + ' 个：' + bad.map((r) => (r.plugin || r).id).join(', '));
+
+      log('');
+      log('=== 注册表计数 ===');
+      for (const kind of ['equipment', 'themes', 'reactions', 'species', 'damage', 'panels', 'commands']) {
+        try {
+          const reg = host.registry(kind);
+          log(kind + ': ' + (reg && reg.size !== undefined ? reg.size : (reg && reg.list ? reg.list().length : '?')));
+        } catch (e) { log(kind + ': 取不到（' + e.message + '）'); }
+      }
+    } catch (e) {
+      log('探针自身异常: ' + (e && e.stack ? e.stack : e));
+    }
+  }, 3000);
+});
+</script>
+</body>
+</html>

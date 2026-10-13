@@ -1,0 +1,29 @@
+# 依赖
+node_modules/
+
+# 备份工具的运行时状态
+.sync-state.json
+backup.log
+
+# 自检 / 启动时的临时重定向文件
+_*.out
+_*.err
+
+# ── 凭据：绝不入库 ───────────────────────────────────────
+# tools/sync.config.json 内含 WebDAV 明文账号密码，而本仓库是公开仓库，
+# 所以该文件只存在于本地与备份中。配置格式见 tools/README-backup.md。
+tools/sync.config.json
+.env
+.env.*
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── 内部工作记录：不随产品发布 ─────────────────────────────
+# 开发过程台账（含竞品分析与对比口径），只在本地与 WebDAV 备份中保留。
+# 产品本体、对外文档与器材包规格不受影响。
+plans/
+docs/任务清单.md

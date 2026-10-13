@@ -1,0 +1,46 @@
+{
+  "name": "xiaomo-lab",
+  "productName": "小墨实验室",
+  "version": "2.0.0",
+  "description": "小墨实验室 —— 物理器材和化学器材放在同一张实验台上，而且它们能互相作用。纯前端 ES Modules + Canvas 2D，零构建步骤；桌面版是随包发布的 Electron 外壳。",
+  "license": "MIT",
+  "main": "desktop/main.js",
+  "bin": {
+    "xiaomo-lab": "desktop/cli.mjs"
+  },
+  "files": [
+    "index.html",
+    "src/",
+    "styles/",
+    "desktop/main.js",
+    "desktop/preload.js",
+    "desktop/cli.mjs",
+    "server.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node desktop/cli.mjs",
+    "dev": "node desktop/cli.mjs --dev",
+    "web": "node server.mjs",
+    "pack:check": "npm pack --dry-run"
+  },
+  "keywords": [
+    "小墨实验室",
+    "虚拟实验室",
+    "物理实验",
+    "化学实验",
+    "仿真",
+    "canvas",
+    "electron",
+    "es-modules",
+    "virtual-lab",
+    "simulation"
+  ],
+  "dependencies": {
+    "electron": "^33.2.0"
+  }
+}

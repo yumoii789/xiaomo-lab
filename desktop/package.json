@@ -1,0 +1,21 @@
+{
+  "name": "xiaomo-lab-desktop",
+  "productName": "小墨实验室",
+  "version": "2.0.0",
+  "description": "小墨实验室 桌面版 —— 物理与化学器材共处同一张实验台，两种器材可以相互交互",
+  "private": true,
+  "license": "MIT",
+  "main": "main.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "serve": "node serve.mjs",
+    "postinstall": "node -e \"console.log('\\n小墨实验室 桌面版就绪，运行 npm start 启动。\\n')\""
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}
