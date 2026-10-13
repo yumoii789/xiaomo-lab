@@ -12,7 +12,7 @@
 </style>
 </head>
 <body>
-<h1>启动探针（仅用于无头诊断，属于仓库外内容：tools/ 不会被打包）</h1>
+<h1>启动探针 v3（仅用于无头诊断，属于仓库外内容：tools/ 不会被打包）</h1>
 <pre id="out">加载中…</pre>
 <iframe id="fr" src="../index.html" title="被测应用"></iframe>
 <script>
@@ -39,7 +39,24 @@ fr.addEventListener('load', () => {
     try {
       const w = fr.contentWindow;
       const app = w.xiaomo;
-      if (!app) { log('✗ iframe 里没有 window.xiaomo —— 应用没有启动'); return; }
+      if (!app) {
+        // 失败时必须给出诊断：否则「应用没启动」这句话分不清是
+        // iframe 地址错、被缓存、还是应用真的起不来。
+        const doc = fr.contentDocument;
+        const appEl = doc && doc.getElementById('app');
+        log('✗ iframe 里没有 window.xiaomo —— 应用没有启动');
+        log('  探针版本           : v3');
+        log('  iframe 解析后的地址: ' + fr.src);
+        log('  iframe 文档标题    : ' + (doc ? doc.title : '(读不到 contentDocument)'));
+        log('  疑似 404 页        : ' + !!(doc && /404|Not Found|找不到/i.test(doc.title)));
+        log('  #app 子节点数      : ' + (appEl ? appEl.children.length + '（0 表示 mountSlots 没跑）' : '没有 #app 元素'));
+        log('  #statusbar 文本    : ' + (doc && doc.getElementById('statusbar') ? JSON.stringify(doc.getElementById('statusbar').textContent.slice(0, 80)) : '无'));
+        log('  iframe 内 script 数: ' + (doc ? doc.querySelectorAll('script').length : '?'));
+        log('  iframe 内 body 长度: ' + (doc && doc.body ? doc.body.innerHTML.length : '?') + ' 字符');
+        const keys = w ? Object.keys(w).filter(function (k) { return /xiaomo|XiaoMo/i.test(k); }) : [];
+        log('  window 上含 xiaomo 的键: ' + (keys.length ? keys.join(', ') : '(无)'));
+        return;
+      }
 
       const host = app.host;
       log('=== host.stats() ===');
