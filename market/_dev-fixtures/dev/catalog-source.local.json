@@ -1,0 +1,23 @@
+{
+  "manifestVersion": "1.0.0",
+  "providerId": "lab.xiaomo.community-catalog",
+  "name": "小墨实验室 · 内置社区目录（本地开发）",
+  "description": "与 market/catalog-source.json 逐字段一致的开发用来源，只有 endpoint 的 origin 换成了本机 7373 静态服务。因为本机把 github.io 解析到了 127.0.0.1（见 plans/02-发布与环境.md），生产 manifest 在本地跑不通，验证必须靠这一份。它指向的目录页仍是同一份文件 market/v1/plugins。",
+  "homepage": "https://yumoii789.github.io/xiaomo-lab/",
+  "attribution": {
+    "name": "小墨实验室",
+    "url": "https://github.com/yumoii789/xiaomo-lab",
+    "notice": "仅用于本机验证：这个 manifest 的 endpoint 是 http + 回环地址，生产 build 里不该出现。"
+  },
+  "transport": {
+    "kind": "https-json",
+    "endpoint": "http://127.0.0.1:7373/market/v1/plugins",
+    "method": "GET"
+  },
+  "query": {
+    "supported": [],
+    "defaultLimit": 50,
+    "maxLimit": 50,
+    "sorts": []
+  }
+}

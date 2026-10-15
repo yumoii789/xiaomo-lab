@@ -116,9 +116,16 @@ function appEntry() {
   return MAIN;
 }
 
+// Electron 二进制有一个陷阱：环境里若有 ELECTRON_RUN_AS_NODE=1，它会退化成纯 Node，
+// 主进程里的 app / BrowserWindow 全成了 undefined，而报错是「app is undefined」这种谜语，
+// 完全看不出是环境变量干的。某些编辑器的集成终端会把这个变量带进来，所以这里显式摘掉。
+const childEnv = { ...process.env };
+delete childEnv.ELECTRON_RUN_AS_NODE;
+
 const child = spawn(electron, [appEntry(), ...ARGS], {
   stdio: 'inherit',
   windowsHide: false,
+  env: childEnv,
 });
 
 child.on('close', (code) => process.exit(code ?? 0));

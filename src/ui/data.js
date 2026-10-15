@@ -9,12 +9,18 @@ import { fmtR } from '../physics/circuit.js';
 const SAMPLE_DT = 0.1;
 const KEEP = 900;          // 90 秒
 const CARD_LIMIT = 8;
+// 「点行接入」的通道用固定色板轮转（与自动发现通道同一族），不新增样式资源
+const PICK_COLORS = ['#2dd4bf', '#8b5cf6', '#f0a020', '#ff7a5c', '#6ba8ff', '#4ade80', '#a78bfa', '#7fe8d8'];
 
 export class DataPanel {
   constructor(el, app) {
     this.el = el;
     this.app = app;
     this.channels = new Map();   // key -> {label, unit, color, data:[], min, max}
+    // 逐行入口接进来的通道：key -> {label, unit, color, read}。
+    // read 是**取值闭包**（每次采样现取），不是点击那一刻的数值 —— 存数值就会画出一条常量线。
+    this.picked = new Map();
+    this._pickNote = '';         // 「满了替换掉哪一路」这类可读提示，画在面板底部
     this.acc = 0;
     this.cards = new Map();
     this._builtFor = '';
@@ -66,6 +72,8 @@ export class DataPanel {
         this.push('PH:' + e.id, 'pH 计读数', '', '#6ba8ff', st.pH ?? 7);
       }
     }
+    // 逐行入口接进来的通道：每次采样现取（read()），所以曲线跟着真值走
+    for (const [key, p] of this.picked) this.push(key, p.label, p.unit, p.color, p.read());
     // 裁剪长度
     for (const ch of this.channels.values()) {
       while (ch.data.length > KEEP) ch.data.shift();
@@ -86,13 +94,48 @@ export class DataPanel {
 
   hasData() { return this.channels.size > 0; }
 
+  /**
+   * 逐行入口：把一路读数接到一张曲线上。`read` 必须是**取值闭包**（每次采样现取）。
+   *
+   * 卡位取舍：8 张卡是**屏幕空间**约束，行数是**数据**约束，两者不用同一个数字平衡 ——
+   * 所以**不提高 CARD_LIMIT** ✗，而是让点行接入的通道**压过**自动发现的通道排到前面
+   * （用户显式点过的东西优先看得见），并且**先到先出**：第 9 路再接进来时挤掉最早接的那一路，
+   * 同时给一句可读提示（不静默丢、也不崩）。
+   */
+  pick({ key, label, unit, read }) {
+    if (!key || typeof read !== 'function') return { ok: false, why: 'bad-pick' };
+    let evicted = null;
+    if (!this.picked.has(key) && this.picked.size >= CARD_LIMIT) {
+      const oldest = this.picked.keys().next().value;      // Map 保持插入序 ⇒ 最早接的那一路
+      this.picked.delete(oldest);
+      this.channels.delete(oldest);                        // 连着数据和卡片一起放掉
+      this.cards.delete(oldest);
+      evicted = oldest;
+      this._builtFor = '';                                 // 强制下一帧重建卡片
+    }
+    const color = PICK_COLORS[this.picked.size % PICK_COLORS.length];
+    this.picked.set(key, { label: label || key, unit: unit || '', color, read });
+    this._pickNote = evicted ? `卡位已满：已替换最早接入的 1 路（最多同时看 ${CARD_LIMIT} 路）` : '';
+    return { ok: true, key, evicted };
+  }
+
+  /** 这一路是否已经接在曲线上（面板外观要标「已接入」，但别让 Inspector 直接摸 picked 内部表） */
+  has(key) { return this.picked.has(key); }
+
+  /** 显示哪几张卡：点行接入的在前（保持接入顺序），自动发现的补在后面，总共 CARD_LIMIT 张 */
+  visibleKeys() {
+    const picked = [...this.picked.keys()];
+    const auto = [...this.channels.keys()].filter((k) => !this.picked.has(k));
+    return picked.concat(auto).slice(0, CARD_LIMIT);
+  }
+
   // ── 绘制 ──
   draw() {
     if (this.channels.size === 0) {
       if (!this._empty) { this.el.replaceChildren(blank()); this._empty = true; this.cards.clear(); }
       return;
     }
-    const keys = [...this.channels.keys()].slice(0, CARD_LIMIT);
+    const keys = this.visibleKeys();
     const sig = keys.join('|');
     if (sig !== this._builtFor) {
       this.rebuild(keys);
@@ -105,12 +148,23 @@ export class DataPanel {
       card.num.textContent = fmtVal(ch.data[ch.data.length - 1]) + (ch.unit ? ' ' + ch.unit : '');
       drawSpark(card.cv, ch);
     }
-    if (this.channels.size > CARD_LIMIT && !this._more) {
-      this._more = document.createElement('div');
-      this._more.className = 'blank-s';
-      this._more.style.textAlign = 'center';
-      this._more.textContent = `还有 ${this.channels.size - CARD_LIMIT} 个通道未显示`;
-      this.el.appendChild(this._more);
+    // 底部提示：卡位满了替换掉哪一路 / 还有多少通道没显示（两者可同时存在）
+    const hidden = this.channels.size - keys.length;
+    const parts = [];
+    if (this._pickNote) parts.push(this._pickNote);
+    if (hidden > 0) parts.push(`还有 ${hidden} 个通道未显示`);
+    const note = parts.join(' · ');
+    if (note) {
+      if (!this._more) {
+        this._more = document.createElement('div');
+        this._more.className = 'blank-s';
+        this._more.style.textAlign = 'center';
+        this.el.appendChild(this._more);
+      }
+      if (this._more.textContent !== note) this._more.textContent = note;
+    } else if (this._more) {
+      this._more.remove();
+      this._more = null;
     }
   }
 
@@ -152,6 +206,8 @@ export class DataPanel {
   clear() {
     this.channels.clear();
     this.cards.clear();
+    this.picked.clear();      // 清空也要放掉逐行接入的通道，否则下一次采样又会被 read() 复活
+    this._pickNote = '';
     this._builtFor = '';
     this._empty = true;
     this._more = null;

@@ -35,6 +35,8 @@ import uiInteraction from './ui.interaction.js';
 import uiToolbar from './ui.toolbar.js';
 import uiThemeSwitch from './ui.themeswitch.js';
 import uiManager from './ui.manager.js';
+import uiSettings from './ui.settings.js';
+import uiMarket from './ui.market.js';
 
 // ── 桌面版外壳（浏览器里自动静默） ────────────────────────
 import systemDesktop from './system.desktop.js';
@@ -55,7 +57,7 @@ export const ALL_PLUGINS = [
   // 规则与系统
   damageRules, creditSystem,
   // 界面
-  uiSidebar, uiPalette, uiInspector, uiData, uiLog, uiInteraction, uiToolbar, uiThemeSwitch, uiManager,
+  uiSidebar, uiPalette, uiInspector, uiData, uiLog, uiInteraction, uiToolbar, uiThemeSwitch, uiManager, uiSettings, uiMarket,
   // 桌面版外壳（浏览器里自动静默）
   systemDesktop,
   // 器材包：必须排在器材之后，派生时才能找到原型

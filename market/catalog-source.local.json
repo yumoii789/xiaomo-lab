@@ -1,0 +1,23 @@
+{
+  "manifestVersion": "1.0.0",
+  "providerId": "lab.xiaomo.community-catalog",
+  "name": "小墨实验室 · 内置社区目录",
+  "description": "桌面版的离线目录源：内容与 GitHub Pages 上那份 market/catalog-source.json 一致，只把 endpoint 从远端换成了包内的 market/v1/plugins —— 无网络环境下的「发现」页靠它工作。网页版不使用本文件（https: 页面走同源的那一份）；transport.kind 仍写 https-json 是因为契约只认这一个取值，本文件里的地址其实由宿主自己的 app:// 协议从磁盘供给，不走网络。",
+  "homepage": "https://yumoii789.github.io/xiaomo-lab/",
+  "attribution": {
+    "name": "小墨实验室",
+    "url": "https://github.com/yumoii789/xiaomo-lab",
+     "notice": "目录里的元数据不代表安全审查：装不装由你在安装确认框里决定。"
+  },
+  "transport": {
+    "kind": "https-json",
+    "endpoint": "app://xiaomo-lab/market/v1/plugins",
+    "method": "GET"
+  },
+  "query": {
+    "supported": [],
+    "defaultLimit": 50,
+    "maxLimit": 50,
+    "sorts": []
+  }
+}

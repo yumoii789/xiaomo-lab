@@ -62,7 +62,13 @@ export default {
     }, { order: 100 });
 
     // ── 系统主题：用户没手动选过就跟随系统 ────────────────
-    const followSystem = () => !localStorage.getItem(MODE_KEY);
+    // 与 main.js 的 applyThemeFromStore() 同口径：没记录、或记录就是 'system'，都算跟随系统。
+    // 早先这里只看「键是否存在」，而旧版每次开机都会写这个键，于是恒判成「用户选过」，
+    // 桌面版从第一次启动起就再也没跟随过系统。
+    const followSystem = () => {
+      const m = localStorage.getItem(MODE_KEY);
+      return !m || m === 'system';
+    };
     D.getSystemTheme?.().then((m) => { if (followSystem()) theme.setMode(m); });
     D.onSystemTheme?.((m) => { if (followSystem()) theme.setMode(m); });
 

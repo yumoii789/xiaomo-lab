@@ -96,6 +96,19 @@ export class Entity {
     const old = this.props[k];
     this.props[k] = v;
     this.onProp?.(k, v, old);
+    // 撤销栈（C9）：只在「有栈 + 未挂起 + 值真的变了」时记一条**用户动作**
+    // —— 记的是"把 k 从 old 改成 v"这件事，**不是** `this.props` 的快照 ✗
+    // （快照会把求解器注入的 state 也卷进来，且会被下一帧覆盖）。
+    const u = this.world && this.world.undo;
+    // ⚠ 这里**不**自己判 `isSilent()`：闸门只该有一处（`UndoStack.push`）——
+    // 两处判断会让"被拒收"的计数失真，也会让静默语义出现两个真源。
+    if (u && old !== v) {
+      u.push({
+        kind: 'prop', label: `改参数 ${k}`, ent: this,
+        undo: () => this.setProp(k, old),
+        redo: () => this.setProp(k, v),
+      });
+    }
   }
   getProp(k) { return this.props[k]; }
 

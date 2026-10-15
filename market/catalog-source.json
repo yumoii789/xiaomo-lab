@@ -1,0 +1,23 @@
+{
+  "manifestVersion": "1.0.0",
+  "providerId": "lab.xiaomo.community-catalog",
+  "name": "小墨实验室 · 内置社区目录",
+  "description": "纯净静态托管在 GitHub Pages 上的社区目录源：只有一个 GET 端点，全量返回，筛选在小墨这边做。同一份文件 DSH 也能读（字段名与 DSH catalog-provider 契约一致）。",
+  "homepage": "https://yumoii789.github.io/xiaomo-lab/",
+  "attribution": {
+    "name": "小墨实验室",
+    "url": "https://github.com/yumoii789/xiaomo-lab",
+    "notice": "目录里的元数据不代表安全审查：装不装由你在安装确认框里决定。"
+  },
+  "transport": {
+    "kind": "https-json",
+    "endpoint": "https://yumoii789.github.io/xiaomo-lab/market/v1/plugins",
+    "method": "GET"
+  },
+  "query": {
+    "supported": [],
+    "defaultLimit": 50,
+    "maxLimit": 50,
+    "sorts": []
+  }
+}

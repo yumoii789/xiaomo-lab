@@ -15,9 +15,13 @@ const RULES = [
     id: 'meter-overload',
     name: '电表过载',
     check(e) {
-      if (e.type !== 'ammeter' && e.type !== 'voltmeter') return null;
-      const isA = e.type === 'ammeter';
-      const fs = Number(e.props.fullScale) || (isA ? 0.6 : 3);
+      if (!(e.type === 'ammeter' || e.type === 'voltmeter' || e.type === 'multimeter')) return null;
+      // ⚠ 档别与量程都走器材自己的**单一取值口** `meterMode`/`meterFull` ✓（不读 props ✗）：
+      //   电流表/电压表逐字返回 `props.mode`/`props.fullScale` ⇒ 两行对旧器材行为完全相同 ✓；
+      //   多用电表返回**拨盘档位**的量程与档别 ⇒ 拨到 A3 就以 3 A 判、V15 就以 15 V 判 ✓，
+      //   而 `props.fullScale` 对它**根本不存在**（defaults 只有 dial/realistic/realR ✗）。
+      const isA = e.meterMode === 'A';
+      const fs = Number(e.meterFull) || (isA ? 0.6 : 3);
       const v = Math.abs(isA ? (e.state.I || 0) : (e.state.U || 0));
       if (v > fs * 1.5) {
         return {

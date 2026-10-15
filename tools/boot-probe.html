@@ -185,6 +185,41 @@ fr.addEventListener('load', () => {
       } catch (e) {
         log('状态栏自检异常: ' + (e && e.stack ? e.stack : e));
       }
+
+      // ── 主题与深浅色自省 ──
+      // 默认策略是「跟随系统」，所以必须能一眼看出：生效值是不是真的跟着系统走、
+      // 存下来的到底是「意图」还是「当时生效的值」、以及有没有回到跟随系统的入口。
+      log('');
+      log('=== 主题与深浅色 ===');
+      try {
+        const w2 = fr.contentWindow;
+        const d3 = fr.contentDocument;
+        const de = d3.documentElement;
+        const th = w2.xiaomo && w2.xiaomo.theme;
+        const sysLight = w2.matchMedia && w2.matchMedia('(prefers-color-scheme: light)').matches;
+        log('  html data-theme / data-mode : ' + de.dataset.theme + ' / ' + de.dataset.mode);
+        log('  html style.colorScheme      : ' + (de.style.colorScheme || '(未设)'));
+        log('  系统偏好                    : ' + (sysLight ? '浅色' : '深色'));
+        if (th) {
+          log('  theme.mode / effective      : ' + th.mode + ' / ' + th.effective);
+          log('  主题 id 与总数              : ' + th.id + '（' + th.list().length + ' 个主题）');
+          log('  生效值是否跟随系统          : ' + (th.mode === 'system'
+            ? (th.effective === (sysLight ? 'light' : 'dark') ? '是 ✓' : '否 ✗ 与系统不一致')
+            : '不适用（模式是显式的 ' + th.mode + '）'));
+        }
+        const ls = w2.localStorage;
+        log('  localStorage mode           : ' + JSON.stringify(ls.getItem('xiaomo.mode.v1')));
+        log('  localStorage intent 标记    : ' + JSON.stringify(ls.getItem('xiaomo.mode.intent.v1')));
+        const auto = d3.querySelector('.theme-dot.auto');
+        log('  「自动」圆点 存在 / 选中    : ' + !!auto + ' / ' + (auto ? auto.classList.contains('active') : '?'));
+        log('  主题圆点总数                : ' + d3.querySelectorAll('.theme-dot').length + '（含自动圆点）');
+        if (auto && th) {
+          auto.click();
+          log('  点击「自动」后 theme.mode   : ' + th.mode + (th.mode === 'system' ? '  ✓ 能回到跟随系统' : '  ✗ 回不去'));
+        }
+      } catch (e) {
+        log('主题自检异常: ' + (e && e.stack ? e.stack : e));
+      }
     } catch (e) {
       log('探针自身异常: ' + (e && e.stack ? e.stack : e));
     }

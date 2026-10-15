@@ -31,6 +31,19 @@ function hexRGB(h) {
   return [139, 92, 246];
 }
 
+/**
+ * 全局实验速度档（B1）。
+ *
+ * ⚠ **档位数值是我方自定的**：NB 的 min/max/step 序列化值在 `data.unity3d` 的 LZ4 块里、
+ *   **未取到**（`plans/10` §11.1 明写「B1 不许照抄具体档位」）⇒ 这里只承诺三件事：
+ *   **多档 · 档位可读 · 只改时间步进不改物理结果**，不声称与 NB 的档位一一对应 ✗。
+ *
+ * ⚠ **与物理的关系（B1 的判据）**：`frame()` 永远以 `this.fixed`（1/120 s）调
+ *   `world.step()`，`speed` 只决定**每帧往累加器里喂多少模拟时间** ⇒
+ *   **同一模拟时刻的状态与档位无关**（探针按档位逐位比对，而不是只看稳态读数）。
+ */
+export const SPEEDS = [0.1, 0.25, 0.5, 1, 2, 4];
+
 export class Engine {
   constructor(canvas, world) {
     this.canvas = canvas;
@@ -38,7 +51,10 @@ export class Engine {
     this.world = world;
 
     this.w = 0; this.h = 0; this.dpr = 1;
-    this.speed = 1;              // 1 = 正常, 0.25 = 慢动作
+    /** 当前速度档（B1 的真源）；合法值**恒为** this.speeds 的元素（setSpeed 会吸附） */
+    this.speed = 1;
+    /** 档位表（B1）：UI 从这里取档，不再把 0.25/1 硬编码在工具栏里 */
+    this.speeds = SPEEDS.slice();
     this.fixed = 1 / 120;
     this.acc = 0;
     this.maxSteps = 10;
@@ -118,6 +134,27 @@ export class Engine {
   }
 
   stop() { if (this._raf) cancelAnimationFrame(this._raf); this._raf = null; }
+
+  /**
+   * 设置速度档（B1）。传入任意正数都**吸附到最近的档** ⇒ `speed` 永远是合法档位
+   * ⇒ 「当前档位可读」这条恒成立，不会出现 0.3× 这种不在档位表里、UI 也显示不出来的值。
+   * 非正数/非有限值一律**保持原档**（返回原值），不静默改成 0（停了不动不是速度档）。
+   */
+  setSpeed(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return this.speed;
+    let best = this.speeds[0];
+    for (const s of this.speeds) if (Math.abs(s - n) < Math.abs(best - n)) best = s;
+    this.speed = best;
+    return this.speed;
+  }
+
+  /** 档位文案（B1 的「档位可读」）：`1×` / `0.25×` —— 徽标与 toast 共用同一个来源 */
+  speedLabel(v = this.speed) {
+    const x = Number(v);
+    if (!Number.isFinite(x)) return '—';
+    return (Math.round(x * 100) / 100) + '×';
+  }
 
   /**
    * 一帧：固定步长推进 + 脏检查后决定是否渲染（B1）

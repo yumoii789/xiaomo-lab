@@ -129,6 +129,14 @@ export class ThemeManager {
       root.dataset.theme = t.id;
       root.dataset.mode = eff;
       root.style.colorScheme = eff;
+      // 手机状态栏 / 浏览器 chrome 的颜色要跟着「生效的主题」走 —— 本应用可以手动
+      // 切深浅色，写两条按 prefers-color-scheme 的 meta 只跟 OS，手动切换时颜色就错了。
+      // 配色真值只有一份：--bg 刚刚在上面被刷成当前主题的值，这里只把它转写到 meta 上。
+      const meta = document.querySelector('meta[name="theme-color"]');
+      if (meta) {
+        const bg = tokens.bg || getComputedStyle(root).getPropertyValue('--bg').trim();
+        if (bg) meta.setAttribute('content', bg);
+      }
     }
 
     Object.assign(C, DEFAULT_C, (t.canvas && t.canvas[eff]) || {});

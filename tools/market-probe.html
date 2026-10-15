@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>插件市场探针</title>
+<style>
+  body{margin:0;background:#0d1117;color:#e6edf3;font:13px/1.6 ui-monospace,Consolas,monospace}
+  pre{padding:12px;white-space:pre-wrap;word-break:break-word}
+  #fr{position:absolute;left:-20000px;top:0;width:1440px;height:900px;border:0}
+  #json{padding:10px;background:#161b22;border-top:1px solid #30363d;color:#7ee787}
+</style>
+</head>
+<body>
+<!--
+  插件市场探针：把六条验收标准在真实浏览器里跑一遍，最后吐一行机器可读的 MARKET_JSON。
+  为什么用 iframe：市场会真的动态 import 第三方代码、注册插槽、改 host.stats()，
+  必须在一个完整的 App 实例里跑，而不是在 Node 里假装。
+  为什么 URL 上要挂 cb：ES module 图会被浏览器缓存，之前有两个人被缓存骗过。
+-->
+<iframe id="fr"></iframe>
+<pre id="log"></pre>
+<div id="json"></div>
+<script type="module">
+const CB = 'cb=' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const logEl = document.getElementById('log');
+const jsonEl = document.getElementById('json');
+const R = { ok: false, tests: [] };
+
+function line(s) { logEl.textContent += s + '\n'; }
+function push(name, pass, detail) {
+  R.tests.push({ name, pass: !!pass, detail: detail === undefined ? '' : String(detail).slice(0, 300) });
+  line((pass ? 'PASS  ' : 'FAIL  ') + name + (detail ? '   |  ' + detail : ''));
+}
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+async function until(fn, ms = 6000, step = 100) {
+  const t0 = Date.now();
+  for (;;) {
+    let v = null;
+    try { v = fn(); } catch { v = null; }
+    if (v) return v;
+    if (Date.now() - t0 > ms) return null;
+    await wait(step);
+  }
+}
+const code = (e) => (e && e.code) || ('(无 code: ' + (e && e.message) + ')');
+
+async function main() {
+  const fr = document.getElementById('fr');
+  const base = new URL('../index.html', location.href);
+  base.searchParams.set('cb', CB);
+  line('# 探针 ' + CB + ' → ' + base.href);
+  fr.src = base.href;
+
+  await new Promise((r) => { fr.addEventListener('load', r, { once: true }); });
+  const W = fr.contentWindow;
+  // 从最早的时刻开始收集 iframe 里的未捕获错误：插件里的事件回调一旦抛异常，
+  // 表现只是「点了没反应」，有这张错误清单才能当场定位。
+  R.errors = [];
+  W.addEventListener('error', (e) => R.errors.push('error: ' + (e.message || '') + ' @' + (e.filename || '').split('/').pop() + ':' + (e.lineno || '')));
+  W.addEventListener('unhandledrejection', (e) => R.errors.push('reject: ' + ((e.reason && e.reason.message) || e.reason)));
+  const app = await until(() => (W.xiaomo && W.xiaomo.host ? W.xiaomo : null), 8000);
+  if (!app) throw new Error('iframe 里没有 window.xiaomo（应用没起来）');
+  const doc = W.document;
+  await until(() => app.inventory && app.inventory.snapshot().items.length > 0, 6000);
+  line('# 应用已就绪：' + app.inventory.snapshot().items.length + ' 个插件在清单里');
+  R.host = { plugins: app.host.stats().total, equipment: app.host.stats().equipment };
+
+  // ── 0. 让市场服务就位（不在 index.js 里注册也能自证） ──
+  const UI_ID = 'xiaomo.ui.market';
+  let uiMode = 'registered-by-index';
+  if (!app.host.get(UI_ID)) {
+    uiMode = 'probe-installed';
+    // 关键：必须在 **iframe 自己的 realm** 里 import。
+    // 跨 realm 导入拿到的是父页面的模块实例，它的 document 是父文档 ——
+    // 插件的浮层会被建到探针页面里去（我们踩过一次，表现是「点了没反应、层找不到」，
+    // 而且父窗口上的事件监听器也收不到 iframe 里派发的事件）。
+    const okInstall = await W.eval(`(async () => {
+      const m = await import('/src/plugins/ui.market.js?cb=${CB}');
+      const h = window.xiaomo.host;
+      if (h.get('${UI_ID}')) return true;
+      h.define(m.default);
+      return h.install('${UI_ID}');
+    })()`);
+    if (!okInstall) throw new Error('市场界面插件装载失败：' + JSON.stringify(app.host.get(UI_ID) && app.host.get(UI_ID).error));
+  }
+  R.uiMode = uiMode;
+  const market = app.services.market;
+  if (!market) throw new Error('app.services.market 不存在（市场界面插件没把服务交出来）');
+  line('# 市场服务已就位（' + uiMode + '）：' + market.listSources().length + ' 个来源');
+
+  // 从干净状态开始：把上次跑剩下的来源与已装记录先清掉，基线才有意义
+  for (const rec of market.installedList()) market.uninstall(rec.id);
+  for (const s of market.listSources()) market.removeSource(s.id);
+  const devManifest = new URL('../market/_dev-fixtures/dev/catalog-source.local.json', location.href).href;
+  if (!market.listSources().length) await market.addSource(devManifest);
+  const srcId = market.listSources()[0].id;
+  line('# 来源：' + srcId);
+
+  // ══ ① 拉到自带目录并渲染出条目 ══
+  let cat = null;
+  try {
+    cat = await market.fetchCatalog(srcId);
+    push('① 拉到自带目录（' + cat.items.length + ' 条，来源「' + cat.source.name + '」）', cat.items.length === 2, 'items=' + cat.items.length);
+    R.catalog = { source: cat.source.providerId, items: cat.items.map((i) => i.id), sidecar: cat.extensions.found };
+    push('① 旁挂安装信息就位（xiaomo-extensions.json）', cat.extensions.found === true, cat.extensions.url);
+  } catch (e) {
+    push('① 拉到自带目录', false, e.message);
+    throw e;
+  }
+
+  // 打开抽屉：走真实用户路径（点顶栏 🛒），而不是只发事件
+  const cart = doc.getElementById('btnMarket');
+  push('① 顶栏出现 🛒 入口按钮', !!cart);
+  if (cart) cart.click();
+  const rows = await until(() => {
+    const n = doc.querySelectorAll('.drawer-mask.show .mk-item').length;
+    return n > 0 ? n : null;
+  }, 7000);
+  R.drawer = {
+    mask: doc.querySelectorAll('[data-slot=overlay] .drawer-mask').length,
+    otherMasks: [...doc.querySelectorAll('[data-slot=overlay] .drawer-mask')].filter((m) => !m.querySelector('.mk-item')).length,
+    show: !!doc.querySelector('.drawer-mask.show'),
+    rows: doc.querySelectorAll('[data-slot=overlay] .drawer-mask .mk-item').length,
+    visibleRows: rows || 0,
+  };
+  push('① 抽屉打开并渲染出条目（.mk-item 行数 = ' + (rows || 0) + '）', (rows || 0) === 2, JSON.stringify(R.drawer));
+  const hasThirdBadge = !!doc.querySelector('.drawer-mask.show .mk-item .plug-chip');
+  push('① 条目行上有种类/提示徽标', hasThirdBadge);
+
+  // ══ ② 安装第三方代码插件 → active，host.stats().total 增加 ══
+  const t0stats = app.host.stats();
+  const timer = cat.items.find((i) => i.id === 'lab-timer');
+  const booster = cat.items.find((i) => i.id === 'equipment-booster');
+  const pv = await market.installCheck(timer);
+  push('② 安装前预览：哈希校验通过、拿到字节数', pv.hashOk === true && pv.bytes === 6207, `${pv.actualSha.slice(0, 12)}… / ${pv.bytes}B / ${pv.kind}/${pv.pluginId}`);
+  R.preview = { hashOk: pv.hashOk, bytes: pv.bytes, sha8: pv.actualSha.slice(0, 12), declared: pv.declaredSha.slice(0, 12) };
+
+  const ins1 = await market.install(timer);
+  const ins2 = await market.install(booster);
+  const stats1 = app.host.stats();
+  const snap = app.inventory.snapshot();
+  const rec1 = snap.items.find((i) => i.id === ins1.id);
+  const rec2 = snap.items.find((i) => i.id === ins2.id);
+  push('② 界面插件装上了并且是 active', rec1 && rec1.phase === 'active', JSON.stringify(rec1 && { phase: rec1.phase, kind: rec1.kind, contributions: rec1.contributions }));
+  push('② 器材插件装上了并且是 active', rec2 && rec2.phase === 'active', JSON.stringify(rec2 && { phase: rec2.phase, kind: rec2.kind, contributions: rec2.contributions, error: rec2.error }));
+  push('② host.stats().total 增加了 2（' + t0stats.total + ' → ' + stats1.total + '）', stats1.total === t0stats.total + 2);
+  push('② 社区插件真的往实验台加了器材（equipment ' + t0stats.equipment + ' → ' + stats1.equipment + '）', stats1.equipment === t0stats.equipment + 3);
+  push('② 装载零失败（failed === 0）', stats1.failed === 0, 'failed=' + stats1.failed);
+  R.install = { total: [t0stats.total, stats1.total], equipment: [t0stats.equipment, stats1.equipment], failed: stats1.failed, ids: [ins1.id, ins2.id] };
+
+  // 界面插槽是真的生效了：顶栏出现 ⏱，点开出现浮层
+  const btn = await until(() => doc.getElementById('btnLabTimer'), 3000);
+  push('② 插件往 topbar.right 插槽里真的插上了按钮', !!btn && btn.isConnected, btn ? 'isConnected=' + btn.isConnected : '');
+  if (btn) {
+    btn.click();
+    await wait(150);
+    const panel = doc.querySelector('.mk-timer');
+    // 面板可能落到了别的 document（realm 混用）—— 两边都数一遍，别猜
+    const inProbe = document.querySelectorAll('.mk-timer').length;
+    const inFrame = doc.querySelectorAll('.mk-timer').length;
+    push('② 点击后浮层出现（第三方插件自建 DOM 生效）', !!panel && W.getComputedStyle(panel).display !== 'none',
+      panel ? 'display=' + W.getComputedStyle(panel).display : `inFrame=${inFrame} inProbe=${inProbe} connected=${btn.isConnected} errors=${JSON.stringify(R.errors)}`);
+    R.timerPanel = !!panel;
+    R.timerDiag = { inFrame, inProbe, connected: btn.isConnected, html: (btn.outerHTML || '').slice(0, 80) };
+  }
+
+  // ══ ③ 卸载 → 清单与宿主里都消失 ══
+  const before = app.host.stats().total;
+  market.uninstall(ins1.id);
+  market.uninstall(ins2.id);
+  const stats2 = app.host.stats();
+  const snap2 = app.inventory.snapshot();
+  push('③ 卸载后清单里没有这两个插件', !snap2.items.some((i) => i.id === ins1.id || i.id === ins2.id));
+  push('③ 卸载后宿主里也没有这两个记录', !app.host.get(ins1.id) && !app.host.get(ins2.id));
+  push('③ host.stats().total 回落到基线（' + before + ' → ' + stats2.total + '，基线 ' + t0stats.total + '）', stats2.total === t0stats.total);
+  push('③ 器材也一并撤掉了（equipment ' + stats1.equipment + ' → ' + stats2.equipment + '）', stats2.equipment === t0stats.equipment);
+  await wait(150);
+  push('③ 插件插进顶栏的按钮被拆掉了（不留孤儿 DOM）', !doc.getElementById('btnLabTimer'));
+  push('③ 插件自建的浮层也被拆掉了', !doc.querySelector('.mk-timer'));
+  R.uninstall = { total: [before, stats2.total, t0stats.total], equipment: [stats1.equipment, stats2.equipment, t0stats.equipment], ghostBtn: !!doc.getElementById('btnLabTimer') };
+
+  // ══ ④ 篡改哈希 → 拒绝安装，且错误可读 ══
+  const tampered = { ...timer, entry: { ...timer.entry, sha256: 'f'.repeat(64) } };
+  const pv2 = await market.installCheck(tampered);
+  push('④ 篡改后预览显示哈希不通过', pv2.hashOk === false);
+  let err4 = null;
+  try { await market.install(tampered); } catch (e) { err4 = e; }
+  push('④ 篡改后安装被拒绝（code=' + code(err4) + '）', code(err4) === 'hash-mismatch');
+  push('④ 拒绝信息可读（含「哈希不符」与两侧哈希）', !!err4 && /哈希不符/.test(err4.message) && /目录声明/.test(err4.message), err4 && err4.message);
+  push('④ 被拒后没有留下半个插件', !app.inventory.snapshot().items.some((i) => i.id === ins1.id));
+  R.hashReject = { previewHashOk: pv2.hashOk, code: code(err4), msgHead: err4 ? err4.message.slice(0, 60) : '' };
+
+  // ══ ⑤ 非 HTTPS 来源 → 拒绝 ══
+  let err5 = null;
+  try { await market.addSource('http://example.com/market/catalog-source.json'); } catch (e) { err5 = e; }
+  push('⑤ 明文 http 来源被拒（code=' + code(err5) + '）', code(err5) === 'insecure-url', err5 && err5.message);
+  let err5b = null;
+  const badEp = new URL('../market/_dev-fixtures/dev/bad-endpoint/catalog-source.local.json', location.href).href;
+  try { await market.addSource(badEp); } catch (e) { err5b = e; }
+  push('⑤ 端点路径不合契约 pattern 的来源被拒（code=' + code(err5b) + '）', code(err5b) === 'bad-endpoint', err5b && err5b.message);
+  R.insecure = { http: code(err5), badEndpoint: code(err5b) };
+
+  // ══ ⑥ 恶意目录（内联代码）→ 整页拒绝 ══
+  const badManifest = new URL('../market/_dev-fixtures/dev/bad/catalog-source.local.json', location.href).href;
+  let badSrc = null; let err6 = null;
+  try {
+    badSrc = await market.addSource(badManifest);
+    await market.fetchCatalog(badSrc.id);
+  } catch (e) { err6 = e; }
+  push('⑥ 内联代码的目录被整页拒绝（code=' + code(err6) + '）', code(err6) === 'code-not-allowed', err6 && err6.message);
+  R.badCatalog = { code: code(err6), msgHead: err6 ? err6.message.slice(0, 60) : '' };
+  if (badSrc) market.removeSource(badSrc.id);
+
+  // ══ 附带：跨站被拒要说人话，不能静默成空目录 ══
+  let err7 = null;
+  try { await market.addSource('https://not-exist.invalid/market/catalog-source.json'); } catch (e) { err7 = e; }
+  push('⑦ 拉不到来源时错误可读（不静默成空目录）', !!err7 && /CORS|跨站读取|网络|HTTP/.test(err7.message), code(err7) + ' / ' + (err7 && err7.message));
+
+  // ══ 收尾：关抽屉，把这次装的东西清干净 ══
+  for (const rec of market.installedList()) market.uninstall(rec.id);
+  W.dispatchEvent(new W.CustomEvent('xiaomo:market', { detail: false }));
+  R.ok = R.tests.every((t) => t.pass);
+  R.summary = { pass: R.tests.filter((t) => t.pass).length, total: R.tests.length };
+}
+
+let fatal = null;
+try { await main(); } catch (e) {
+  fatal = (e && e.message) || String(e);
+  push('探针执行', false, fatal);
+  R.ok = false;
+}
+R.fatal = fatal;
+R.errors = (R.errors || []).slice(0, 5);
+line('');
+line((R.ok ? '全部通过：' : '有失败：') + (R.summary ? R.summary.pass + '/' + R.summary.total : '—') + (fatal ? '  致命：' + fatal : ''));
+const payload = 'MARKET_JSON ' + JSON.stringify(R);
+jsonEl.id = 'json';
+jsonEl.textContent = payload;
+logEl.textContent += payload + '\n';
+</script>
+</body>
+</html>

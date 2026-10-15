@@ -1,0 +1,17 @@
+# 换行符策略
+#
+# 为什么需要这个文件：本项目的插件市场按 **sha256 钉死字节**——目录里声明的哈希
+# 与用户实际拉到的字节必须逐字节一致，否则安装会被自己的校验拒绝。
+# 而 Git 在 Windows 上的默认设置（`core.autocrlf=true`）会把仓库里的 LF 在检出时
+# 翻成 CRLF，于是「开发者本地的文件」和「发布出去的字节」不再相同。
+#
+# `text eol=lf` 的含义是：入库时规范化为 LF，检出时也强制 LF。
+# 这样三方（仓库、发布、用户拉取）看到的字节完全一致，而文件仍然算文本文件、能正常 diff。
+#
+# 只钉死按哈希分发的内容，不动其余源码：全仓库改 EOL 策略会产生巨大的空白差异，
+# 而那些文件不参与哈希校验，没有必要冒险。
+market/plugins/*.js text eol=lf
+market/v1/plugins text eol=lf
+market/v1/xiaomo-extensions.json text eol=lf
+market/catalog-source.json text eol=lf
+market/market-selftest.mjs text eol=lf

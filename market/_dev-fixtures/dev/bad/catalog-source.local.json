@@ -1,0 +1,23 @@
+{
+  "manifestVersion": "1.0.0",
+  "providerId": "lab.xiaomo.bad-fixture",
+  "name": "小墨实验室 · 恶意目录fixture（仅用于验证拒绝路径）",
+  "description": "故意的坏数据：它指向的目录页里塞了契约明确禁止的字段（内联代码 / 命令）。探针用它证明「坏数据被拒绝、且错误可读」，正常用户永远不会登记它。",
+  "homepage": "https://yumoii789.github.io/xiaomo-lab/",
+  "attribution": {
+    "name": "小墨实验室 · 自测夹具",
+    "url": "https://github.com/yumoii789/xiaomo-lab",
+    "notice": "这是一个测试夹具，不是真实的社区来源。"
+  },
+  "transport": {
+    "kind": "https-json",
+    "endpoint": "http://127.0.0.1:7373/market/_dev-fixtures/dev/bad/v1/plugins",
+    "method": "GET"
+  },
+  "query": {
+    "supported": [],
+    "defaultLimit": 50,
+    "maxLimit": 50,
+    "sorts": []
+  }
+}

@@ -21,6 +21,14 @@ npm install       # 首次约 100 MB，装 Electron
 npm start         # 打开窗口
 ```
 
+不想克隆仓库的话，也可以让 npm 从 GitHub 直接装成一条全局命令 —— 依赖同样由 npm 管理，
+**本项目不提供 exe 安装包**：
+
+```bash
+npm i -g github:yumoii789/xiaomo-lab    # 连同 Electron 一起装好（约 100 MB）
+xiaomo-lab                              # 打开窗口
+```
+
 或者直接双击仓库根目录的 **`启动小墨实验室.cmd`**，它会自动检查依赖并拉起窗口。
 
 > **国内网络提示**：Electron 的二进制默认从 GitHub 下载，经常连不上。
@@ -29,9 +37,25 @@ npm start         # 打开窗口
 
 最低兼容 **Windows 10**；macOS 和 Linux 用同一份代码，也会走同一条路径。
 
+### 无网络环境
+
+**运行期不需要网络。** 首屏（`index.html` + `src/` + `styles/`）由桌面版自己的 `app://`
+协议从包内磁盘供给，启动、器材、插件装载都不联网。只有**首次装依赖**那一步要网络 ——
+Electron 的二进制（约 100 MB）由 npm 下载：
+
+- 在有网的机器上装好 `node_modules/` 与 `desktop/node_modules/`，把整个目录拷到离线机器即可；
+- 或者用 `desktop/.npmrc` 里已经配好的 npmmirror 镜像加速。
+
+插件市场在离线时用**随包发布的离线目录**（`market/catalog-source.local.json` →
+`market/v1/plugins`，内容与 Pages 上那份一致），所以没有网也能浏览并安装目录里的插件。
+想要实时目录的话，有网时到「来源」页登记
+`https://yumoii789.github.io/xiaomo-lab/market/catalog-source.json` 即可。
+
 ### 网页版
 
-前端是零依赖的原生 ES Module，不需要构建，但**不能直接双击 `index.html`**
+**在线版**：<https://yumoii789.github.io/xiaomo-lab/> —— 打开就能用，不用装任何东西。
+
+本地跑：前端是零依赖的原生 ES Module，不需要构建，但**不能直接双击 `index.html`**
 （`file://` 协议下浏览器会因 CORS 拒绝加载模块）。起一个静态服务器：
 
 ```bash
@@ -129,14 +153,20 @@ export default {
 
 ---
 
-## 学分系统
+## 学分系统（娱乐功能，可关闭）
 
-开启后，器材损坏会扣学分，正确完成实验会加学分：
+学分是**娱乐性功能**，不影响实验本身。它默认开启，可以在 **设置** 面板里随时关闭；
+关闭后器材损坏照样发生，只是不再扣分、也不会被请出实验室。
+
+开启时：
 
 - 满分 **100**，右上角徽章实时显示
 - 完成实验、正确连接、观察现象 → 加分
 - 电流表超量程、灯泡烧毁、干烧玻璃器皿、骤冷炸裂 → 扣分
 - 扣到 **0** 会被请出实验室，重新进入即可恢复学分和实验进度
+
+它本身就是一个**普通插件**（`src/plugins/system.credit.js`），可以在插件管理器里停用，
+也可以直接改源码——关掉它不会影响任何其他功能。
 
 ---
 

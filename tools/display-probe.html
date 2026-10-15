@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>大屏可读模式探针 · display.css / 设置开关</title>
+<style>
+  body{margin:0;padding:16px;background:#0b0f0d;color:#a3e635;font:12.5px/1.7 Consolas,'Cascadia Mono',monospace}
+  h1{font-size:14px;color:#e7efe9;margin:0 0 8px}
+  pre{margin:0;white-space:pre-wrap;word-break:break-all;color:#cfe8b8}
+  iframe{position:absolute;left:-20000px;top:0;width:1920px;height:1080px;border:0}
+</style>
+</head>
+<body>
+<h1>大屏可读模式探针（无头诊断；tools/ 不参与打包，属仓库外内容）</h1>
+<pre id="out">加载中…</pre>
+<iframe id="fr" title="被测应用"></iframe>
+<script>
+// ══════════════════════════════════════════════════════════
+// 这个探针验什么（task-18 的正式证据，可反复复跑）
+//   把真实 index.html 装进**固定尺寸**的离屏 iframe（1920×1080 / 3840×2160），
+//   用真实设置面板里的那个开关，机械地验：
+//     ① 默认态：不删 localStorage 就是「关」—— 根元素没有 .big-read、开关 aria-checked=false
+//     ② 开→关→开：元素总数不变、**节点身份不变**（切换前给每个元素打标，之后逐个 isConnected），
+//        抽屉不会被反复切换搞出重复节点（task-7 的旧病）
+//     ③ 5 个代表元素 × 2 个视口的字体/盒高，关/开两态都给原始像素值，并断言「同比例尺」
+//        （字号增量必须是同一个 --br-fs：正文 12.5→15.5、状态栏 11→14…）
+//     ④ 无布局破坏：元素总数不变、scrollWidth ≤ clientWidth+1、#stage 宽度 ±2px、#statusbar 高度不变
+//     ⑤ 持久化：开启 → 换 URL 冷启动 → 根元素仍带 .big-read、键仍为 '1'
+//     ⑥ 触控共存（需 CDP 模拟粗指针才会真跑，见下）：开/关两态的**真实命中高度**
+//        （用 elementFromPoint 逐像素扫，不是算出来的）不得退化
+//     ⑦ reduce-motion（需 CDP 模拟）：display.css 自己声明 0 条动效；关键元素的
+//        transition/animation 计算值在开/关两态逐字相同
+//     ⑧ 首帧不闪：同一份 index.html 用 srcdoc 装两次 —— 带那段内联脚本 / 从内存里摘掉它，
+//        读「解析 <head> 时」与「第 1 个 rAF」的根元素 class。**两个方向都要有读数**：
+//        有脚本 → 首帧已在；没有 → 首帧不在、之后才出现（后者正是被消掉的那一次闪烁）。
+//        顺带用同一套装置把主题脚本的浅/深冷启动各测一次（零回归）
+//
+// 怎么读它的输出
+//   每行一条 [PASS] / [FAIL] / [SKIP]，最后一行 `DISPLAY_JSON {...}` 是机器可读结论。
+//   打开方式（务必带 cache-buster）：
+//     http://127.0.0.1:7373/tools/display-probe.html?cb=<随机串>
+//   ⑥⑦ 两组需要「媒体特性模拟」，普通浏览器里跑不出粗指针/reduce，所以它们会 SKIP
+//   并打印当前实测的媒体值。无头跑法（tools/ 里不留脚手架）：
+//     node %TEMP%\display-runner.mjs    ← 起 Edge、跑主套件、再依次
+//       Emulation.setTouchEmulationEnabled / Emulation.setEmulatedMedia(prefers-reduced-motion)
+//       后调用本页暴露的 window.__probeTouch() / window.__probeReduce()
+//   ⑨ 跨层命中热区矩阵（runner 调用 window.__probeHitMatrix(w,h,form) 四次）：
+//       行 = 顶栏每个可交互控件 + 画布浮层控件，列 = 大屏模式关/开；每格给**逐像素
+//       elementFromPoint 扫出的真实命中矩形** + 命中密度 + 视觉尺寸。为什么要有它：命中热区
+//       是三层叠出来的（main.css 的盒子 → touch.css 的粗指针层 → 本模式的 display.css），
+//       任何单一属主的测试都只看得到自己那一层 —— task-25 里「本模式的 height:38px 把
+//       t1 刚修好的 44px 压回 38px」就是这么才暴露的。第 4 列（触控形态）还会记下
+//       any-pointer/pointer/hover 的**实测值**，避免「以为在量粗指针、其实没生效」。
+//
+// 与用户共用同一份 localStorage：进入时记下 xiaomo.display.v1 的原值，结束时还原。
+// ══════════════════════════════════════════════════════════
+
+const out = document.getElementById('out');
+const fr = document.getElementById('fr');
+const lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); };
+
+/**
+ * 等 ms 毫秒：用 MessageChannel 让出主线程，不用 setTimeout。
+ * 这台浏览器是多人共用的 —— 标签页被切到后台时 setTimeout 会被浏览器压制，
+ * 探针会凭空卡在半路。Date.now 不受节流影响，所以按挂钟等、每一轮都让出事件循环。
+ */
+const chan = new MessageChannel();
+const step = () => new Promise((r) => { chan.port1.onmessage = () => r(); chan.port2.postMessage(0); });
+const wait = async (ms) => { const t0 = Date.now(); do { await step(); } while (Date.now() - t0 < ms); };
+const until = async (fn, ms = 15000) => {
+  const t0 = Date.now();
+  for (;;) {
+    let v = false; try { v = fn(); } catch (e) { /* 状态还没到 */ }
+    if (v) return true;
+    if (Date.now() - t0 > ms) return false;
+    await step();
+  }
+};
+
+const R = [];
+const chk = (ok, label, extra) => {
+  R.push({ ok: !!ok, label, extra: extra === undefined ? null : extra });
+  log(`${ok ? '[PASS]' : '[FAIL]'} ${label}${extra === undefined ? '' : '  ' + JSON.stringify(extra)}`);
+};
+const skip = (label, extra) => { R.push({ ok: true, skip: true, label, extra: extra === undefined ? null : extra }); log(`[SKIP] ${label}${extra === undefined ? '' : '  ' + JSON.stringify(extra)}`); };
+const f = (n, d = 2) => (Number.isFinite(Number(n)) ? Number(n).toFixed(d) : String(n));
+
+const KEY = 'xiaomo.display.v1';
+const VIEWPORTS = [[1920, 1080], [3840, 2160]];
+/** 5 个代表元素：fs = 被断言字号的元素，box = 被断言盒高的元素 */
+const CASES = [
+  { id: 'palette-name', name: '器材栏行名称', fs: '#palette .pitem .pi-txt b', box: '#palette .pitem .pi-ico', boxDir: 'up' },
+  { id: 'toolbar-btn', name: '工具栏按钮', fs: '#topbar .tb-btn', box: '#topbar .tb-btn', boxDir: 'up' },
+  { id: 'status-text', name: '状态栏文字', fs: '#statusbar .st', box: '#statusbar', boxDir: 'same' },
+  { id: 'settings-desc', name: '设置面板正文', fs: '#setRowDisplay .plug-desc', box: '#setRowDisplay', boxDir: 'up' },
+  { id: 'field-label', name: '属性字段标签', fs: '#pane-inspector .field > label > span:first-child', box: '#pane-inspector .field', boxDir: 'up' },
+];
+/** 触控目标：touch.css 把热区钉在 44px 的那几个，加上顶栏两个靠伪元素扩边的。
+ *  .theme-dots 是浮在画布上的那一列（不在 #topbar 里），别按顶栏写选择器。
+ *  drawer:true 的控件藏在设置抽屉里，测量前得先把抽屉展开。 */
+const TOUCH_TARGETS = [
+  { sel: '.theme-dot', name: '主题圆点', drawer: false },
+  { sel: '#topbar .tb-btn', name: '顶栏按钮', drawer: false },
+  { sel: '#topbar .tb-check', name: '顶栏复选', drawer: false },
+  { sel: '.fx-orb', name: '浮动圆钮', drawer: false },
+  { sel: '.dock-btn', name: '抽屉按钮', drawer: false },
+  { sel: '.drawer-x', name: '抽屉关闭钮', drawer: true },
+];
+
+let W = null;                       // iframe 的 window
+let D = null;                       // iframe 的 document
+let tagged = [];                    // 打过标的元素引用（父 realm 持有；导航后失效）
+const css = (n, prop) => W.getComputedStyle(n)[prop];
+const one = (sel) => D.querySelector(sel);
+
+/** 应用里的开关：走真实抽屉、真实 .plug-switch，不是直接加 class */
+const setMode = async (on) => {
+  if (D.documentElement.classList.contains('big-read') === on) return true;
+  const b = one('#btnSettings');
+  if (!b) return false;
+  b.click();
+  await until(() => { const dr = one('.drawer[aria-label="设置"]'); return dr && dr.closest('.drawer-mask').classList.contains('in'); }, 5000);
+  const sw = one('#setRowDisplay .plug-switch');
+  if (!sw) return false;
+  sw.click();
+  return until(() => D.documentElement.classList.contains('big-read') === on, 5000);
+};
+
+/** 给当前文档里每个元素打标：之后逐个 isConnected，用来证明「切换不动节点身份」 */
+const tagAll = () => {
+  tagged = [];
+  let i = 0;
+  for (const n of D.querySelectorAll('*')) { n.__pid = ++i; tagged.push(n); }
+  return tagged.length;
+};
+const lostNodes = () => tagged.filter((n) => !n.isConnected).length;
+
+async function boot(w, h, cb) {
+  fr.style.width = w + 'px';
+  fr.style.height = h + 'px';
+  fr.src = `/index.html?probe=${cb}`;
+  // 关键（这条是踩过坑的）：把 src 一设，**旧文档还在**——WindowProxy 要等新文档 commit 才换
+  // document。只等「xiaomo 在不在」会立刻拿到马上就要被换掉的旧文档，之后所有查询都在尸体上做：
+  // 现象是 clientWidth=0、元素查到但全是 0 尺寸、点开关毫无反应。k3/设置探针都用同一招躲它。
+  const marked = await until(() => {
+    try {
+      const w2 = fr.contentWindow;
+      return w2.location.search === `?probe=${cb}` && w2.document.readyState === 'complete';
+    } catch (e) { return false; }        // 导航中访问会抛，正是要跳过的时刻
+  }, 30000);
+  if (!marked) return false;
+  W = fr.contentWindow; D = W.document;
+  const ok = await until(() => !!(W.xiaomo && one('#btnSettings') && one('#palette .pitem')), 15000);
+  if (!ok) return false;
+  // 让检查器里有真实的属性字段可测（addEntity 会自动选中它）
+  try { W.xiaomo.addEntity('beaker', 400, 300); } catch (e) { /* 已经建过就算了 */ }
+  await until(() => one('#pane-inspector .field > label'), 4000);
+  // 冻住仿真：不冻的话日志面板会按挂钟继续 append / 裁剪节点，
+  // 「元素总数不变」就成了一句测不出东西的空话（第一次跑就是被它和上面那个竞态一起骗了）。
+  try { if (W.xiaomo.world && W.xiaomo.world.running) W.xiaomo.toggleRun(); } catch (e) { /* 没在跑就算了 */ }
+  await wait(150);
+  return true;
+}
+
+const measureAt = async (w, h, cb, label) => {
+  const ok = await boot(w, h, cb);
+  if (!ok) { chk(false, `${label}：应用没能在 ${w}×${h} 的 iframe 里就绪`, null); return null; }
+  // 先把设置抽屉打开：让「设置面板正文」在关/开两态都有真实布局盒
+  // （藏着的时候 getBoundingClientRect 是 0，拿 0 当基线等于没测）。抽屉是 fixed 浮层，
+  // 不影响 #stage 的宽度与文档溢出，两态同一条件，比较是公平的。
+  const btn = one('#btnSettings');
+  if (btn) { btn.click(); await until(() => { const dr = one('.drawer[aria-label="设置"]'); return dr && dr.closest('.drawer-mask').classList.contains('in'); }, 5000); }
+  // ── 探针自身的可信度自检：这三个不对，下面所有视口相关的读数都不算数 ──
+  const harness = {
+    innerWidth: W.innerWidth, clientWidth: D.documentElement.clientWidth,
+    desktopLayout: !W.matchMedia('(max-width:1024px)').matches,
+    scrollW: D.documentElement.scrollWidth, clientW: D.documentElement.clientWidth,
+  };
+  chk(harness.innerWidth === w && harness.clientWidth === w,
+    `${label}：iframe 布局视口就是 ${w}×${h}（自检）`, harness);
+  chk(harness.desktopLayout, `${label}：桌面三栏布局生效（未触发窄屏抽屉断点）`, { max1024: false });
+
+  // 结构性计数：只数「布局结构」那几样，不数总数（总数会被日志面板的增删带走）
+  const structOf = () => ({
+    plugRow: D.querySelectorAll('.drawer .plug-row').length,
+    switches: D.querySelectorAll('.drawer .plug-switch').length,
+    drawerMask: D.querySelectorAll('.drawer-mask').length,
+    setRowDisplay: D.querySelectorAll('#setRowDisplay').length,
+  });
+  // 基线必须等它自己稳定：应用挂载后还有一波延迟渲染（器材栏 / 数据面板），
+  // 不等就会把它算到「本次改动」头上 —— 第一次跑 3840 那一轮就是这么凭空多出 28 个节点的。
+  let c0 = D.querySelectorAll('*').length, zeroRuns = 0;
+  for (let i = 0; i < 10 && zeroRuns < 2; i++) {
+    await wait(320);
+    const c = D.querySelectorAll('*').length;
+    zeroRuns = (c === c0) ? zeroRuns + 1 : 0;
+    c0 = c;
+  }
+  const stageOff = one('#stage').getBoundingClientRect().width;
+  const structOff = structOf();
+  tagAll();
+  const rows = [];
+  for (const c of CASES) {
+    const n = one(c.fs);
+    const box = one(c.box);
+    rows.push({
+      id: c.id, name: c.name, boxDir: c.boxDir,
+      fsOff: n ? css(n, 'fontSize') : null,
+      boxOff: box ? box.getBoundingClientRect().height : null,
+      missing: !n ? c.fs : (box ? null : c.box),
+    });
+  }
+  const off = { stage: stageOff, count: c0, rows, struct: structOff, scrollW: harness.scrollW, clientW: harness.clientW };
+  // 控制组：打完标之后什么都不做、只等同样长的时间。之后任何「丢节点」都要跟它比而不是跟 0 比——
+  // 这个应用自己就会替换节点（同长度控制组实测丢 6/13 个），拿 0 当基线等于把应用的行为记到本次改动头上。
+  await wait(320);
+  const c1 = D.querySelectorAll('*').length;
+  const lost0 = lostNodes();
+  const lostDetail = tagged.filter((n) => !n.isConnected)
+    .map((n) => n.tagName + (n.className ? '.' + String(n.className).split(' ')[0] : '')).slice(0, 6);
+
+  // ── 开 ──
+  const on1 = await setMode(true);
+  chk(on1 && D.documentElement.classList.contains('big-read'), `${label}：设置面板里的开关把 .big-read 打开了`, { cls: D.documentElement.className, key: localStorage.getItem(KEY) });
+  await wait(320);              // color 有 160~200ms 过渡，等它结算
+  const after = { count: D.querySelectorAll('*').length, lost: lostNodes(), stage: one('#stage').getBoundingClientRect().width, struct: structOf() };
+  for (const r of rows) {
+    const n = one(CASES.find((c) => c.id === r.id).fs);
+    const box = one(CASES.find((c) => c.id === r.id).box);
+    r.fsOn = n ? css(n, 'fontSize') : null;
+    r.boxOn = box ? box.getBoundingClientRect().height : null;
+    r.colorOn = n ? css(n, 'color') : null;
+  }
+  const stageOn = after.stage, countOn = after.count;
+
+  // ── 关→开→关 反复切换：节点身份与总数都不能动 ──
+  const cycle = [];
+  for (const want of [false, true, false, true]) {
+    await setMode(want);
+    await step();
+    cycle.push({ want, cls: D.documentElement.classList.contains('big-read'), count: D.querySelectorAll('*').length, lost: lostNodes() });
+  }
+  const dup = structOf();
+  // 收尾：留成「关」，便于下一条断言与还原
+  await setMode(false);
+
+  return {
+    label, w, h, harness, off, stable: { c0, c1, lost0, lostDetail }, on: { count: countOn, lost: after.lost, stage: stageOn, rows, struct: after.struct }, cycle, dup,
+    scrollW: harness.scrollW, clientW: harness.clientW,
+  };
+};
+
+// ── ⑥ 触控共存：由 runner 打开粗指针模拟后调用 ─────────────
+const openDrawer = async () => {
+  const b = one('#btnSettings');
+  if (b) b.click();
+  await until(() => { const dr = one('.drawer[aria-label="设置"]'); return dr && dr.closest('.drawer-mask').classList.contains('in'); }, 5000);
+};
+const closeDrawer = async () => {
+  if (!one('.drawer-mask.show')) return;
+  W.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+  await until(() => !one('.drawer-mask.show'), 5000);
+};
+/** 真实命中高度：在元素中心竖线上逐像素问 elementFromPoint「这一点算谁」。
+ *  判定必须只是「命中的就是它、或它的子孙」—— **不能**写成 el.contains(n)：
+ *  那样任何被 html/body 接走的点都会被算成命中，第一次跑就因此多报了一截假数据。
+ *  kin 是「上下叠着的同族元素接走了」：圆点列/浮钮列用负边距叠在一起，
+ *  逐像素扫到交界处会被隔壁同族接走 —— 那也是可点区域，但必须标出来，不能当成本元素的高度。 */
+const hitSpanOf = (n, sel) => {
+  const r = n.getBoundingClientRect();
+  const cx = Math.round(r.left + r.width / 2);
+  let first = null, last = null, family = false;
+  for (let y = Math.floor(r.top) - 26; y <= Math.ceil(r.bottom) + 26; y++) {
+    const el = D.elementFromPoint(cx, y);
+    const self = !!el && (el === n || n.contains(el));
+    const kin = !!el && !self && !!el.matches && el.matches(sel);
+    if (self || kin) { if (kin) family = true; if (first === null) first = y; last = y; }
+    else if (first !== null && y > last) break;
+  }
+  return { hit: first === null ? null : last - first + 1, family };
+};
+window.__probeTouch = async () => {
+  // 先按当前媒体状态重新起一次应用：粗指针下的界面（浮钮 / 圆点列 / 抽屉按钮）
+  // 是 touch.js 在挂载期建的，只在「boot 之后才模拟」的话这些节点根本不存在。
+  await boot(1920, 1080, 'touch-' + Date.now());
+  const res = { media: { anyPointerCoarse: W.matchMedia('(any-pointer: coarse)').matches, pointerCoarse: W.matchMedia('(pointer: coarse)').matches }, boxes: [], selfCheck: null };
+  // 自检：命中测试本身在这个离屏 iframe 里可用吗（不可用下面所有数字都不算数）
+  const probe0 = one('#topbar .tb-btn');
+  res.selfCheck = probe0 ? { centerHit: (() => { const r = probe0.getBoundingClientRect(); const el = D.elementFromPoint(Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2)); return !!(el && (el === probe0 || probe0.contains(el))); })() } : null;
+
+  await closeDrawer();
+  for (const t of TOUCH_TARGETS) {
+    // 抽屉里的控件先展开、并且**等滑入动画停下来**：还在滑的时候
+    // getBoundingClientRect 已经有 44px 的盒子，但它的 x 还在视口外，
+    // elementFromPoint 一律返回 null（真实用户这时候也点不到它）。
+    if (t.drawer) { await openDrawer(); await wait(420); }
+    const n = one(t.sel);
+    if (!n) { res.boxes.push({ sel: t.sel, name: t.name, missing: true }); if (t.drawer) await closeDrawer(); continue; }
+    const r0 = n.getBoundingClientRect();
+    if (r0.width === 0 || r0.height === 0) {   // 这个视口/媒体下它根本没显示，报命中区是编数据
+      res.boxes.push({ sel: t.sel, name: t.name, hidden: true, visual: 0 });
+      if (t.drawer) await closeDrawer();
+      continue;
+    }
+    const rec = { sel: t.sel, name: t.name };
+    for (const on of [false, true]) {
+      D.documentElement.classList.toggle('big-read', on);
+      void D.documentElement.offsetHeight;          // 强制结算样式
+      const h = hitSpanOf(n, t.sel);
+      rec[on ? 'on' : 'off'] = { visual: Number(n.getBoundingClientRect().height.toFixed(2)), hit: h.hit, family: h.family };
+    }
+    D.documentElement.classList.toggle('big-read', false);
+    if (t.drawer) await closeDrawer();
+    res.boxes.push(rec);
+  }
+  return res;
+};
+
+// ── ⑦ reduce-motion：由 runner 打开 reduce 模拟后调用 ──────
+window.__probeReduce = async () => {
+  await boot(1920, 1080, 'reduce-' + Date.now());   // 同 ⑥：按当前媒体状态重新起一次
+  const res = { media: W.matchMedia('(prefers-reduced-motion: reduce)').matches, sheet: null, samples: [] };
+  let rules = 0, motion = 0, err = null;
+  for (const ss of D.styleSheets) {
+    if (!ss.href || ss.href.indexOf('display.css') < 0) continue;
+    try {
+      const walk = (list) => {
+        for (const r of list) {
+          rules++;
+          const st = r.style;
+          if (st && (st.transition || st.transitionDuration || st.transitionProperty || st.animation || st.animationName || st.animationDuration)) motion++;
+          if (r.cssRules) walk(r.cssRules);
+        }
+      };
+      walk(ss.cssRules);
+    } catch (e) { err = String(e && e.message || e); }
+  }
+  res.sheet = { rules, motion, err };
+  for (const [sel, name] of [['#topbar .tb-btn', '顶栏按钮'], ['#palette .pitem', '器材栏行'], ['.drawer-x', '抽屉关闭钮'], ['#statusbar', '状态栏'], ['.fx-orb', '浮动圆钮']]) {
+    const n = one(sel);
+    if (!n) { res.samples.push({ name, missing: true }); continue; }
+    const rec = { name };
+    for (const on of [false, true]) {
+      D.documentElement.classList.toggle('big-read', on);
+      void D.documentElement.offsetHeight;
+      rec[on ? 'on' : 'off'] = { td: css(n, 'transitionDuration'), tp: css(n, 'transitionProperty'), an: css(n, 'animationName'), ad: css(n, 'animationDuration') };
+    }
+    D.documentElement.classList.toggle('big-read', false);
+    res.samples.push(rec);
+  }
+  return res;
+};
+
+// ── ⑨ 跨层命中热区矩阵 ────────────────────────────────────
+// 量法：逐像素 elementFromPoint 扫出**真实命中矩形**。绝不读 getBoundingClientRect 来当命中面
+// —— 那量的是布局盒；本轮两次误量（伪元素扩边量不到、盒子 44 但可命中只有 38）都是它造成的。
+// pad：往盒子外多扫一圈，热区可能靠 padding/伪元素扩到盒子之外。
+const HM_ROWS = [
+  { key: 'btnSettings', sel: '#btnSettings', name: '设置入口按钮' },
+  { key: 'tbBtn', sel: '#topbar .tb-btn', name: '顶栏按钮 .tb-btn' },
+  { key: 'toolBtn', sel: '#topbar .tool-btn', name: '顶栏工具按钮 .tool-btn' },
+  { key: 'tbCheck', sel: '#topbar .tb-check', name: '顶栏复选 .tb-check' },
+  { key: 'tbSelect', sel: '#topbar .tb-select', name: '顶栏下拉 .tb-select' },
+  { key: 'checkInput', sel: '#topbar .tb-check input', name: '复选内部 input（仪器标定：故意 <44，矩阵必须报得出来）' },
+  { key: 'themeDot', sel: '.theme-dot', name: '主题圆点 .theme-dot' },
+  { key: 'fxOrb', sel: '.fx-orb', name: '浮动圆钮 .fx-orb' },
+  { key: 'dockBtn', sel: '.dock-btn', name: '窄屏抽屉入口 .dock-btn' },
+];
+const HM_DRAWER = [{ key: 'drawerX', sel: '.drawer-x', name: '抽屉关闭钮 .drawer-x' }];
+
+const hitRectOf = (el, pad) => {
+  pad = typeof pad === 'number' ? pad : 20;
+  const r = el.getBoundingClientRect();
+  const box = { w: +r.width.toFixed(2), h: +r.height.toFixed(2) };
+  if (r.width < 1 || r.height < 1) return { box, hit: null, why: '零尺寸（未渲染/被隐藏）' };
+  const x0 = Math.max(0, Math.floor(r.left - pad)), x1 = Math.min(W.innerWidth - 1, Math.ceil(r.right + pad));
+  const y0 = Math.max(0, Math.floor(r.top - pad)), y1 = Math.min(W.innerHeight - 1, Math.ceil(r.bottom + pad));
+  let hx0 = 1e9, hy0 = 1e9, hx1 = -1, hy1 = -1, hits = 0;
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const n = D.elementFromPoint(x, y);
+      if (n && (n === el || el.contains(n))) {
+        hits++;
+        if (x < hx0) hx0 = x;
+        if (y < hy0) hy0 = y;
+        if (x > hx1) hx1 = x;
+        if (y > hy1) hy1 = y;
+      }
+    }
+  }
+  const hit = hits ? { w: hx1 - hx0 + 1, h: hy1 - hy0 + 1, x: hx0, y: hy0 } : { w: 0, h: 0, x: null, y: null };
+  const dens = hits ? +(hits / ((hit.w || 1) * (hit.h || 1))).toFixed(3) : 0;
+  const onScreen = r.bottom > 0 && r.top < W.innerHeight && r.right > 0 && r.left < W.innerWidth;
+  return { box, hit, hits, dens, onScreen };
+};
+
+const hmScan = async (rows) => {
+  const out = [];
+  for (const row of rows) {
+    const els = [...D.querySelectorAll(row.sel)];
+    if (!els.length) { out.push({ key: row.key, sel: row.sel, name: row.name, n: 0, minHitH: 0, verdict: '未渲染' }); continue; }
+    let scrolled = false;
+    const r0 = els[0].getBoundingClientRect();
+    if (r0.width > 0 && (r0.left < 0 || r0.right > W.innerWidth)) {
+      try { els[0].scrollIntoView({ inline: 'center', block: 'nearest' }); scrolled = true; await wait(160); } catch (e) { /* 不支持就算了 */ }
+    }
+    const items = els.slice(0, 8).map((el) => hitRectOf(el, 20));
+    const good = items.filter((i) => i.hit && i.hit.h > 0);
+    out.push({
+      key: row.key, sel: row.sel, name: row.name, n: els.length, scrolled,
+      minHitH: good.length ? Math.min.apply(null, good.map((i) => i.hit.h)) : 0,
+      maxHitH: good.length ? Math.max.apply(null, good.map((i) => i.hit.h)) : 0,
+      visualH: +items[0].box.h.toFixed(2),
+      hitRects: items.map((i) => (i.hit ? i.hit.w + '×' + i.hit.h : (i.why || '0×0'))),
+      dens: items.map((i) => i.dens),
+      offScreen: items.some((i) => i.onScreen === false),
+    });
+  }
+  return out;
+};
+
+// 关抽屉复用上面 ⑥ 已有的 closeDrawer()（发 Escape）；这里只负责在它之后再等滑出动画停住 ——
+// 在滑动中途做命中测试会量到错的东西（第一版 ⑥ 就吃过这个亏）。
+
+window.__probeHitMatrix = async (w, h, form, sabotage) => {
+  const res = { viewport: [w, h], form, media: null, cells: [], error: null };
+  const ok = await boot(w, h, 'hm-' + w + '-' + form);
+  if (!ok) { res.error = '应用没能在 iframe 里就绪'; return res; }
+  // 红绿自证（sabotage=true）：注入一条**和本表历史上犯过的错一模一样**的规则 ——
+  // 同属性 min-height、特异性(0,2,1)，跟在文档最后所以赢。这张表若恒绿，下面这步就量不出差别。
+  // 注入在 boot() 之后（boot 会导航，注入的节点会被换掉文档带走），撤除在同一份文档里做，
+  // 所以「注入 → 红 → 撤除 → 绿」是同一次调用、同一次导航内的对比，没有版本/环境漂移。
+  let injected = null;
+  res.sabotage = null;
+  if (sabotage) {
+    injected = D.createElement('style');
+    injected.textContent = 'html.big-read .tb-check{min-height:38px}';
+    D.head.appendChild(injected);
+    res.sabotage = injected.textContent;
+  }
+  res.media = {
+    anyCoarse: W.matchMedia('(any-pointer: coarse)').matches,
+    coarse: W.matchMedia('(pointer: coarse)').matches,
+    fine: W.matchMedia('(pointer: fine)').matches,
+    hover: W.matchMedia('(hover: hover)').matches,
+    width: W.innerWidth,
+  };
+  for (const on of [false, true]) {
+    const set = await setMode(on);
+    await closeDrawer();      // 抽屉开着会盖住顶栏，命中测试会全归零
+    await wait(380);          // 等滑出动画真的停住再扫
+    const closed = await hmScan(HM_ROWS);
+    let opened = [];
+    const btn = one('#btnSettings');
+    if (btn) {
+      btn.click();
+      await until(() => {
+        const dr = one('.drawer[aria-label="设置"]');
+        return !!(dr && dr.closest('.drawer-mask').classList.contains('in'));
+      }, 5000);
+      await wait(450);
+      opened = await hmScan(HM_DRAWER);
+    }
+    res.cells.push({ bigRead: on, setOk: set, cls: D.documentElement.className, drawerClosed: closed, drawerOpen: opened });
+  }
+  if (injected) {
+    injected.remove();                      // 同一份文档里撤除，见函数头的「红绿自证」
+    res.sabotageRemoved = true;
+    await wait(150);
+    const after = [];
+    for (const on of [false, true]) {
+      await setMode(on);
+      await closeDrawer();
+      await wait(380);
+      after.push({ bigRead: on, drawerClosed: await hmScan(HM_ROWS) });
+    }
+    res.cellsAfterRemoval = after;
+  }
+  await setMode(false);
+  await closeDrawer();
+  return res;
+};
+
+// ── 主套件 ────────────────────────────────────────────────
+(async () => {
+  const original = localStorage.getItem(KEY);
+  log(`进入时 ${KEY} = ${JSON.stringify(original)}（结束时还原）`);
+  localStorage.removeItem(KEY);                 // ① 默认态：不删就是「关」
+
+  const tables = [];
+  for (const [w, h] of VIEWPORTS) {
+    const t = await measureAt(w, h, `v${w}-a`, `${w}×${h}`);
+    if (t) tables.push(t);
+  }
+  // ① 默认态
+  {
+    localStorage.removeItem(KEY);
+    await boot(1920, 1080, 'default');
+    const sw = (() => { const b = one('#btnSettings'); b.click(); return null; })();
+    await until(() => one('#setRowDisplay .plug-switch'), 4000);
+    const s = one('#setRowDisplay .plug-switch');
+    chk(!D.documentElement.classList.contains('big-read'), '① 默认态：根元素没有 .big-read', { cls: D.documentElement.className });
+    chk(!!s && s.getAttribute('aria-checked') === 'false' && !s.classList.contains('on'),
+      '① 默认态：设置面板里的开关显示为「关」', s ? { aria: s.getAttribute('aria-checked'), cls: s.className } : null);
+    chk(localStorage.getItem(KEY) === null, '① 默认态：没有写过偏好键', { key: localStorage.getItem(KEY) });
+    chk(!!s && !!s.closest('.plug-row') && !!s.closest('.plug-sec') && !!s.closest('.plug-sec').querySelector('.plug-sec-head h3'),
+      '① 设置项复用了既有类名 .plug-sec / .plug-row / .plug-switch（没新增样式钩子）',
+      s ? { sec: s.closest('.plug-sec').querySelector('h3').textContent } : null);
+  }
+  // ⑤ 持久化：开启 → 换 URL 冷启动
+  {
+    localStorage.removeItem(KEY);
+    await boot(1920, 1080, 'persist-a');
+    const ok = await setMode(true);
+    chk(ok && localStorage.getItem(KEY) === '1', '⑤ 开启后写出了偏好键', { key: localStorage.getItem(KEY), cls: D.documentElement.className });
+    await boot(1920, 1080, 'persist-b');        // 换 URL 真冷启动，同一 profile → localStorage 还在
+    chk(D.documentElement.classList.contains('big-read'),
+      '⑤ 冷启动后根元素仍带 .big-read（挂载期就应用了偏好）', { cls: D.documentElement.className });
+    chk(localStorage.getItem(KEY) === '1', '⑤ 冷启动后偏好键仍是 1', { key: localStorage.getItem(KEY) });
+    const b = one('#btnSettings'); b.click();
+    await until(() => one('#setRowDisplay .plug-switch'), 4000);
+    const s = one('#setRowDisplay .plug-switch');
+    chk(s && s.getAttribute('aria-checked') === 'true', '⑤ 冷启动后开关也显示为「开」', s ? { aria: s.getAttribute('aria-checked') } : null);
+    await setMode(false);
+    chk(!D.documentElement.classList.contains('big-read') && localStorage.getItem(KEY) === '0',
+      '⑤ 关掉后又关得回去（键写成 0、class 摘掉）', { key: localStorage.getItem(KEY), cls: D.documentElement.className });
+  }
+
+  // ── ②③④ 汇总断言（逐视口）──
+  const table = {};
+  for (const t of tables) {
+    table[t.label] = { off: t.off, stable: t.stable, on: t.on, cycle: t.cycle, dup: t.dup, harness: t.harness };
+    // ② 元素总数与节点身份（基线取控制组：页面自己会长的节点不算在本次改动头上）
+    const grew = t.on.count - t.stable.c1;
+    const lostSameAsControl = t.on.lost === t.stable.lost0 && t.cycle.every((c) => c.lost === t.stable.lost0);
+    chk(grew === 0 && lostSameAsControl,
+      `② ${t.label}：开/关不动任何节点（总数 ${t.stable.c0}→${t.stable.c1}→${t.on.count}，丢失 ${t.on.lost} = 控制组 ${t.stable.lost0}）`,
+      { c0: t.stable.c0, c1: t.stable.c1, cOn: t.on.count, grew, lost: t.on.lost, lostControl: t.stable.lost0, lostDetail: t.stable.lostDetail });
+    chk(t.cycle.every((c) => c.count === t.stable.c1),
+      `② ${t.label}：关→开→关→开 四连切换后总数仍不变`, t.cycle.map((c) => ({ want: c.want, got: c.cls, n: c.count, lost: c.lost })));
+    chk(t.cycle.map((c) => c.cls).join() === 'false,true,false,true',
+      `② ${t.label}：四连切换的 class 与请求一一对应（没有粘住/反相）`, t.cycle.map((c) => c.cls));
+    chk(t.dup.setRowDisplay === 1 && JSON.stringify(t.dup) === JSON.stringify(t.on.struct),
+      `② ${t.label}：抽屉结构没有被切换搞出重复节点`, { before: t.dup, after: t.on.struct });
+    // ④ 无布局破坏
+    const st = t.harness;
+    chk(st.scrollW <= st.clientW + 1, `④ ${t.label}：文档无横向溢出`, { scrollWidth: st.scrollW, clientWidth: st.clientW });
+    chk(Math.abs(t.on.stage - t.off.stage) <= 2, `④ ${t.label}：实验台可见宽度与关闭态一致（±2px）`, { off: f(t.off.stage, 2), on: f(t.on.stage, 2), d: f(t.on.stage - t.off.stage, 2) });
+    // ③ 代表元素：字号必须变大，盒高按 case 的预期
+    for (const r of t.off.rows) {
+      const rOn = t.on.rows.find((x) => x.id === r.id);
+      const fsOff = parseFloat(r.fsOff), fsOn = parseFloat(rOn && rOn.fsOn);
+      chk(r.fsOff !== null && fsOn > fsOff,
+        `③ ${t.label}·${r.name}：字号变大 ${r.fsOff} → ${rOn && rOn.fsOn}`, { fsOff: r.fsOff, fsOn: rOn && rOn.fsOn, d: f(fsOn - fsOff, 2) });
+      const bOff = r.boxOff, bOn = rOn && rOn.boxOn;
+      if (r.boxDir === 'up') chk(bOn > bOff, `③ ${t.label}·${r.name}：${r.boxOff === null ? '' : '盒高变大 ' + f(bOff, 2) + ' → ' + f(bOn, 2) + ' px'}`, { boxOff: bOff, boxOn: bOn });
+      else chk(Math.abs(bOn - bOff) < 0.5, `④ ${t.label}·${r.name}：盒高保持不变 ${f(bOff, 2)} px（不挤压实验台）`, { boxOff: f(bOff, 2), boxOn: f(bOn, 2) });
+    }
+    // ③ 同比例尺：两态字号差必须是同一个 --br-fs
+    const deltas = t.off.rows.map((r) => parseFloat(t.on.rows.find((x) => x.id === r.id).fsOn) - parseFloat(r.fsOff));
+    const uniq = [...new Set(deltas.map((d) => d.toFixed(2)))];
+    chk(uniq.length === 1 && Number(uniq[0]) > 0,
+      `③ ${t.label}：5 个元素用的是同一个字号增量（同一个比例尺）`, { deltas: deltas.map((d) => f(d, 2)), unique: uniq });
+  }
+
+  // ── ⑧ 首帧不闪：同一份 index.html 装两次，只差那一段内联脚本 ──────
+  // 为什么用 srcdoc 而不是换 URL：要造出「没有那段脚本」的对照只能改写 HTML，而仓库里
+  // 不能留改写副本、静态服务也只认工作区 —— 所以在内存里改、用 srcdoc 装。
+  // 为什么每次新建 iframe 而不是复用 fr：srcdoc 文档没有 location.search，「等 URL 标记」
+  // 那招在这里失效；复用同一个 iframe 会读到上一份文档留下的 __ff（就是修过的「在尸体上求值」）。
+  // 新 iframe 初值是 about:blank，等 __ff 出现是唯一的、不含歧义的信号。
+  // 红绿能力：把 index.html 里那段脚本注释掉 → A 的两条断言立刻红；把它改成无脑 add
+  // （不读偏好）→ ①「默认态没有 .big-read」红；把去掉脚本的对照改回不摘 → B 的两条红。
+  {
+    localStorage.setItem(KEY, '1');          // A/B 只差那一段脚本，偏好本身两边都开着
+    const raw = await (await fetch(`/index.html?cb=${Date.now()}`, { cache: 'no-store' })).text();
+    const hits = (s) => (s.match(/xiaomo\.display\.v1/g) || []).length;
+    const at = raw.indexOf('xiaomo.display.v1');
+    const cut = at < 0 ? raw
+      : raw.slice(0, raw.lastIndexOf('<script', at)) + raw.slice(raw.indexOf('</scr' + 'ipt>', at) + 9);
+    // 钩子插在 </head> 前：按文档顺序它排在两段内联脚本之后、所有 module 之前（module 一律
+    // defer，解析完才执行），所以 at0 读到的就是「任何一帧、任何一段 module 之前」的值。
+    const HOOK = '<scr' + 'ipt>' +
+      'window.__ff={at0:"",mode0:"",f:[],m:[],firstOn:-1};' +
+      'window.__ff.at0=document.documentElement.className;' +
+      'window.__ff.mode0=document.documentElement.dataset.mode||"";' +
+      '(function tick(){var de=document.documentElement,h=window.__ff;' +
+      'h.f.push(de.className);h.m.push(de.dataset.mode||"");' +
+      'if(h.firstOn<0&&de.className.indexOf("big-read")>=0)h.firstOn=h.f.length-1;' +
+      'if(h.f.length<24)requestAnimationFrame(tick);})();' +
+      '</scr' + 'ipt>';
+    const wrap = (html) => html.replace('<head>', '<head><base href="/">').replace('</head>', HOOK + '</head>');
+    const variant = async (html, label, needBoot) => {
+      const box = document.createElement('iframe');
+      box.title = '首帧变体：' + label;
+      box.style.cssText = 'position:absolute;left:-20000px;top:0;width:1280px;height:720px;border:0';
+      document.body.appendChild(box);
+      box.srcdoc = wrap(html);
+      const win = () => { try { return box.contentWindow; } catch (e) { return null; } };
+      const got = await until(() => { const w2 = win(); return !!(w2 && w2.__ff && w2.__ff.f.length > 0); }, 25000);
+      const o = got ? (() => { const h = win().__ff; return { at0: h.at0, mode0: h.mode0, f0: h.f[0], m0: h.m[0], firstOn: h.firstOn, frames: h.f.length }; })() : null;
+      if (o && needBoot) {
+        await until(() => { const w2 = win(); return !!(w2 && w2.xiaomo && w2.document.querySelector('#setRowDisplay')); }, 30000);
+        if (o.firstOn < 0) await until(() => { const h = win().__ff; return !!(h && h.firstOn >= 0); }, 8000);
+        const w2 = win();
+        o.booted = !!(w2 && w2.xiaomo);
+        o.alive = !!(w2 && w2.document.documentElement.classList.contains('big-read'));
+        if (w2 && w2.__ff) { o.frames = w2.__ff.f.length; o.firstOn = w2.__ff.firstOn; }
+      }
+      box.remove();     // 每个变体是一整个应用实例（自带 rAF 仿真循环），读完立刻拆掉
+      return o;
+    };
+    const A = await variant(raw, 'inline-on', true);
+    const B = await variant(cut, 'inline-off', true);
+    // C/D：主题脚本零回归。两个键都要预设 —— 只写 mode.v1 会被那段脚本的「旧值清理」
+    // 判成代码写的值然后删掉（它靠 xiaomo.mode.intent.v1 这个一次性标记区分）。
+    const sm = localStorage.getItem('xiaomo.mode.v1'), si = localStorage.getItem('xiaomo.mode.intent.v1');
+    const withMode = async (mode) => {
+      localStorage.setItem('xiaomo.mode.v1', mode);
+      localStorage.setItem('xiaomo.mode.intent.v1', '1');
+      return variant(raw, 'theme-' + mode, false);
+    };
+    const C = await withMode('light');
+    const Dt = await withMode('dark');
+    if (sm === null) localStorage.removeItem('xiaomo.mode.v1'); else localStorage.setItem('xiaomo.mode.v1', sm);
+    if (si === null) localStorage.removeItem('xiaomo.mode.intent.v1'); else localStorage.setItem('xiaomo.mode.intent.v1', si);
+
+    chk(!!A && A.at0.indexOf('big-read') >= 0,
+      '⑧ 有内联脚本：解析 <head> 时 .big-read 已挂上（严格早于任何 module、任何一帧）', A && { at0: A.at0 });
+    chk(!!A && A.f0.indexOf('big-read') >= 0,
+      '⑧ 有内联脚本：第 1 个 rAF（首帧）里 .big-read 已在', A && { f0: A.f0, frames: A.frames, firstOn: A.firstOn });
+    chk(!!A && A.booted === true && A.alive === true,
+      '⑧ 挂载期不摘已有 class：插件应用一次之后 .big-read 仍在（applyBigRead 幂等，无需改 src）', A && { booted: A.booted, alive: A.alive });
+    chk(hits(raw) === 1 && hits(cut) === 0,
+      '⑧ 对照有效性：原文里那段脚本恰好 1 处、对照 HTML 里 0 处（只差这一段）', { inRaw: hits(raw), inCut: hits(cut) });
+    chk(!!B && B.f0.indexOf('big-read') < 0,
+      '⑧ 无内联脚本（对照）：第 1 帧确实没有 .big-read —— 这就是被那段脚本消掉的那一次闪烁', B && { f0: B.f0 });
+    chk(!!B && B.firstOn >= 1,
+      '⑧ 无内联脚本（对照）：class 是开跑之后才出现的（挂载期仍应用一次，没有回归）', B && { firstOn: B.firstOn, frames: B.frames, alive: B.alive });
+    chk(!!C && C.mode0 === 'light' && C.m0 === 'light',
+      '⑧ 主题脚本零回归：预设浅色 → 解析期与首帧都是 light', C && { mode0: C.mode0, m0: C.m0 });
+    chk(!!Dt && Dt.mode0 === 'dark' && Dt.m0 === 'dark',
+      '⑧ 主题脚本零回归：预设深色 → 解析期与首帧都是 dark', Dt && { mode0: Dt.mode0, m0: Dt.m0 });
+  }
+
+  // ⑥⑦ 需要媒体模拟的两组：本页只报「模拟是否生效」
+  const media = { coarse: W.matchMedia('(any-pointer: coarse)').matches, reduce: W.matchMedia('(prefers-reduced-motion: reduce)').matches };
+  skip('⑥ 触控共存：需要 CDP 打开粗指针模拟后调用 window.__probeTouch()', media);
+  skip('⑦ reduce-motion：需要 CDP 打开 reduce 模拟后调用 window.__probeReduce()', media);
+
+  // 还原用户偏好
+  if (original === null) localStorage.removeItem(KEY); else localStorage.setItem(KEY, original);
+  log(`已还原 ${KEY} = ${JSON.stringify(localStorage.getItem(KEY))}`);
+
+  const bad = R.filter((r) => !r.ok);
+  log('');
+  log(`大屏可读探针：共 ${R.length} 项，失败 ${bad.length} 项`);
+  log('DISPLAY_JSON ' + JSON.stringify({ ok: bad.length === 0, pass: R.length - bad.length, fail: bad.length, checks: R, table, media }));
+  window.__probeDone = { ok: bad.length === 0, fail: bad.length, total: R.length };
+})();
+</script>
+</body>
+</html>

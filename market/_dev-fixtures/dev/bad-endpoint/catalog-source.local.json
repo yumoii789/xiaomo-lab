@@ -1,0 +1,23 @@
+{
+  "manifestVersion": "1.0.0",
+  "providerId": "lab.xiaomo.bad-endpoint-fixture",
+  "name": "小墨实验室 · 端点不合契约的 fixture（仅用于验证拒绝路径）",
+  "description": "故意的坏 manifest：transport.endpoint 的路径没有以 /v1/plugins 结尾。它证明契约的 pattern 校验真的在跑，而不是写在文档里好看。",
+  "homepage": "https://yumoii789.github.io/xiaomo-lab/",
+  "attribution": {
+    "name": "小墨实验室 · 自测夹具",
+    "url": "https://github.com/yumoii789/xiaomo-lab",
+    "notice": "这是一个测试夹具，不是真实的社区来源。"
+  },
+  "transport": {
+    "kind": "https-json",
+    "endpoint": "http://127.0.0.1:7373/market/_dev-fixtures/dev/bad-endpoint/plugins.json",
+    "method": "GET"
+  },
+  "query": {
+    "supported": [],
+    "defaultLimit": 50,
+    "maxLimit": 50,
+    "sorts": []
+  }
+}

@@ -9,6 +9,7 @@
      · 进场一律 ease-out，位移一律 ease-in-out
      · 按下反馈 120ms，浮层 200ms，抽屉 260ms，弹窗 240ms
      · 不用 scale(0)，不用 transition: all
+     · 回弹（overshoot）只能用「关键帧里的越界峰值 + 回落」实现，不新增 easing 曲线、不新增时长档
      · prefers-reduced-motion 下保留淡入淡出，去掉位移与缩放
    ══════════════════════════════════════════════════════════ */
 
@@ -34,6 +35,45 @@
   --topbar-h:48px; --status-h:26px;
   --pal-w:238px; --side-w:318px;
 }
+
+/* ── 毛玻璃的降级（task-57）────────────────────────────────────────────────
+   缺的不是"没写毛玻璃"，而是**没写回退**：本文件有 6 组载体共 11 条
+   `backdrop-filter`（#topbar / .toast / .fx-orb / #statusbar / .drawer /
+   .expel-mask / .about-mask），而全仓 `@supports` 数量为 **0**。
+   支持时它们靠 `blur` 造层次；**不支持时只剩 `background:var(--glass)` 那层半透明**
+   —— 深色 72% / 浅色 74%，是"**碰巧还能看**"，不是"写了回退" ✗。 */
+
+/* ⚠ 为什么**不能**只写 `:root{--glass:…}`（本任务第一版就是这么写的，实测无效 ✗）：
+     主题由 src/core/theme.js L127 用 `root.style.setProperty('--'+k, …)` 把 token 刷成
+     **:root 的内联样式**，而**内联声明赢过任何样式表规则**。实测（无头 Edge / mint 浅色）：
+       内联值                       rgba(255,255,255,.74)
+       `:root{--glass:red}`    →    rgba(255,255,255,.74)   ← 样式表输，未生效 ✗
+       `:root{--glass:blue !important}` → blue              ← 只有 !important 能赢
+       `.drawer{background:…}`  →    rgb(18,52,86)          ← 载体不是内联 ⇒ 能赢 ✓
+     ⇒ 所以回退必须**落在载体自身的 background 上**；`:root` 那两条带上 !important 只为
+       兜住"以后新增的、没列进选择器列表的载体"，并注明它是在跟内联主题抢，不是随手滥用。
+   ⚠ 为什么用**两层 background** 而不是 color-mix()（第二版用 color-mix，实测也不对 ✗）：
+     `background: color-mix(in srgb, rgba(255,255,255,.74), var(--bg))` 算出来是
+     `color(srgb .45 .459 .455 / 0.870588)` —— **仍带 3 成左右透明**，等于没解决可读性 ✗。
+     改成"不透明底色 var(--bg) 垫在 var(--glass) 下面"两层即可：底层不透明 ⇒ 合成结果
+     必然不透明 ✓，且两层都用**当前主题自己的变量** ⇒ 深/浅两套各自成立 ✓。 */
+@supports not (backdrop-filter: blur(1px)) {
+  :root {
+    --glass: var(--bg) var(--glass);
+    --glass-2: var(--bg) var(--glass-2);
+  }
+  :where(#topbar, .toast, .fx-orb, #statusbar, .drawer, .expel-mask, .about-mask) {
+    background: var(--bg) var(--glass);
+  }
+}
+/* 支持 blur 但不支持 color-mix/两层语法的内核：退回本来就不透明的 --surface ✓ */
+@supports not (background: color-mix(in srgb, red, blue)) {
+  :root { --glass: var(--surface); --glass-2: var(--surface-2); }
+}
+/* ⚠ 已知且在本次范围外：「完全不认识 @supports 的内核」会把整块 not-query 当未知条件
+   丢掉 ⇒ 半透明原样留下。本项目基线是「现代浏览器 + GitHub Pages」，不支持这类内核；
+   这不影响本降级对**现代浏览器**的有效性。 */
+
 
 *,*::before,*::after{box-sizing:border-box}
 html,body{height:100%}
@@ -208,10 +248,14 @@ input[type=search]::-webkit-search-cancel-button{display:none}
 .pitem{
   display:flex; align-items:center; gap:9px; padding:6px 7px; border-radius:var(--radius-sm);
   cursor:grab; user-select:none;
-  transition:background-color var(--t-fast) var(--ease-out);
+  transition:background-color var(--t-fast) var(--ease-out), transform var(--t-press) var(--ease-out);
 }
 @media (hover:hover) and (pointer:fine){ .pitem:hover{background:var(--surface-2)} }
-.pitem:active{background:var(--surface-3); cursor:pointer}
+/* 按下反馈：与 .tb-btn/.tool-btn/.theme-dot 同类（0.97 档，见 #sideTabs button）。
+   这条曾经缺失 —— 器材项是这批可点元素里唯一没有按下缩放的，
+   所以点它「什么都没发生」的手感是全局一致性的破口。reduce 下由文件末尾的
+   `@media (prefers-reduced-motion: reduce)` 统一置 transform:none（选择器列表里已含 .pitem:active）。 */
+.pitem:active{background:var(--surface-3); cursor:pointer; transform:scale(.97)}
 .pitem .pi-ico{
   width:28px; height:28px; border-radius:8px; flex:0 0 auto; display:grid; place-items:center;
   font-size:15px; background:var(--surface-3); border:1px solid var(--border);
@@ -299,6 +343,12 @@ input[type=search]::-webkit-search-cancel-button{display:none}
 @media (hover:hover) and (pointer:fine){ .theme-dot:hover{opacity:1} }
 .theme-dot:active{transform:scale(.96)}
 .theme-dot.active{opacity:1; border-color:var(--text-2); transform:scale(1.12)}
+/* 「自动」圆点：左半深右半浅，一眼看出它是「跟随系统」而不是某个主题的配色。
+   必须排在 .theme-dot 之后才盖得住它的 background:var(--dot)。 */
+.theme-dot.auto{
+  background:linear-gradient(90deg, var(--bg) 0 50%, var(--text) 50% 100%);
+  border-color:var(--border-3);
+}
 
 /* 点击涟漪与拖动拖尾 */
 /* 一次性反馈，不保留终态，故不用 forwards */
@@ -308,7 +358,25 @@ input[type=search]::-webkit-search-cancel-button{display:none}
   transform:scale(.9); opacity:.5;
   animation:fx-ripple var(--t-base) var(--ease-out);
 }
-@keyframes fx-ripple{ to{ transform:scale(2.6); opacity:0 } }
+/* 用户点名要的「点击放大的弹跳」：在 15% 处造一个越过终值的峰值，再回落到终值
+   （2.6 × 1.119 ≈ 2.91，越界 +11.9%，克制在 +12% 以内 —— §0 L22 只允许「少量愉悦时刻」，
+   这是单次点击反馈，不做成玩具）。峰值那一帧只给 transform、不给 opacity，
+   所以淡出时序与改动前逐字一致，只多了「越界—回落」这一件事。
+   不新增 easing 曲线、不新增时长档，仍用 --t-base / --ease-out。
+
+   为什么峰值在 15% 而不是更晚：涟漪同时在 200ms 内从 opacity .5 淡到 0，而 --ease-out
+   （cubic-bezier(.23,1,.32,1)）前重后轻，所以「越界那一刻还剩多少不透明度」完全由峰值位置决定。
+   精确解这条缓动曲线（y = 3t(1-t)+t³，x(t)=15%；见下方数值）后，峰值位置与残留不透明度是：
+      位置 12% (t=24ms) → 残留 0.267      位置 20% (t=40ms) → 残留 0.159
+      位置 15% (t=30ms) → 残留 0.222      位置 22% (t=44ms) → 残留 0.139 ✗
+      位置 18% (t=36ms) → 残留 0.182      位置 25% (t=50ms) → 残留 0.112 ✗
+                                          位置 30% (t=60ms) → 残留 0.079 ✗
+   即摆到 22% 以后就越过了可见性下限（探针里钉成硬判据：越界峰值帧不透明度必须 ≥ .15）——
+   越界在数学上成立、在屏幕上却不存在，等于没做。15% 是「越界最晚、又还看得见」的位置。 */
+@keyframes fx-ripple{
+  15%{ transform:scale(2.91) }
+  to{ transform:scale(2.6); opacity:0 }
+}
 /* 拖尾方向由 JS 以内联 --tx/--ty 提供（见 C6），CSS 不写死方向 */
 .fx-trail{
   position:absolute; width:10px; height:10px; margin:-5px 0 0 -5px; border-radius:50%;
@@ -420,6 +488,15 @@ input[type=search]::-webkit-search-cancel-button{display:none}
   font-size:12px; color:var(--text); font-variant-numeric:tabular-nums;
   text-align:right; line-height:1.8;
 }
+
+/* ── 逐行曲线入口：入口 class 由 src/ui/inspector.js 标（task-41），这里只接视觉状态 ──
+   读数行每帧重建（实测），所以 hover 只上色、不加过渡：过渡会每帧重启，颜色在基色与 accent 之间来回跳 */
+.ro > .v{position:relative;padding-right:1.3em}
+.ro > .v.pickable{cursor:pointer}
+.ro > .v.pickable:active{color:var(--accent)}
+.ro > .v.pickable::after{content:'＋';position:absolute;right:0;top:50%;transform:translateY(-50%);opacity:.45;font-size:.85em}
+.ro > .v.pickable.picked::after{content:'✓';opacity:.8}
+@media (hover:hover) and (pointer:fine){ .ro > .v.pickable:hover{color:var(--accent); text-decoration:underline dotted} }
 
 .btns{display:flex; flex-wrap:wrap; gap:6px; margin-top:14px}
 .btn{
@@ -582,16 +659,53 @@ input[type=search]::-webkit-search-cancel-button{display:none}
 .drawer-hint{flex:1; line-height:1.6}
 .drawer-foot .mini-btn{margin-left:0}
 
+/* 顶部：五桶计数按阶段上色，数字用等宽数字，增量更新时不会横向抖 */
+.drawer-sub .plug-buckets{display:flex; flex-wrap:wrap; gap:2px 10px}
+.drawer-sub .plug-cnt{display:inline-flex; align-items:baseline; gap:4px; color:var(--text-3)}
+.drawer-sub .plug-cnt b{font-weight:600; font-variant-numeric:tabular-nums; color:var(--text-2)}
+.drawer-sub .plug-cnt[data-phase=active] b{color:var(--ok)}
+.drawer-sub .plug-cnt[data-phase=loading] b{color:var(--warn)}
+.drawer-sub .plug-cnt[data-phase=failed] b{color:var(--danger)}
+.drawer-sub .plug-cnt[data-phase=unloading] b{color:var(--bridge)}
+.drawer-sub .plug-total{display:block; color:var(--text-3)}
+
 .plug-sec{margin-top:14px}
-.plug-sec h3{margin:0 0 6px; font-size:11px; color:var(--text-2); font-weight:500; letter-spacing:.6px}
-.plug-sec h3 em{font-style:normal; opacity:.7; margin-left:4px}
+.plug-sec-head{display:flex; align-items:center; gap:6px; margin-bottom:6px}
+.plug-sec-head h3{margin:0; font-size:11px; color:var(--text-2); font-weight:500; letter-spacing:.6px}
+.plug-sec-head h3 em{font-style:normal; opacity:.7; margin-left:4px}
+.pkg-switch{margin-left:auto}
 .plug-row{
   display:flex; align-items:center; gap:12px; padding:9px 11px; margin-bottom:6px;
   border-radius:var(--radius); background:var(--surface-2); border:1px solid var(--border);
   transition:border-color var(--t-fast) var(--ease-out), opacity var(--t-fast) var(--ease-out);
 }
 .plug-row.off{opacity:.45}
+/* 被上级关掉 ≠ 自己关掉：前者是整包连坐，用虚线边框 + 琥珀色备注一眼分开 */
+.plug-row.off-bundle{opacity:.5; border-style:dashed; border-color:var(--border-3)}
+.plug-row.off-item{opacity:.62}
 .plug-row.bad{border-color:var(--danger)}
+/* 阶段徽标：五种阶段五种观感（常态绿 / 灰 / 琥珀呼吸 / 紫虚线 / 红） */
+.plug-phase{
+  font-size:10px; padding:1px 7px; border-radius:20px; white-space:nowrap;
+  color:var(--text-3); background:var(--surface-3); border:1px solid var(--border);
+  transition:color var(--t-fast) var(--ease-out), background-color var(--t-fast) var(--ease-out),
+             border-color var(--t-fast) var(--ease-out);
+}
+.plug-phase[data-phase=active]{color:var(--accent); background:var(--accent-soft); border-color:var(--accent-line)}
+.plug-phase[data-phase=loading]{
+  color:var(--warn); background:var(--chem-soft); border-color:var(--warn);
+  animation:plug-pulse var(--t-slow) var(--ease-in-out) infinite alternate;
+}
+.plug-phase[data-phase=unloading]{
+  color:var(--bridge); background:var(--bridge-soft); border-color:var(--bridge); border-style:dashed;
+}
+.plug-phase[data-phase=failed]{color:var(--danger); background:var(--danger-soft); border-color:var(--danger)}
+@keyframes plug-pulse{from{opacity:.5} to{opacity:1}}
+/* 这一行为什么开不了：三个来源三种颜色，配合行上的虚线边框 */
+.plug-note{font-size:10px; padding:1px 7px; border-radius:20px; color:var(--text-3); border:1px dashed var(--border-3)}
+.plug-note[data-by=bundle]{color:var(--warn); border-color:var(--warn)}
+.plug-note[data-by=item]{color:var(--text-2); border-color:var(--border-3)}
+.plug-note[data-by=self]{color:var(--bridge); border-color:var(--bridge)}
 .plug-main{flex:1; min-width:0}
 .plug-title{display:flex; align-items:baseline; gap:7px; flex-wrap:wrap}
 .plug-title b{font-size:12.5px; font-weight:600}
@@ -617,6 +731,14 @@ input[type=search]::-webkit-search-cancel-button{display:none}
 }
 .plug-switch.on{background:var(--accent-soft); border-color:var(--accent-line)}
 .plug-switch.on i{transform:translateX(17px); background:var(--accent)}
+/* 包级开关＝同一个控件的缩小版，尺寸差让它和单项开关一眼分得开 */
+.plug-switch.sm{width:30px; height:17px}
+.plug-switch.sm i{width:12px; height:12px; margin-top:-6px}
+.plug-switch.sm.on i{transform:translateX(13px)}
+/* 锁住的开关：disabled 与 aria-disabled 都有，视觉也真的灰掉——不许让人点了没反应。
+   这两条必须排在 .on 之后：同为 0,2,1 权重时靠顺序让「灰」盖住「亮」。 */
+.plug-switch:disabled{cursor:not-allowed; opacity:.5; background:var(--surface-3); border-color:var(--border)}
+.plug-switch:disabled i{background:var(--text-3)}
 
 /* ══ 桌面版：自绘标题栏与窗口按钮（浏览器里整块隐藏） ══ */
 html[data-desktop] #topbar{-webkit-app-region:drag}
@@ -706,6 +828,18 @@ html[data-desktop] .wc-group{display:flex; margin-right:-10px}
 }
 .pack-acts{display:flex; justify-content:flex-end}
 .pack-acts .btn{height:26px; padding:0 12px; font-size:11.5px}
+
+/* ══ 插件市场（🛒 抽屉） ══
+   市场界面刻意只用已有类，所以这里只补三条真正必要的：
+   ① 三个面板靠 hidden 属性切换，必须显式钉死 display（否则若将来有人给 .mk-pane 设了
+      display，被 hidden 的面板会照样显示）；
+   ② 条目里的说明文字需要上间距；
+   ③ 来源 URL 必须能在容器里断行——它是用户粘贴的任何字符串，不能撑破抽屉。
+      用 overflow-wrap:anywhere 而不是 word-break:break-all：只在真的放不下时才断，
+      不会把普通词从中间劈开。.plug-main 已经带了 min-width:0，flex 链不会顶宽它。 */
+.mk-pane[hidden]{display:none}
+.mk-item .plug-note{margin:2px 0 0}
+.mk-source-row code{overflow-wrap:anywhere}
 
 /* ══ 减少动态效果：保留淡入淡出，去掉位移与缩放 ══ */
 @media (prefers-reduced-motion: reduce){

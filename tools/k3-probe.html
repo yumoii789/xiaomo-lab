@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>K3 探针 · 插件管理器（只读清单 / 两级开关 / 即时生效）</title>
+<style>
+  body{margin:0;padding:16px;background:#0b0f0d;color:#a3e635;font:12.5px/1.7 Consolas,'Cascadia Mono',monospace}
+  h1{font-size:14px;color:#e7efe9;margin:0 0 8px}
+  pre{margin:0;white-space:pre-wrap;word-break:break-all;color:#cfe8b8}
+  iframe{position:absolute;left:-20000px;top:0;width:1280px;height:820px;border:0}
+</style>
+</head>
+<body>
+<h1>K3 探针：插件管理器（无头诊断；tools/ 不参与打包，属仓库外内容）</h1>
+<pre id="out">加载中…</pre>
+<iframe id="fr" title="被测应用"></iframe>
+<script>
+// ══════════════════════════════════════════════════════════
+// 这个探针验什么
+//   把真实 index.html 装进离屏 iframe（必须带 cache-buster，否则会拿到缓存的旧模块图），
+//   然后在真宿主上机械地验 K3 的三条硬要求：
+//     ① 界面只从 app.inventory 取数 —— 用栈来源统计证明它不再问 host.stats()/host.list()，
+//        并证明它不再往旧键 xiaomo.plugins.disabled 里写；
+//     ② 快照变化只做增量更新 —— 行元素身份逐个不变 + 抽屉正文 childList 变更数为 0；
+//     ③ 两级开关即时生效 —— 单项/包级点下去当场变（含包级停用后单项开关真 disabled、
+//        管理器自身防自锁），五阶段徽标的计算样式两两不同，Esc 关闭后焦点回到 🧩。
+//   结束时把 pluginState 还原成进入时的样子 —— 探针与用户共用同一份 localStorage。
+//
+// 怎么读它的输出
+//   页面上每行一条 [PASS] / [FAIL]，每条都带证据细节；
+//   最后一行 `K3_JSON {...}` 是机器可读结论：ok=false 表示有 FAIL，checks 里逐条列原因。
+//   打开方式（务必带 cache-buster）：
+//     http://127.0.0.1:7373/tools/k3-probe.html?cb=<随机串>
+//   排障：加 `?reset=1` 只清空启停状态并停止（探针崩在半路会把包级停用留在 localStorage 里，
+//   此时管理器自己也会被跳过、按钮都不出现 —— 先 reset 再正常跑一次即可）。
+// ══════════════════════════════════════════════════════════
+
+const out = document.getElementById('out');
+const fr = document.getElementById('fr');
+const lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); };
+/**
+ * 等 ms 毫秒：用 MessageChannel 让出主线程，不用 setTimeout。
+ * 这台浏览器是多人共用的 —— 标签页被切到后台时 setTimeout 会被浏览器压制，
+ * 探针会凭空卡在半路（实测：k3 探针停在「抽屉打开」那一带，30 秒没有推进）。
+ * 注意不能只数"让出几轮"：抽屉的 transitionend 是按其真实时长（--t-* 几百毫秒）来的，
+ * 所以这里按挂钟等到真正的时长，同时每一轮都让出事件循环（Date.now 不受节流影响）。
+ */
+const chan = new MessageChannel();
+const step = () => new Promise((r) => { chan.port1.onmessage = () => r(); chan.port2.postMessage(0); });
+const wait = async (ms) => {
+  const t0 = Date.now();
+  do { await step(); } while (Date.now() - t0 < ms);
+};
+/** 等到条件成立：用挂钟兜底，同样不依赖定时器 */
+const until = async (fn, ms = 15000) => {
+  const t0 = Date.now();
+  for (;;) { if (fn()) return true; if (Date.now() - t0 > ms) return false; await step(); }
+};
+
+// 只清状态、不跑测试：给崩过一轮的浏览器留一条回路
+if (/[?&]reset=1/.test(location.search)) {
+  const before = localStorage.getItem('xiaomo.plugins.state.v1');
+  localStorage.removeItem('xiaomo.plugins.state.v1');
+  localStorage.removeItem('xiaomo.plugins.disabled');
+  log('K3_RESET 已清空两级启停状态（xiaomo.plugins.state.v1 / xiaomo.plugins.disabled）');
+  log('清理前：' + before);
+  fr.remove();
+} else {
+
+const checks = [];
+const check = (name, cond, detail) => {
+  checks.push({ name, ok: !!cond, detail: String(detail == null ? '' : detail) });
+  log(`[${cond ? 'PASS' : 'FAIL'}] ${name}${detail ? ' —— ' + detail : ''}`);
+};
+const fin = (extra) => {
+  const fail = checks.filter((c) => !c.ok).length;
+  const json = Object.assign({ ok: fail === 0, pass: checks.length - fail, fail, checks }, extra || {});
+  // 结论同时压进标题：长页面正文会被读取工具的 maxChars 截断，标题永远在最上面，
+  // 所以「跑没跑完、过了几项」不需要把整页正文拉出来就能看到。
+  document.title = `K3 ${json.ok ? 'ok' : 'FAIL'} pass=${json.pass} fail=${json.fail} total=${json.total == null ? '?' : json.total}`;
+  log('');
+  log(`K3_JSON ${JSON.stringify(json)}`);
+};
+
+fr.src = '../index.html?cb=' + Math.random().toString(36).slice(2, 8);
+fr.addEventListener('load', () => { run().catch((e) => { check('探针自身没抛错', false, e && e.message); fin(); }); });
+
+async function run() {
+  const w = fr.contentWindow, d = fr.contentDocument;
+  // 等应用把 window.xiaomo 挂上：条件轮询 + 挂钟兜底，不用定时器
+  await until(() => { const a = w.xiaomo; return !!(a && a.inventory && a.pluginState); });
+  const x = w.xiaomo;
+  if (!x || !x.inventory || !x.pluginState) {
+    check('应用与清单/状态服务就绪', false, `window.xiaomo=${!!x} inventory=${!!(x && x.inventory)}`);
+    return fin();
+  }
+  const inv = x.inventory, host = x.host, state = x.pluginState;
+  const initState = state.snapshot();
+  // 基线必须确定：上一轮探针若崩在半路（或被节流的定时器拖着没跑完），盘上会留下停用状态，
+  // 而「点一下开关」是按当前状态取反的 —— 实测过：ui.log 在盘上仍是停用时，
+  // 探针的"关"变成了"开"，后面一串计数与 offBy 断言全部反过来。
+  // 所以先把所有插件恢复成启用（与收尾同一个约定：探针跑完现场是全开），并把改了谁如实报出来。
+  {
+    const forced = [];
+    for (const it of inv.snapshot().items) {
+      if (it.offBy) { forced.push(`${it.id}(${it.offBy})`); state.setItem(it.id, true); state.setBundle(it.kind, true); host.enable(it.id); }
+    }
+    if (forced.length) log(`  · [trace] 入口现场不是全开（${JSON.stringify(initState.items)}），已临时恢复：${forced.join(', ')}`);
+    await wait(120);
+  }
+  const T = 'xiaomo.ui.log';                       // 拿它做单项开关：kind=ui，没有下游依赖
+  const SELF = 'xiaomo.ui.manager';
+  // 只认管理器自己那一个抽屉：overlay 槽里还住着器材包与设置两个同样用 .drawer-mask 的抽屉
+  const DW = () => d.getElementById('pluginsDrawer');
+  const inDW = (sel) => { const m = DW(); return m ? m.querySelector(sel) : null; };
+  const ROWS = () => [...(DW() ? DW().querySelectorAll('.plug-row') : [])];
+  const rowOf = (id) => inDW(`.plug-row[data-id="${id}"]`);
+  const itemOf = (id) => inv.snapshot().items.find((it) => it.id === id);
+  const cnt = (p) => { const el = inDW(`.plug-cnt[data-phase=${p}] b`); return el ? el.textContent : '?'; };
+  const seen = new Set();                          // 徽标真的渲染过哪些阶段（订阅回调里读 DOM）
+
+  check('应用与清单/状态服务就绪', true, `插件总数 ${inv.snapshot().total}`);
+
+  // 悄悄给宿主的数据接口装计数器：界面若还在问宿主，这里就数得出来。
+  // host.list 要排除清单服务自己发起的调用（它每次 snapshot 都会读宿主，那是它的职责）。
+  let statsCalls = 0, uiListCalls = 0;
+  const statsBak = host.stats, listBak = host.list;
+  host.stats = function (...a) { statsCalls++; return statsBak.apply(host, a); };
+  host.list = function (...a) {
+    if (!/inventory\.js/.test(new Error().stack || '')) uiListCalls++;
+    return listBak.apply(host, a);
+  };
+  const LEGACY = 'xiaomo.plugins.disabled';
+  const legacyBefore = w.localStorage.getItem(LEGACY);
+  const watchBadges = inv.onChange(() => {
+    const m = DW();
+    if (!m) return;
+    for (const el of m.querySelectorAll('.plug-row .plug-phase')) seen.add(el.dataset.phase);
+  });
+
+  let endSnap = null;
+  try {
+  // ── 打开抽屉：走真实入口（顶栏 🧩）────────────────────────
+  const btn = d.getElementById('btnPlugins');
+  btn.focus(); btn.click();
+  await wait(60);
+  check('抽屉打开', !!(DW() && DW().classList.contains('show')), '点 🧩 后 #pluginsDrawer 带 show');
+  check('同槽还有别的抽屉（器材包 / 设置），计数没有串台',
+    d.querySelectorAll('.drawer-mask').length >= 2,
+    `overlay 槽里 .drawer-mask ${d.querySelectorAll('.drawer-mask').length} 个，探针只认 #pluginsDrawer`);
+
+  // ── ① 只读消费：行 = 快照，顶部计数 = 快照分桶 ──────────────
+  const snap0 = inv.snapshot();
+  const P5 = ['active', 'pending', 'loading', 'failed', 'unloading'];
+  {
+    // 行与清单必须一一对应：多、少、重复都算界面撒谎
+    const ids = snap0.items.map((it) => it.id);
+    const rowIds = ROWS().map((r) => r.dataset.id);
+    const extra = rowIds.filter((id) => !ids.includes(id));
+    const missing = ids.filter((id) => !rowIds.includes(id));
+    const dupes = rowIds.filter((id, i) => rowIds.indexOf(id) !== i);
+    const bad = ROWS().length !== snap0.total || extra.length || missing.length || dupes.length;
+    check('清单每一条都有对应的行，且不多不少不重复',
+      !bad,
+      `行 ${ROWS().length} / 清单 ${snap0.total}；多余=[${extra}] 缺失=[${missing}] 重复=[${dupes}]`
+      + (bad ? `\n  行 data-id 依次：${rowIds.join(',')}\n  清单 id 依次：${ids.join(',')}` : ''));
+  }
+  check('顶部分桶计数与快照逐桶一致', P5.every((p) => cnt(p) === String(snap0.counts[p])),
+    P5.map((p) => `${p}:${cnt(p)}`).join(' '));
+  check('顶部报了总贡献项数', /贡献 \d+ 项能力/.test(d.querySelector('.plug-total').textContent),
+    d.querySelector('.plug-total').textContent);
+
+  // ── ② 单项开关：即时生效 + 不整表重建 ──────────────────────
+  const row = rowOf(T), sw = row.querySelector('.plug-switch');
+  const before = ROWS();
+  const muts = [];
+  const mo = new w.MutationObserver((rs) => muts.push(...rs));
+  mo.observe(inDW('.drawer-body'), { childList: true, subtree: true, attributes: true });
+  const activeBeforeA = Number(cnt('active'));
+
+  sw.click();
+  await wait(40);
+  const after = ROWS();
+  // 只认「元素」的增删：改一行里的文字会顺带换掉文本节点，那不是重建；
+  // 真正要证的是没有任何 .plug-row / 子元素被摘掉或换新。
+  const elChurn = muts
+    .filter((m) => m.type === 'childList')
+    .flatMap((m) => [...m.addedNodes, ...m.removedNodes])
+    .filter((n) => n.nodeType === 1);
+  check('单项开关当场生效：清单 offBy=item、阶段回 pending',
+    itemOf(T) && itemOf(T).offBy === 'item' && itemOf(T).phase === 'pending',
+    `offBy=${itemOf(T).offBy} phase=${itemOf(T).phase}`);
+  check('单项停用的行看得出与包级停用不同', row.classList.contains('off-item') && !row.classList.contains('off-bundle'),
+    `class="${row.className}"`);
+  check('行内说明为什么停用', /已单项停用/.test(row.querySelector('.plug-note').textContent),
+    row.querySelector('.plug-note').textContent);
+  check('顶部计数立刻跟着变', Number(cnt('active')) === activeBeforeA - 1,
+    `active ${activeBeforeA} → ${cnt('active')}（pending=${cnt('pending')}）`);
+  check('不整表重建：行元素身份逐个不变',
+    after.length === before.length && after.every((el, i) => el === before[i]),
+    `${after.length} 行全部 === 旧节点`);
+  check('不整表重建：没有任何元素被摘掉或换新（只有文字/属性在原地改）',
+    elChurn.length === 0,
+    `元素增删 ${elChurn.length} 个 / 属性变更 ${muts.filter((m) => m.type === 'attributes').length} 条`
+    + (elChurn.length ? `：${elChurn.slice(0, 4).map((n) => n.className || n.tagName).join(', ')}` : ''));
+  check('开关元素本身没被换掉（所以过渡播得出来）',
+    sw === row.querySelector('.plug-switch') && !sw.classList.contains('on'),
+    `同一节点=${sw === row.querySelector('.plug-switch')} on=${sw.classList.contains('on')}`);
+  check('选择落进新键 xiaomo.plugins.state.v1', state.isItemOff(T) === true, `isItemOff=${state.isItemOff(T)}`);
+  check('不再写旧键 xiaomo.plugins.disabled',
+    w.localStorage.getItem(LEGACY) === legacyBefore,
+    `旧键 ${legacyBefore} → ${w.localStorage.getItem(LEGACY)}`);
+  check('界面没有回头去问宿主要数据', statsCalls === 0 && uiListCalls === 0,
+    `host.stats ${statsCalls} 次 / 非清单来源的 host.list ${uiListCalls} 次`);
+  mo.disconnect();
+
+  sw.click();                                        // 还原
+  await wait(40);
+  check('再点一次当场恢复', itemOf(T).offBy === null && itemOf(T).phase === 'active' && Number(cnt('active')) === activeBeforeA,
+    `offBy=${itemOf(T).offBy} phase=${itemOf(T).phase} active=${cnt('active')}`);
+
+  // ── ③ 包级开关：成员连坐 + 单项 disabled + 防自锁 ───────────
+  const uiSec = inDW('.plug-sec[data-kind="ui"] .pkg-switch');
+  const uiRowIds = inv.snapshot().items.filter((it) => it.kind === 'ui').map((it) => it.id);
+  const activeBeforeB = Number(cnt('active'));
+  check('界面分组按 kind 建成，包级开关都在', !!uiSec, `ui 段包级开关=${!!uiSec}`);
+  uiSec.click();
+  await wait(40);
+  const members = uiRowIds.filter((id) => id !== SELF).map(rowOf).filter(Boolean);
+  check('包级关闭：包内每一行的单项开关真的 disabled（不是点了没反应）',
+    members.length === uiRowIds.length - 1 && members.every((r) => {
+      const b = r.querySelector('.plug-switch');
+      return b && b.disabled && b.getAttribute('aria-disabled') === 'true';
+    }),
+    `${members.length} 行（应为 ${uiRowIds.length - 1}），其中 disabled=${members.filter((r) => r.querySelector('.plug-switch').disabled).length}`);
+  check('包级关闭：被连坐的行写明「所属包已停用」',
+    members.length > 0 && members.every((r) => /所属包已停用/.test(r.querySelector('.plug-note').textContent)),
+    members.length ? members[0].querySelector('.plug-note').textContent : '(一行都没找到)');
+  check('包级关闭：清单里这些行 offBy=bundle',
+    uiRowIds.filter((id) => id !== SELF).every((id) => itemOf(id).offBy === 'bundle'),
+    uiRowIds.filter((id) => id !== SELF).map((id) => `${id}:${itemOf(id).offBy}`).join(' '));
+  const selfRow = rowOf(SELF);
+  check('防自锁：管理器自己还在、阶段仍是 active、抽屉还开着',
+    !!selfRow && itemOf(SELF).phase === 'active' && !!DW() && DW().classList.contains('show'),
+    `phase=${selfRow ? itemOf(SELF).phase : '行丢了'}；抽屉 ${DW() ? (DW().classList.contains('show') ? '仍开着' : '被关掉了') : '整个被摘掉了'}`);
+  check('防自锁：管理器的单项开关禁用并写明原因',
+    !!selfRow && selfRow.querySelector('.plug-switch').disabled
+    && /不能停用自己/.test(selfRow.querySelector('.plug-note').textContent),
+    selfRow ? selfRow.querySelector('.plug-note').textContent : '(无)');
+  check('包级关闭：顶部计数立刻变', Number(cnt('active')) === activeBeforeB - members.length,
+    `active ${activeBeforeB} → ${cnt('active')}`);
+  check('包级选择落盘', state.isBundleOff('ui') === true, `isBundleOff('ui')=${state.isBundleOff('ui')}`);
+
+  uiSec.click();                                     // 重新开包
+  await wait(40);
+  check('包级重开：包内成员回到 active',
+    uiRowIds.every((id) => itemOf(id).phase === 'active'),
+    uiRowIds.map((id) => `${id}:${itemOf(id).phase}`).join(' '));
+  check('包级重开：管理器的单项开关依旧禁用（防自锁是常态）',
+    !!rowOf(SELF) && rowOf(SELF).querySelector('.plug-switch').disabled, 'disabled=true');
+
+  // 两级优先级：包级关掉再打开，包内成员自己的单项选择要原样回来
+  const tSw = () => { const r = rowOf(T); return r ? r.querySelector('.plug-switch') : null; };
+  tSw().click();
+  await wait(30);
+  uiSec.click(); await wait(30);                     // 关包
+  uiSec.click(); await wait(30);                     // 开包
+  check('包级重开不吞单项选择：ui.log 仍是单项停用', itemOf(T).offBy === 'item', `offBy=${itemOf(T).offBy}`);
+  const tSw2 = rowOf(T) && rowOf(T).querySelector('.plug-switch');
+  if (tSw2) tSw2.click();                            // 还原
+  await wait(30);
+
+  // ── ④ 失败行：真内核报出来的 failed ────────────────────────
+  const beforeC = ROWS();
+  host.define({
+    id: 'xiaomo.test.boom', name: '故意炸的插件', version: '9.9.9', kind: 'ui',
+    desc: 'K3 探针用：setup 必抛错，用来验证 failed 行的呈现', author: 'K3 探针',
+    setup() { throw new Error('K3 故意抛错'); },
+  });
+  host.install('xiaomo.test.boom');
+  await wait(40);
+  const boom = rowOf('xiaomo.test.boom');
+  check('失败行：内核真的报 failed', !!boom && itemOf('xiaomo.test.boom').phase === 'failed',
+    boom ? `phase=${itemOf('xiaomo.test.boom').phase} error=${itemOf('xiaomo.test.boom').error}` : '行没出现');
+  check('失败行：徽标 failed + 红边框 + 错误文案',
+    !!boom && boom.querySelector('.plug-phase').dataset.phase === 'failed'
+    && boom.classList.contains('bad') && /K3 故意抛错/.test(boom.querySelector('.plug-err').textContent),
+    boom ? `${boom.querySelector('.plug-phase').textContent} / "${boom.className}" / ${boom.querySelector('.plug-err').textContent}` : '(无)');
+  const afterC = ROWS();
+  check('失败行是「补一行」，其余行既没重建也没乱序',
+    afterC.length === beforeC.length + 1
+    && beforeC.every((el) => afterC.includes(el))
+    && afterC.filter((el) => beforeC.includes(el)).join() === beforeC.join(),
+    `旧行 ${beforeC.length} 条全部保留且相对顺序不变`);
+  host.uninstall('xiaomo.test.boom');
+  host.records.delete('xiaomo.test.boom');
+  host.order.splice(host.order.indexOf('xiaomo.test.boom'), 1);
+  inv.notify();
+  await wait(40);
+  check('清单里没有的行会被摘掉（不留孤儿）',
+    !rowOf('xiaomo.test.boom') && ROWS().length === beforeC.length,
+    `行数回到 ${ROWS().length}`);
+
+  // ── ⑤ 五阶段视觉可区分 + 瞬时态真的渲染过 ──────────────────
+  // 注意：节点必须先进文档再算计算样式，否则拿到的全是一串空字符串（探针自己踩过）。
+  const probe = d.createElement('div');
+  probe.style.position = 'absolute'; probe.style.left = '-9999px';
+  d.body.appendChild(probe);
+  const styleOf = {};
+  for (const p of P5) {
+    const b = d.createElement('span');
+    b.className = 'plug-phase'; b.dataset.phase = p;
+    probe.appendChild(b);
+    const cs = w.getComputedStyle(b);
+    styleOf[p] = [cs.color, cs.backgroundColor, cs.borderTopColor, cs.borderTopStyle].join('|');
+  }
+  check('五阶段徽标两两可区分（颜色/底/边框/线型）', new Set(Object.values(styleOf)).size === 5,
+    Object.entries(styleOf).map(([k, v]) => k + '=' + v).join('  '));
+  probe.remove();
+  check('瞬时态真的被渲染过（unloading / loading / pending）',
+    seen.has('unloading') && seen.has('loading') && seen.has('pending'),
+    `本次观察到：${[...seen].join(' / ')}`);
+
+  // ── ⑥ footer 文案与真实行为一致 ───────────────────────────
+  const hint = inDW('.drawer-hint').textContent;
+  const reloadBtn = inDW('#btnReload');
+  check('footer 不再出现「停用后需要刷新」这句假话',
+    !/停用某个插件后需要刷新|需要刷新页面才会真正卸载/.test(hint), hint);
+  check('footer 写明开关立即生效', /立即生效|当场/.test(hint), hint);
+  check('「重新装载」入口在，且走 reload 而不是刷新页面',
+    !!reloadBtn && reloadBtn.textContent.trim() === '重新装载' && !/location\.reload|刷新/.test(reloadBtn.title),
+    reloadBtn ? `${reloadBtn.textContent.trim()} / ${reloadBtn.title}` : '(无)');
+  const hrefBefore = w.location.href, activeBeforeE = Number(cnt('active'));
+  reloadBtn.click();
+  await wait(300);
+  check('点「重新装载」不导航、不丢件、不翻倍',
+    w.location.href === hrefBefore && Number(cnt('active')) === activeBeforeE && Number(cnt('failed')) === 0,
+    `href 未变；active ${activeBeforeE} → ${cnt('active')}；failed=${cnt('failed')}`);
+
+  // ── ⑦ Esc 关闭 + 焦点回归 🧩 ──────────────────────────────
+  // 先测最容易掉链的那一种：顶栏也被整槽重渲染过（ui.* 停用时它自己的入口被摘掉），
+  // 最初那个触发节点已经不在文档里 —— 焦点必须退回到当前这一枚 🧩，不能掉到 BODY。
+  /**
+   * 按 Esc 并等它结算。退场以 transitionend 为主信号，但**后台标签页里浏览器不推进 CSS 过渡**：
+   * transitionend 不会来，收尾的兜底定时器也被节流，收尾逻辑就永远不跑。
+   * 所以这里在等不到的时候手动派发一次与内核事件同形的 transitionend（target=mask、propertyName=opacity），
+   * 让断言测的是"收尾逻辑对不对"，而不是"这个标签页此刻在前台吗"。
+   * 真实过渡路径另行用真实按键验证过（Esc 收起 → Enter 重新打开）。
+   */
+  const escClose = async () => {
+    w.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await wait(300);
+    const m = DW();
+    if (m && m.classList.contains('show')) {
+      m.dispatchEvent(new w.TransitionEvent('transitionend', { propertyName: 'opacity', bubbles: true }));
+    }
+    await wait(120);
+  };
+
+  const btnNow = d.getElementById('btnPlugins');
+  check('顶栏入口被整槽重渲染过，但入口还在（换了新节点，功能不变）',
+    !!btnNow && btnNow.id === 'btnPlugins',
+    btnNow ? (btnNow === btn ? '仍是同一个节点' : '节点已换新，探针接下来用的就是新节点') : '入口不见了');
+  await escClose();                                  // 退场以 transitionend 为主信号，由 escClose 负责让它结算
+  check('Esc 关闭后焦点回到 🧩 按钮（原触发节点已被换掉时，退回当前那一枚）',
+    d.activeElement === btnNow,
+    `activeElement=${d.activeElement && (d.activeElement.id || d.activeElement.tagName)}；当前 🧩 就是探针手上这枚=${btnNow === d.getElementById('btnPlugins')}`);
+  check('抽屉收起（show 已摘掉）', !!DW() && !DW().classList.contains('show'), 'mask 不带 show');
+
+  // 再来一次干净的往返：关着 → 打开（焦点进抽屉）→ Esc（焦点回 🧩）
+  btnNow.focus(); btnNow.click();
+  await wait(60);
+  check('再次打开：焦点进入抽屉', !!DW() && DW().contains(d.activeElement),
+    `activeElement=${d.activeElement && (d.activeElement.className || d.activeElement.tagName)}`);
+  await escClose();
+  check('干净往返：Esc 之后焦点仍在 🧩 上',
+    d.activeElement === btnNow,
+    `activeElement=${d.activeElement && (d.activeElement.id || d.activeElement.tagName)}`);
+
+  // ── 还原：探针与用户共用同一份 localStorage，不能留下残局 ────
+  // 放在 finally 里：任何一条断言把自己跑挂，也不能把「ui 包被停用」留在盘上。
+} finally {
+  try {
+    // 收尾一律回到"全开"：探针既能自愈上一轮留下的残局，也不会把停用状态留在盘上
+    for (const it of inv.snapshot().items) {
+      if (it.id === SELF) continue;
+      state.setItem(it.id, true);
+      state.setBundle(it.kind, true);
+      host.enable(it.id);
+    }
+    state.setBundle('ui', true);
+    state.setBundle('equipment', true);
+    await wait(80);
+    const end = inv.snapshot();
+    endSnap = end;
+    check('还原后：全部 active、没有 offBy、没有失败',
+      end.counts.active === end.total && end.counts.failed === 0 && end.items.every((it) => it.offBy === null),
+      JSON.stringify(end.counts) + ` 状态键=${w.localStorage.getItem('xiaomo.plugins.state.v1')}`);
+  } catch (e) {
+    check('还原本身没抛错（否则盘上会留下停用状态）', false, e && e.message);
+  }
+  watchBadges();
+  host.stats = statsBak; host.list = listBak;
+}
+fin({ total: endSnap ? endSnap.total : null });
+}
+}
+</script>
+</body>
+</html>

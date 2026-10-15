@@ -302,12 +302,17 @@ class Reagent extends Entity {
   }
 }
 
+// 键一律是 species.js 的 SP 键（≠ 化学式，例如 NH3H2O 而 f 是「NH₃·H₂O」）
 const LIQUIDS = [
-  'HCl', 'H2SO4', 'HNO3', 'CH3COOH', 'NaOH', 'KOH', 'Ca(OH)2', 'NH3H2O',
-  'CuSO4', 'CuCl2', 'FeSO4', 'FeCl3', 'KMnO4', 'NaCl', 'KCl', 'ZnSO4',
-  'Na2SO4', 'Na2CO3', 'NaHCO3', 'AgNO3', 'BaCl2', 'H2O2', 'H2O',
+  'H2O', 'C2H5OH', 'HCl', 'H2SO4', 'HNO3', 'CH3COOH', 'NaOH', 'KOH', 'Ca(OH)2', 'NH3H2O',
+  'CuSO4', 'CuCl2', 'FeSO4', 'FeCl3', 'KMnO4', 'NaCl', 'KCl', 'ZnSO4', 'MgSO4',
+  'Na2SO4', 'Na2CO3', 'NaHCO3', 'AgNO3', 'BaCl2', 'H2O2',
 ];
-const SOLIDS = ['Zn', 'Fe', 'Mg', 'Al', 'Cu', 'CuO', 'MnO2', 'CaO', 'CaCO3'];
+// ⚠ 导出给「滴瓶」用：它的物种下拉必须与试剂瓶**同源**，否则两处清单会各自漂移
+export { LIQUIDS };
+// Ag 与 MgSO4 / C2H5OH 是本轮盘点里实测的缺口：SP 里有该物质，
+// 却既没有试剂瓶、也没有任何 RULES 能生成它 —— 这三种必须靠瓶子进场。
+const SOLIDS = ['Zn', 'Fe', 'Mg', 'Al', 'Cu', 'Ag', 'CuO', 'MnO2', 'CaO', 'CaCO3'];
 const INDICATORS = ['Phenolphthalein', 'Litmus'];
 
 function makeReagent(id, cat, icon) {
@@ -335,6 +340,33 @@ function makeReagent(id, cat, icon) {
 for (const id of LIQUIDS) makeReagent(id, '液体药品', '🧴');
 for (const id of SOLIDS) makeReagent(id, '固体药品', '🧱');
 for (const id of INDICATORS) makeReagent(id, '酸碱指示剂', '🎨');
+
+// ══════════════════════════════════════════════════════════
+// 「可主动加料」能力 —— 规则只写这一处，调用方只问能力
+//
+// 判据是**器材自带的东西**（props.reagent + props.dose），不是 type 前缀。
+// 于是以后新增加料器材（滴瓶、洗瓶……）只要带上这两项就能被倒进容器，
+// **不必再改 src/main.js 与 src/ui/interact.js**。
+// 固/液也按这件器材**自己的定义**分，不再用 'reagent-' + id 去反查（那是把命名当契约）。
+// ══════════════════════════════════════════════════════════
+export function canFeed(ent) {
+  return !!(ent && ent.props && ent.props.reagent != null && ent.props.dose > 0);
+}
+
+/**
+ * 把 ent 带着的那份物质加进 vessel。
+ * @returns {{id:string,dose:number,solid:boolean,name:string}|null} 不可加料时返回 null
+ */
+export function feedInto(ent, vessel) {
+  if (!vessel || !canFeed(ent)) return null;
+  const id = ent.props.reagent;
+  const dose = ent.props.dose;
+  const solid = !!(ent.def && ent.def.cat === '固体药品');
+  const name = (ent.def && ent.def.name) || id;
+  if (solid) vessel.addSolid(id, dose);
+  else vessel.addLiquid(id, dose);
+  return { id, dose, solid, name };
+}
 
 export { Electrode, Thermometer, PHMeter, GlassRod, Balance, PHPaper, Reagent };
 

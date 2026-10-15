@@ -1,0 +1,64 @@
+{
+  "schemaVersion": "1.0.0",
+  "revision": "xiaomo-lab-catalog-1",
+  "items": [
+    {
+      "id": "lab-timer",
+      "name": "xiaomo-lab-timer",
+      "displayName": "实验计时器",
+      "summary": "顶栏加一个秒表：开始 / 暂停 / 归零，读数是真实时间而不是帧数。",
+      "description": "单文件零依赖的界面插件示例。它只用宿主交出来的四样东西：topbar.right 插槽、toast、log、onDispose，自己建的浮层自己拆。用来当面证明「只能通过 setup(ctx) 拿宿主能力」这条约束并不过分。",
+      "homepage": "https://github.com/yumoii789/xiaomo-lab",
+      "latestVersion": "1.0.0",
+      "license": "MIT",
+      "categories": ["interface"],
+      "keywords": ["计时", "秒表", "工具"],
+      "repository": {
+        "url": "https://github.com/yumoii789/xiaomo-lab",
+        "subdirectory": "market/plugins"
+      },
+      "publisher": {
+        "name": "小墨实验室",
+        "url": "https://github.com/yumoii789"
+      },
+      "capabilities": {
+        "required": ["ui.topbar"],
+        "optional": ["ui.overlay"]
+      },
+      "compatibility": {
+        "apiVersion": "1.x",
+        "hosts": ["xiaomo>=2.0"]
+      }
+    },
+    {
+      "id": "equipment-booster",
+      "name": "xiaomo-community-equipment-booster",
+      "displayName": "器材扩充包",
+      "summary": "往器材面板里真的加三件派生器材：9V 层叠电池、宽口烧杯 500 mL、定值电阻 50 Ω。",
+      "description": "单文件零依赖的器材插件示例。它一行引擎代码都没有，只是把宿主已有的「器材包」服务装上一份纯数据：每件器材声明自己派生自哪件已有器材，行为全部继承原型。它同时证明了两件事：社区插件能真的加器材；以及第三方扩展的能力边界被宿主钉死 —— 能配置程序，不能改程序。",
+      "homepage": "https://github.com/yumoii789/xiaomo-lab",
+      "latestVersion": "1.0.0",
+      "license": "MIT",
+      "categories": ["equipment"],
+      "keywords": ["器材", "电学", "玻璃器皿"],
+      "repository": {
+        "url": "https://github.com/yumoii789/xiaomo-lab",
+        "subdirectory": "market/plugins"
+      },
+      "publisher": {
+        "name": "小墨实验室",
+        "url": "https://github.com/yumoii789"
+      },
+      "capabilities": {
+        "required": ["equipment.pack"]
+      },
+      "compatibility": {
+        "apiVersion": "1.x",
+        "hosts": ["xiaomo>=2.0"]
+      }
+    }
+  ],
+  "page": {
+    "total": 2
+  }
+}

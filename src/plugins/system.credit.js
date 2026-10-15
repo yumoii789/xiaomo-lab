@@ -1,13 +1,17 @@
-// ══════════════════════════════════════════════════════════
+﻿// ══════════════════════════════════════════════════════════
 // 系统插件：学分与实验室管理员
 //
 //   正确做实验 → 加分（成就体系，一次性解锁）
 //   弄坏仪器   → 扣分（由 xiaomo.rules.damage 抛事件）
 //   学分归零   → 管理员把你踢出实验室
 //   重启之后   → 学分与实验进度一切复原（不落盘、不追责）
+//
+// 定位：**娱乐性玩法，不是实验的一部分**。所以它是一个可以整个关掉的内置插件
+// （设置面板 →「学分系统（娱乐）」）。关掉之后损坏照旧发生，只是不再计分、不再请人出去。
 // ══════════════════════════════════════════════════════════
 
 import { bus, EV } from '../core/bus.js';
+import { installLongPress, hasCoarsePointer } from '../ui/touch.js';
 
 export const MAX_CREDIT = 100;
 
@@ -190,19 +194,29 @@ function exitMs(root) {
 
 export default {
   id: 'xiaomo.system.credit',
-  name: '学分与管理员',
+  name: '学分系统（娱乐）',
   version: '1.0.0',
   kind: 'system',
-  desc: '正确实验加分、损坏仪器扣分，学分扣完由实验室管理员把你请出去',
+  desc: '娱乐性玩法：正确实验加分、损坏仪器扣分，扣完由实验室管理员把你请出去。可在「设置」里随时关掉，关掉后不再计分',
   author: '小墨实验室',
   builtin: true,
-  tags: ['学分', '成就', '管理员'],
+  tags: ['学分', '成就', '管理员', '娱乐'],
   requires: ['xiaomo.rules.damage'],
   setup(ctx) {
     const app = ctx.app;
     const credit = new CreditSystem(app);
     app.credit = credit;
-    app.addTick((dt) => credit.tick(dt));
+
+    // 停用要把这套东西拆干净。宿主只自动回收经 ctx.slot / ctx.onDispose 登记的东西，
+    // 而 app.addTick、bus.on、app.credit 都是直接挂在原对象上的（ctx.app / ctx.bus 就是原对象），
+    // 不登记的话关掉之后计时器还在跑、成就还会弹、app.credit 还留着个死对象。
+    const busUnsubs = [];
+    ctx.onDispose(app.addTick((dt) => credit.tick(dt)));
+    ctx.onDispose(() => {
+      if (app.credit === credit) app.credit = null;      // 「关了」就得真的不是可用对象
+      if (achRoot) { achRoot.remove(); achRoot = null; }
+      for (const off of busUnsubs.splice(0)) { try { off(); } catch { /* 已解绑 */ } }
+    });
 
     // ── 成就浮层：居中偏上、带 🎓 与学分数字，比日常提示停留更久（C7）──
     let achRoot = null;
@@ -243,16 +257,38 @@ export default {
     credit.onAchievement = showAchievement;
 
     // 损坏 → 扣分
-    bus.on('equipment:broken', (info) => {
+    const onBroken = (info) => {
       credit.penalty(info.cost || 5, info.reason);
       app.log.push('danger', `💥 ${info.reason}（-${info.cost} 学分）`);
-    });
+    };
+    bus.on('equipment:broken', onBroken);
+    busUnsubs.push(() => bus.off('equipment:broken', onBroken));
 
     // ── 学分徽章：挂在顶栏右侧 ──
     ctx.slot('topbar.right', (host) => {
       const el = document.createElement('div');
       el.className = 'credit-badge';
-      el.title = '学分：正确实验会加分，损坏仪器会扣分';
+      el.title = '学分（娱乐功能，可在设置中关闭）：正确实验会加分，损坏仪器会扣分 · 右键或长按打开设置';
+      // 徽章是最显眼的位置，右键直达设置能省掉「先去找 ⚙」这一步。
+      // ⚠ 触屏没有右键，所以下面还要补一条长按路径；两者**走同一个入口**：
+      // 都只是派发 xiaomo:settings，没有第二份「打开设置」的逻辑。
+      const openSettings = () => {
+        window.dispatchEvent(new CustomEvent('xiaomo:settings', { detail: true }));
+      };
+      el.addEventListener('contextmenu', (ev) => {
+        ev.preventDefault();
+        openSettings();
+      });
+      // 触屏长按 = 桌面右键。复用 src/ui/touch.js 的公共长按识别器，
+      // 不在这里另写一套（阈值/取消语义必须是同一份，否则第二处会漂移）。
+      // ownOrigin:false —— 那个识别器默认会跳过 .credit-badge 上的手势，
+      // 那是为了不让「主题圆钮的长按」误接管徽章；徽章**自己**来装就必须关掉它。
+      // pressScale —— 粗指针上按下时徽章缩一下，否则长按期间完全没有可见反馈。
+      installLongPress(el, openSettings, {
+        ownOrigin: false,
+        pressScale: 0.9,
+        hasCoarsePointer,
+      });
       el.innerHTML = `
         <span class="credit-ico">🎓</span>
         <span class="credit-num">100</span>
@@ -266,7 +302,7 @@ export default {
         el.classList.toggle('low', p <= 0.3);
         el.classList.toggle('mid', p > 0.3 && p <= 0.6);
       };
-      bus.on('credit:changed', paint);
+      busUnsubs.push(bus.on('credit:changed', paint));
       paint();
       host.appendChild(el);
     }, { order: 10 });
@@ -326,7 +362,7 @@ export default {
         const btn = mask.querySelector('.expel-btn');
         if (btn && btn.focus) btn.focus({ preventScroll: true });
       };
-      bus.on('credit:expelled', show);
+      busUnsubs.push(bus.on('credit:expelled', show));
 
       /** 关闭并在退场结束后执行 after（after 在未打开时也会执行，避免状态卡住） */
       const close = (after) => {

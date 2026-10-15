@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>插槽协调探针 · 小墨实验室</title>
+<style>
+  body{margin:0;padding:16px;background:#0b0f0d;color:#a3e635;
+       font:12.5px/1.65 Consolas,'Cascadia Mono',monospace}
+  h1{font-size:14px;color:#e7efe9;margin:0 0 10px}
+  pre{margin:0;white-space:pre-wrap;word-break:break-all;color:#cfe8b8}
+  iframe{position:absolute;left:-20000px;top:0;width:1280px;height:820px;border:0}
+</style>
+</head>
+<body>
+<h1>插槽协调探针 v1（无头诊断专用，tools/ 不参与打包）</h1>
+<pre id="out">加载中…</pre>
+<iframe id="fr" title="被测应用"></iframe>
+<script type="module">
+// ══════════════════════════════════════════════════════════
+// 证明 mountSlot 是「按条目增量协调」而不是「整槽重建」
+//
+// 为什么必须在真浏览器里跑：这一版修的是**节点身份**——复用、移动、摘除，
+// 都取决于真实的 el.contains / appendChild / insertBefore 语义。用 DOM 替身
+// 验「节点还在不在」只能验出替身的实现，验不出浏览器的行为。
+//
+// 加载方式与 boot-probe.html 一致：离屏 iframe 里跑真实 index.html，
+// 断言全部通过 iframe 的真实 DOM 做，最后只吐一行 SLOT_JSON 给机器读。
+// index.html 里的插槽宿主容器是固定的，所以自定义插槽由本探针自己造
+// [data-slot] 容器 —— 不改 index.html 也能覆盖 keyed / 抛错 / 摘除三条路径。
+// ══════════════════════════════════════════════════════════
+
+const out = document.getElementById('out');
+const fr = document.getElementById('fr');
+const lines = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); };
+
+const result = { probe: 'slot-coordination', version: 1, ok: false, pass: 0, fail: 0, checks: [], ids: null, error: null };
+let pass = 0, fail = 0;
+const ok = (name, cond, detail) => {
+  if (cond) { pass++; log('  ✓ ' + detail); }
+  else { fail++; log('  ✗ ' + detail); }
+  result.checks.push({ name, pass: !!cond, detail: String(detail) });
+};
+const head = (t) => log('\n' + t);
+
+// 缓存穿透：必须让 iframe 加载一份全新的 index.html，否则量到的是上一次的模块实例
+fr.src = '../index.html?cb=' + Date.now();
+fr.addEventListener('load', () => setTimeout(run, 1000));
+
+async function run() {
+  const w = fr.contentWindow, doc = fr.contentDocument;
+  const app = w.xiaomo;
+  const CREDIT = 'xiaomo.system.credit';
+  const SETTINGS_EVENT = 'xiaomo:settings';
+  const testIds = ['probe.slot.overlay', 'probe.slot.topbar', 'probe.slot.keyed', 'probe.slot.throw'];
+  const createdHosts = [];
+  let restoreAdd = null;
+  let creditWasClickable = false;
+
+  try {
+    if (!app || !app.host) throw new Error('iframe 里没有 window.xiaomo.host');
+    const host = app.host;
+    const tick = (ms = 60) => new Promise((r) => setTimeout(r, ms));
+    const q = (s) => doc.querySelector(s);
+    const mk = (id, slotName, order, node) => ({   // 造一个只干一件事的探针插件
+      id, name: id, version: '0.0.1', kind: 'panel',
+      setup(ctx) { ctx.slot(slotName, node, { order }); },
+    });
+
+    const slotHost = (name) => {                 // index.html 里没有的插槽，自己造宿主容器
+      const el = doc.createElement('div');
+      el.setAttribute('data-slot', name);
+      doc.body.appendChild(el);
+      createdHosts.push(el);
+      return el;
+    };
+
+    // ── 给条目挂「归属」标记：把 render 包一层，把本次新增的直接子节点打上该条目的
+    //    pluginId。这样「DOM 顺序 == slotItems 顺序」能被机器断言，而不是靠人眼看按钮顺序。
+    //    必须连 host.slot 一起包：插件重装（比如拨学分开关）会创建**新条目**，
+    //    只包当前这批旧条目的话，重装出来的节点就没有归属标记了。
+    const wrap = (render, owner) => {
+      const wrapped = function (el, slotName) {
+        const before = new Set(el.children);
+        const r = render.call(this, el, slotName);
+        for (const n of [...el.children]) {
+          if (before.has(n) || n.nodeType !== 1) continue;
+          n.dataset.probeOwner = owner;
+        }
+        return r;
+      };
+      wrapped.__probeOwner = owner;                 // 标记自己包过，防止重复包装
+      return wrapped;
+    };
+    const realSlot = host.slot.bind(host);
+    host.slot = function (name, render, opts) {
+      if (opts && opts.kind === 'chain') return realSlot(name, render, opts);   // 串联插槽不挂 DOM
+      return realSlot(name, wrap(render, (opts && opts.pluginId) || 'unknown'), opts);
+    };
+    // 开机那批条目在补丁之前就注册完了，补包一次；render 身份变了 → 下一次协调会重渲染（预期）
+    const instrument = (name) => {
+      for (const item of host.slotItems(name)) {
+        if (item.kind === 'chain' || item.render.__probeOwner) continue;
+        item.render = wrap(item.render, item.pluginId);
+      }
+      app.mountSlot(name);
+    };
+
+    // ══════════════════════════════════════════════════════
+    head('探针 A/B：不相关条目的 DOM 不再被重建');
+    instrument('topbar.right');
+    instrument('overlay');
+    await tick();
+
+    const before1 = doc.getElementById('btnPlugins');
+    const before2 = doc.getElementById('btnSettings');
+    if (!before1 || !before2) throw new Error('顶栏找不到 btnPlugins / btnSettings，无法断言');
+    before1.__probeMark = 'plugins-mark';
+    before2.__probeMark = 'settings-mark';
+
+    // A：动**另一个插槽**（往 overlay 加一个条目）
+    host.define(mk('probe.slot.overlay', 'overlay', 50, (el) => {
+      const d = doc.createElement('div');
+      d.className = 'probe-node'; d.textContent = 'probe-overlay';
+      el.appendChild(d);
+    }));
+    host.install('probe.slot.overlay');
+    await tick();
+    const aOk = doc.getElementById('btnPlugins') === before1 && before1.__probeMark === 'plugins-mark'
+      && doc.getElementById('btnSettings') === before2 && before2.__probeMark === 'settings-mark';
+    ok('no-rebuild-other-slot', aOk,
+      `动 overlay 槽后，topbar.right 的两个节点仍是同一批对象：btnPlugins=${doc.getElementById('btnPlugins') === before1} btnSettings=${doc.getElementById('btnSettings') === before2} 标记保留=${before1.__probeMark}/${before2.__probeMark}`);
+
+    // B：动**同一个插槽**（往 topbar.right 加一个 order=45 的条目）—— 更狠的一版
+    host.define({ id: 'probe.slot.topbar', name: 'probe.slot.topbar', version: '0.0.1', kind: 'panel',
+      setup(ctx) {
+        ctx.slot('topbar.right', (el) => {
+          const b = doc.createElement('button');
+          b.type = 'button'; b.id = 'btnProbeNew'; b.className = 'tb-btn'; b.textContent = '🧪';
+          el.appendChild(b);
+        }, { order: 45 });
+      } });
+    host.install('probe.slot.topbar');
+    await tick();
+    const bOk = doc.getElementById('btnPlugins') === before1 && doc.getElementById('btnSettings') === before2
+      && before1.__probeMark === 'plugins-mark' && !!doc.getElementById('btnProbeNew');
+    ok('no-rebuild-same-slot', bOk,
+      `动 topbar.right 自身后，老节点仍是同一批对象：btnPlugins=${doc.getElementById('btnPlugins') === before1} btnSettings=${doc.getElementById('btnSettings') === before2} 新按钮已挂=${!!doc.getElementById('btnProbeNew')}`);
+
+    // ══════════════════════════════════════════════════════
+    head('探针 C：真实症状 —— 拨学分开关时抽屉不重建、window 监听器不泄漏');
+    // 先把学分强制到「开」，这样开关的第一次点击必定走 disable 路径（结果确定）
+    if (app.pluginState && app.pluginState.setItem) app.pluginState.setItem(CREDIT, true);
+    host.enable(CREDIT);
+    await tick();
+
+    const badge = () => q('[data-slot="topbar.right"] .credit-badge');   // 学分徽章只有 class，没有 id
+
+    w.dispatchEvent(new w.CustomEvent(SETTINGS_EVENT, { detail: true }));   // 点 ⚙ 打开抽屉
+    await tick();
+    const mask0 = doc.getElementById('setRowCredit') ? doc.getElementById('setRowCredit').closest('.drawer-mask') : null;
+    if (!mask0) throw new Error('设置抽屉没打开，无法断言');
+    const sw = mask0.querySelector('.plug-switch');
+    const openBefore = mask0.classList.contains('show') && mask0.classList.contains('in');
+    creditWasClickable = !!sw && !!badge();
+    /** 现役抽屉节点：拿只有设置抽屉才有的 #setRowCredit 反查，避免和别的 .drawer-mask 撞名 */
+    const maskNow = () => { const r = doc.getElementById('setRowCredit'); return r ? r.closest('.drawer-mask') : null; };
+
+    // window.addEventListener 计数：插件的 onWin() 正是在渲染函数里注册的
+    const adds = {};
+    const realAdd = w.addEventListener;
+    w.addEventListener = function (type, fn, opt) { adds[type] = (adds[type] || 0) + 1; return realAdd.call(this, type, fn, opt); };
+    restoreAdd = () => { w.addEventListener = realAdd; };
+
+    if (sw) sw.click();                                 // 真实点击：host.disable(CREDIT,'item') + 落盘
+    await tick();
+    restoreAdd();
+    const badgeGone = !badge();
+    const maskSame = maskNow() === mask0;
+    const cOk = openBefore && creditWasClickable && badgeGone && maskSame
+      && (adds[SETTINGS_EVENT] || 0) === 0 && (adds.keydown || 0) === 0;
+    ok('drawer-survives-toggle', cOk,
+      `拨开关后：抽屉节点是同一个=${maskSame} 仍开着=${mask0.classList.contains('show')} 徽章已撤=${badgeGone}`
+      + ` 新增 window 监听 ${JSON.stringify(adds)}（设置的 ${SETTINGS_EVENT}/keydown 必须为 0）`);
+
+    // 拨回来（同时把持久化意图复位，别把用户的学分设置留在关掉的状态）
+    if (sw) sw.click();
+    if (app.pluginState && app.pluginState.setItem) app.pluginState.setItem(CREDIT, true);
+    await tick();
+    ok('credit-restored', !!badge() && maskNow() === mask0 && mask0.classList.contains('show'),
+      `拨回后：徽章回来了=${!!badge()} 抽屉还是原来那个节点=${maskNow() === mask0}`);
+
+    // ══════════════════════════════════════════════════════
+    head('探针 D：条目消失 → 只摘它自己的节点（别人的浮层一根手指都不碰）');
+    const probeNode = q('.probe-node');
+    host.disable('probe.slot.overlay');
+    await tick();
+    const dGone = !q('.probe-node');
+    const dMaskKept = maskNow() === mask0 && mask0.classList.contains('show');
+    host.enable('probe.slot.overlay');
+    await tick();
+    const dBack = !!q('.probe-node') && q('.probe-node') !== probeNode;
+    ok('removed-entry-removed', dGone && !!probeNode,
+      `停用后 probe 节点真的从 DOM 消失=${dGone}（停用前的那个节点对象还在别处=${!!probeNode}）`);
+    ok('unrelated-kept', dMaskKept,
+      `摘除期间同槽的抽屉节点原封不动且仍开着=${dMaskKept}`);
+    ok('reenable-restores', dBack,
+      `重新启用后节点回来了=${!!q('.probe-node')}（是新节点，符合预期=${q('.probe-node') !== probeNode}）`);
+
+    // ══════════════════════════════════════════════════════
+    head('探针 E：order 语义不变（DOM 顺序 == slotItems 顺序）');
+    const el = q('[data-slot="topbar.right"]');
+    const domOwners = [...el.children].map((n) => (n.nodeType === 1 ? n.dataset.probeOwner : null));
+    const uniq = (a) => a.filter((v, i) => v != null && a.indexOf(v) === i);
+    const domSeq = uniq(domOwners);
+    const entrySeq = uniq(host.slotItems('topbar.right').filter((i) => i.kind !== 'chain').map((i) => i.pluginId));
+    const ids = [...el.children].map((n) => n.id || n.className || n.tagName.toLowerCase()).filter(Boolean);
+    result.ids = ids;
+    const order = (id) => ids.indexOf(id);
+    ok('order-matches-slotItems', JSON.stringify(domSeq) === JSON.stringify(entrySeq),
+      `DOM 归属序列 == slotItems 序列\n     DOM : ${domSeq.join(' > ')}\n     契约: ${entrySeq.join(' > ')}`);
+    ok('order-tiebreak-and-insert', order('btnSettings') > -1 && order('btnPacks') > -1
+      && order('btnSettings') < order('btnPacks') && order('btnProbeNew') > order('btnPacks'),
+      `order=40 的两项按插入序稳定：${ids.join(' / ')}`);
+
+    // ══════════════════════════════════════════════════════
+    head('探针 H：渲染函数自己清空宿主时的自愈（ui.toolbar 的 topbar.right 渲染就是这种写法）');
+    // 这是真实存在的写法：order 最小的那个 render 会先把整个宿主清空。它一旦重跑，
+    // 同槽其他条目的节点就被外部销毁了 —— 协调器必须靠「节点还在不在树上」查出这件事并补渲染。
+    const idsBefore = [...el.children].map((n) => n.id || n.className || n.tagName.toLowerCase());
+    host.reload('xiaomo.ui.toolbar');
+    await tick();
+    const idsAfter = [...el.children].map((n) => n.id || n.className || n.tagName.toLowerCase());
+    const ownersAfter = uniq([...el.children].map((n) => (n.nodeType === 1 ? n.dataset.probeOwner : null)));
+    ok('self-heals-when-render-wipes-host',
+      idsAfter.length === idsBefore.length && JSON.stringify(ownersAfter) === JSON.stringify(entrySeq),
+      `重载 ui.toolbar（其 render 会清空整个宿主）后：子节点 ${idsBefore.length} → ${idsAfter.length} 个，归属序列 ${ownersAfter.join(' > ')}`);
+
+    // ══════════════════════════════════════════════════════
+    head('探针 F：keyed 同 key 替换必须重渲染（最容易写错的一条）');
+    const kh = slotHost('probe.slot.keyed');
+    const holder = {};
+    const renderV1 = (hostEl) => { const d = doc.createElement('div'); d.className = 'k'; d.textContent = 'v1'; hostEl.appendChild(d); };
+    const renderV2 = (hostEl) => { const d = doc.createElement('div'); d.className = 'k'; d.textContent = 'v2'; hostEl.appendChild(d); };
+    host.define({ id: 'probe.slot.keyed', name: 'probe.slot.keyed', version: '0.0.1', kind: 'panel',
+      setup(ctx) {
+        holder.ctx = ctx;
+        ctx.slot('probe.slot.keyed', renderV1, { kind: 'keyed', key: 'k1' });
+      } });
+    host.install('probe.slot.keyed');
+    await tick();
+    const v1 = kh.textContent;
+    const ent1 = host.slotItems('probe.slot.keyed')[0];
+    // 在 setup 之外调用 ctx.slot：插件按数据变化重挂自己那个 keyed 组件就是这条路径。
+    // 新条目会继承原条目的 seq，所以身份判定必须再看 render 函数本身。
+    holder.ctx.slot('probe.slot.keyed', renderV2, { kind: 'keyed', key: 'k1' });
+    await tick();
+    const v2 = kh.textContent;
+    const ent2 = host.slotItems('probe.slot.keyed')[0];
+    // 先把「陷阱确实存在」钉死：seq 被继承 = 只按 (pluginId, seq) 判身份必然命中缓存。
+    // 再钉死「本文实现仍然重渲染」：render 身份变了就重渲染。
+    ok('keyed-identity-trap-is-real', !!ent1 && !!ent2 && ent1.seq === ent2.seq && ent1.render !== ent2.render,
+      `陷阱成立：替换后 seq 被继承（${ent1 && ent1.seq} → ${ent2 && ent2.seq}），只按 (pluginId, seq) 找缓存必然误判为同一份；render 身份确实变了=${!!ent2 && ent1.render !== ent2.render}`);
+    ok('keyed-rerenders-on-replace', v1 === 'v1' && v2 === 'v2' && kh.children.length === 1,
+      `keyed 替换后 DOM 从 ${v1} 变成 ${v2}（条目数 ${kh.children.length}，必须仍是 1）`);
+
+    // ══════════════════════════════════════════════════════
+    head('探针 G：渲染函数抛错不影响同插槽其他条目，也不会越渲染越多');
+    const eh = slotHost('probe.slot.err');
+    host.define({ id: 'probe.slot.throw', name: 'probe.slot.throw', version: '0.0.1', kind: 'panel',
+      setup(ctx) {
+        ctx.slot('probe.slot.err', (hostEl) => {
+          const d = doc.createElement('span');
+          d.className = 'boom'; d.textContent = '半成品';
+          hostEl.appendChild(d);                      // 先挂一个再炸：半成品必须被跟踪住
+          throw new Error('probe 故意抛错');
+        }, { order: 10 });
+        ctx.slot('probe.slot.err', (hostEl) => {
+          const d = doc.createElement('span');
+          d.className = 'neighbor'; d.textContent = '邻居';
+          hostEl.appendChild(d);
+        }, { order: 20 });
+      } });
+    host.install('probe.slot.throw');
+    await tick();
+    const neighbor = q('.neighbor');
+    const n0 = eh.children.length;
+    for (let i = 0; i < 3; i++) app.mountSlot('probe.slot.err');   // 反复协调：不能越攒越多
+    const n1 = eh.children.length;
+    const gOk = !!neighbor && [...eh.children].includes(neighbor) && n0 === 2 && n1 === 2;
+    ok('throw-isolated', gOk,
+      `抛错条目之外的邻居还在=${!!neighbor} 且是同一节点=${[...eh.children].includes(neighbor)}；连调 3 次后子节点数 ${n0} → ${n1}（不得增长）`);
+
+    // ══════════════════════════════════════════════════════
+    head('探针 I：反复切换同一插件 N 次，overlay 槽的节点数不得随次数增长');
+    // 泄漏最易复发的形态就是这样：每切一次多留一份浮层/一份监听器。机械断言比人眼看可靠。
+    // 注意 overlay 里的浮层类名不统一：设置/管理器/市场是 .drawer-mask，学分的管理员弹窗是
+    // .expel-mask。所以这里断言的是「形态不随次数变化」，而不是「.drawer-mask 个数 == 插件数」
+    // —— 后者对不上不是 bug，只是类名不同。两个数都报出来供人工核对。
+    const ov = q('[data-slot="overlay"]');
+    const ovSnap = () => ({
+      children: ov.children.length,
+      drawerMask: ov.querySelectorAll('.drawer-mask').length,
+      expelMask: ov.querySelectorAll('.expel-mask').length,
+    });
+    const ovEntries = host.slotItems('overlay').filter((i) => i.kind !== 'chain');
+    const toggles = 5;
+    // 同时盯 window 监听器：学分插件的 overlay 渲染会注册，泄漏时每次切换都会再加几份
+    const adds2 = {};
+    const realAdd2 = w.addEventListener;
+    w.addEventListener = function (type, fn, opt) { adds2[type] = (adds2[type] || 0) + 1; return realAdd2.call(this, type, fn, opt); };
+    const s0 = ovSnap();
+    for (let i = 0; i < toggles; i++) {
+      host.disable(CREDIT, 'item'); await tick(25);
+      host.enable(CREDIT); await tick(25);
+    }
+    w.addEventListener = realAdd2;
+    const s1 = ovSnap();
+    ok('no-leak-across-N-toggles', JSON.stringify(s0) === JSON.stringify(s1),
+      `${toggles} 次停用/启用前后 overlay 槽形态一致=${JSON.stringify(s0) === JSON.stringify(s1)}：`
+      + `${JSON.stringify(s0)} → ${JSON.stringify(s1)}（overlay 条目 ${ovEntries.length} 个：${ovEntries.map((i) => i.pluginId).join(' / ')}）`);
+    ok('no-listener-leak-across-toggles', (adds2[SETTINGS_EVENT] || 0) === 0 && (adds2.keydown || 0) === 0,
+      `${toggles} 次切换期间新增 window 监听 ${JSON.stringify(adds2)}（设置的 ${SETTINGS_EVENT}/keydown 必须为 0）`);
+    ok('drawer-survives-N-toggles', maskNow() === mask0 && mask0.classList.contains('show'),
+      `${toggles} 次切换后抽屉仍是最初那个节点=${maskNow() === mask0} 且仍开着=${mask0.classList.contains('show')}`);
+
+  } catch (e) {
+    result.error = (e && e.message) || String(e);
+    log('\n✗ 探针异常：' + result.error);
+  } finally {
+    // 无论成败都把痕迹清干净：学分恢复、抽屉关掉、探针插件与自造容器全部撤掉
+    try {
+      if (restoreAdd) restoreAdd();
+      const app2 = fr.contentWindow && fr.contentWindow.xiaomo;
+      const host2 = app2 && app2.host;
+      if (app2 && app2.pluginState && app2.pluginState.setItem) app2.pluginState.setItem(CREDIT, true);
+      if (host2) { host2.enable(CREDIT); for (const id of testIds) { try { host2.uninstall(id); } catch { /* 已经不在 */ } } }
+      const doc2 = fr.contentDocument;
+      fr.contentWindow.dispatchEvent(new fr.contentWindow.CustomEvent(SETTINGS_EVENT, { detail: false }));
+      for (const el of createdHosts) el.remove();
+      const left = doc2 ? doc2.querySelectorAll('.probe-node, #btnProbeNew').length : -1;
+      const tail = doc2 ? [...doc2.querySelector('[data-slot="topbar.right"]').children].map((n) => n.id).filter(Boolean) : [];
+      log('\n清理：残留探针节点=' + left + '（必须 0）；topbar.right 收尾=' + tail.join(' / '));
+    } catch (e) { log('\n清理时出错：' + ((e && e.message) || e)); }
+
+    result.pass = pass; result.fail = fail; result.ok = fail === 0 && !result.error;
+    log('\n' + '─'.repeat(56));
+    log(fail === 0 && !result.error ? `插槽协调探针全部通过：${pass} 项` : `通过 ${pass} 项，失败 ${fail} 项` + (result.error ? '（异常：' + result.error + '）' : ''));
+    log('SLOT_JSON ' + JSON.stringify(result));
+    out.textContent = lines.join('\n');
+  }
+}
+</script>
+</body>
+</html>

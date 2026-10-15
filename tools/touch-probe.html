@@ -1,0 +1,656 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>触控探针 · 小墨实验室</title>
+<style>
+  html,body{margin:0;background:#0b0f0d;color:#a3e635;
+       font:12.5px/1.7 Consolas,'Cascadia Mono',monospace}
+  h1{font-size:14px;color:#e7efe9;margin:0 0 6px}
+  p{margin:0 0 10px;color:#8fa08c;font-size:11.5px}
+  #out{margin:0;white-space:pre-wrap;word-break:break-all;color:#cfe8b8}
+  .ok{color:#7ee787}.bad{color:#f26d6d}.skip{color:#fbbf24}.head{color:#e7efe9}
+  /* 被测应用放在视口外：不能让它盖住探针自己的输出，也不能让用户看见它闪 */
+  iframe{position:absolute;left:-30000px;top:0;width:390px;height:844px;border:0}
+  /* 只有场景 D 用得上宽视口：媒体查询按 iframe 自己的宽度求值 */
+  iframe.wide{width:1280px;height:820px}
+</style>
+</head>
+<body>
+<h1>触控适配探针 v1 · 小墨实验室</h1>
+<p>仓库内的正式验证资产（tools/ 不打进部署包）。把 index.html 装进 390×844 的 iframe，
+用 pointerType:'touch' 的真实 PointerEvent 序列驱动，最后输出一行 <code>TOUCH_JSON</code>。
+以 <code>msedge.exe --headless=new --mute-audio --touch-events=enabled --window-size=390,844</code>
+打开本页（无窗口、无声音），URL 带 <code>?cb=&lt;随机串&gt;</code> 绕开模块缓存。</p>
+<div class="head" style="border-left:3px solid #fbbf24;padding:6px 0 6px 10px;margin:0 0 12px">
+<p><strong>这个探针有两条已确认的适用边界，读它的结论前必须先看这里。</strong></p>
+<p><strong>1. 媒体特性改不了，探针量到的「指针能力」就是运行它的那个浏览器实例的。</strong>
+合成的 PointerEvent（<code>new PointerEvent('pointerdown', {pointerType:'touch'})</code>）能驱动
+监听器，但改不了 <code>matchMedia</code> —— <code>Emulation.setEmulatedMedia</code> 也改不了
+<code>pointer</code> / <code>any-pointer</code> / <code>hover</code>（实测六种组合返回同一组值）。
+所以本页实测永远是 <code>(pointer:coarse)=false</code>、<code>(any-pointer:coarse)=true</code>、
+<code>(hover:none)=false</code>：<strong>无头 Edge 的默认形态恰好就是「触屏笔记本」</strong>
+（主指针是触控板 → fine，但机器带触摸 → any-pointer coarse）。
+后果：凡是判据挂在 <code>pointer:coarse</code> 上的项（命中尺寸 ≥44px、提示文案互换），
+本页量到的是**桌面档位的值**，判不了。<strong>这类结论以 tools/touch-check.mjs 为准</strong> ——
+它用 <code>Emulation.setTouchEmulationEnabled</code> 真的把 <code>pointer:coarse</code> 打开
+（改用 <code>--touch-events=enabled</code> 启动浏览器也一样真），并且用
+<code>--size</code> 能同时覆盖 390×844 / 1920×1080 两种视口。
+探针里 A6 / A8 因此直接记为「本页验不了」而不是硬凑通过。</p>
+<p><strong>2. iframe 里的宽度相关布局可信，但 A/B 两段的可信度不同。</strong>
+iframe 自己有 390×844 的视口，媒体查询按它求值（实测 <code>innerWidth=390</code>、
+<code>(max-width:1024px)=true</code>、<code>#body</code> 栅格列 <code>390px</code>），
+所以 B 段的结构类结论（浮层化、实验台占满宽度）与 C/D 段都可信。
+但 iframe 有独立于宿主的布局时序，且 <code>window.xiaomo</code> 出现 ≠ 触控层装好
+（<code>touch.js</code> 要往插件渲染出来的顶栏插槽里插按钮，插槽没好时
+<code>installDockButtons()</code> 直接返回，得等它自己 <code>DOMContentLoaded</code> 的
+<code>recheck()</code>）—— 所以本文件里 <code>boot()</code> 会一直等到
+<code>data-touch-layer='ready'</code> 才算就绪，否则按钮存不存在会随运行时机变化。</p>
+<p><strong>3. B3~B5 已定性为「本页 iframe 的环境限制」，并改由主 realm 断言（Lead 裁决②）。</strong>
+现象：本页把 <code>index.html</code> 装进一个 <code>left:-30000px</code> 的 iframe，
+这个 iframe 里抽屉的位移读数恒为 <code>left=-320px</code>、<code>transitionend</code> <b>一次都不触发</b>；
+<code>paletteSlide</code> 9 次采样全程平直 <code>-320</code>，而当场 <code>matchesSel=true</code>、
+最终命中 <code>#palette[data-open]{transform:translateX(0px)}</code>、
+<code>getComputedStyle().transform</code> 仍是 <code>matrix(1,0,0,1,-320,0)</code>。</p>
+<p>已证伪的两个解释（都实测过，不是推断）：<b>①「过渡还没跑完」</b> —— 已加
+<code>waitTransition</code>（<code>transitionend</code> 或 600ms 上限先到者为准，两个方向都记）后
+读数不变、事件仍不触发；<b>②「离屏 iframe 不合成」</b> —— 把 iframe 的 <code>left</code> 从
+<code>-30000px</code> 改到 <code>0</code> 重跑，读数与事件<b>完全一样</b>。</p>
+<p>关键对照：<code>tools/touch-check.mjs</code> 在<b>主 realm</b>（顶层文档，产品真实运行处）
+用真实 CDP 触摸输入 + 等过 <code>--t-slow</code>(260ms)，得到 <code>palX=0</code>、
+<code>palVis=visible</code>、<code>sideRight=0</code>、<code>aria-expanded=true</code>，B3~B5 全绿，
+并且<b>已验证它能红</b>（注入「遮罩点击不收起」→ B5 红；注入「开着仍偏出 40px」→ B3/B4 红）。</p>
+<p><b>处置</b>：B3~B5 在主 realm 断言（<code>touch-check.mjs</code>），本页只把这段读数作为
+<b>已知事实</b>用 <code>note()</code> 记录、<b>不做断言</b> —— 一个永远红的断言会训练所有人忽略红色。
+本页其余断面（A/B1-B2/B6/C/D 等）仍在 iframe 里跑，因为那些量与布局宽度相关、iframe 宽度是可信的。</p>
+<pre id="out">运行中…</pre>
+<iframe id="fr" title="被测应用"></iframe>
+<script>
+'use strict';
+/* ══════════════════════════════════════════════════════════
+   探针设计说明
+   ──────────────────────────────────────────────────────────
+   · 断言必须发生在**应用自己的 realm**里：在同一个 contentWindow 上派发 PointerEvent、
+     在同一个 contentWindow 上读 world.entities。跨 realm 造事件对象会被浏览器拒绝。
+   · pointer 事件是异步派发的（dispatchEvent 返回不代表监听器跑完），
+     所以每次派发后都 await 一次宏任务，让事件队列真的跑一遍。
+   · 每个场景都「拆旧 iframe → 建新 iframe → 等 window.xiaomo」，
+     避免上一场景的状态（抽屉开着 / 器材还在 / 主题换过）污染下一场景。
+   · 需要真机才能确认的项（粘滞 hover、点击高亮、安全区实际值、软件键盘、
+     真机滚动）在这里**一律不假装验过**，只报告「代码侧保证是什么、真机该看什么」。
+   ══════════════════════════════════════════════════════════ */
+
+const out = document.getElementById('out');
+const lines = [];
+const results = { probe: 'touch-probe v1', checks: [], realDeviceOnly: [] };
+const esc = (s) => String(s).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+const log = (s, cls) => {
+  lines.push(cls ? '<span class="' + cls + '">' + esc(s) + '</span>' : esc(s));
+  out.innerHTML = lines.join('\n');
+};
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/**
+ * 等某个元素的位移过渡真正结束再读它。返回过渡结束后的读数（含是怎么结束的）。
+ * 为什么需要：getComputedStyle 读的是**当前动画值**，在合成帧提交前拿到的是起始值。
+ * 抽屉的位移是 transition（0.26s），读早了就会看到起点 -320px —— 而 -320 正好就是起点，
+ * 所以「读早了」和「根本没动」在单次读数上长得一模一样，只有等到过渡结束才能分开。
+ * 上限 600ms：超时也要出读数（how 会记成 timeout），不能因为没等到就什么都不报。
+ */
+function waitTransition(el, capMs) {
+  return new Promise((resolve) => {
+    const w = el.ownerDocument.defaultView;
+    let done = false;
+    const finish = (how) => {
+      if (done) return; done = true;
+      el.removeEventListener('transitionend', onEnd);
+      clearTimeout(timer);
+      const r = el.getBoundingClientRect();
+      resolve({ how, x: Math.round(r.left), tf: w.getComputedStyle(el).transform,
+                vis: w.getComputedStyle(el).visibility, open: el.hasAttribute('data-open') });
+    };
+    const onEnd = (e) => { if (e.target === el) finish('transitionend'); };
+    el.addEventListener('transitionend', onEnd);
+    const timer = setTimeout(() => finish('timeout-' + capMs + 'ms'), capMs);
+  });
+}
+
+const CB = (new URLSearchParams(location.search).get('cb') || 'probe') + '-' + Date.now();
+const APP = '../index.html?cb=' + encodeURIComponent(CB);
+
+function check(id, ok, detail) {
+  const rec = { id, ok: !!ok, detail };
+  results.checks.push(rec);
+  log((ok ? '  ✓ ' : '  ✗ ') + id + ' — ' + detail, ok ? 'ok' : 'bad');
+  return !!ok;
+}
+function note(id, detail) {
+  results.realDeviceOnly.push({ id, detail });
+  log('  ~ ' + id + '（需真机）', 'skip');
+  log('      ' + detail, 'skip');
+}
+
+/** 应用没就绪时的诊断：分得清「没启动」「还在启动」「跑挂了」 */
+function diagnose(w) {
+  try {
+    const d = w.document;
+    return JSON.stringify({
+      title: d.title,
+      hasXiaomo: !!w.xiaomo,
+      appChildren: d.getElementById('app') ? d.getElementById('app').children.length : null,
+      scripts: d.querySelectorAll('script').length,
+    });
+  } catch (e) { return 'diagnose 失败: ' + e.message; }
+}
+
+/** 拆掉旧 iframe、装一个新的、等 window.xiaomo **和触控层**都就绪 */
+function boot(wide) {
+  const old = document.getElementById('fr');
+  if (old) old.remove();
+  const fr = document.createElement('iframe');
+  fr.id = 'fr';
+  if (wide) fr.className = 'wide';
+  fr.src = APP + '&t=' + Math.random().toString(36).slice(2);
+  document.body.appendChild(fr);
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    const tick = () => {
+      let w = null;
+      try { w = fr.contentWindow; } catch (e) { /* 同源不会走这里，只是不炸 */ }
+      // 为什么要多等一个触控层的标记，而不是 window.xiaomo 一出现就开始量：
+      // src/ui/touch.js 在模块求值那一刻就调 setupTouch()，但它要往
+      // [data-slot="topbar.tools"] / [data-slot="topbar.right"] 里插按钮，
+      // 而那两个插槽是插件渲染出来的。插件没渲染完时 installDockButtons() 直接返回，
+      // 按钮要等 touch.js 里 DOMContentLoaded 的 recheck() 才补上 ——
+      // 于是「window.xiaomo 何时出现」与「按钮何时存在」是两件不同步的事。
+      // 本轮实测过：同一个页面，一次跑到 B 段按钮已存在、另一次还没有，
+      // 于是 B6 时而通过时而变成「入口不存在」。等 touch.js 自己写的
+      // data-touch-layer='ready' 才是真正的就绪信号。
+      //
+      // 注意：宽屏那一档（scenarioD 的 boot(true)）**不该**把按钮当成就绪条件 ——
+      // 宽屏下 installDockButtons() 有意不创建它们（w > 1024 直接返回），
+      // 拿它当条件会一直等不到。所以按钮只在窄屏档位额外要求。
+      const layerReady = !!w && !!w.xiaomo
+        && w.document.documentElement.dataset.touchLayer === 'ready';
+      const ready = layerReady && (wide || !!w.document.getElementById('btnPalette'));
+      if (ready) { resolve({ fr, w, app: w.xiaomo }); return; }
+      if (Date.now() - t0 > 15000) {
+        reject(new Error('15s 内没等到 window.xiaomo + 触控层就绪：' + (w ? diagnose(w) : '拿不到 contentWindow')));
+        return;
+      }
+      setTimeout(tick, 60);
+    };
+    tick();
+  });
+}
+
+/** 在应用自己的 realm 里派发一个真实的 PointerEvent */
+function fire(w, el, type, x, y, extra) {
+  const r = el.getBoundingClientRect();
+  const init = Object.assign({
+    bubbles: true, cancelable: true, composed: true,
+    pointerId: 1, pointerType: 'touch', isPrimary: true,
+    // pointermove 的 button 必须是 -1（规范如此）；pointerdown/up 是 0
+    button: type === 'pointermove' ? -1 : 0,
+    buttons: type === 'pointerup' ? 0 : 1,
+    clientX: r.left + x, clientY: r.top + y,
+  }, extra || {});
+  el.dispatchEvent(new w.PointerEvent(type, init));
+  return sleep(30);   // 事件是异步派发的，等监听器真的跑完
+}
+/** 只让目标元素自己的监听器看到（不冒泡）：测的是这个控件，不是画布 */
+function fireLocal(w, el, type, x, y, extra) {
+  const r = el.getBoundingClientRect();
+  const init = Object.assign({
+    bubbles: false, cancelable: true, composed: true,
+    pointerId: 1, pointerType: 'touch', isPrimary: true,
+    button: type === 'pointermove' ? -1 : 0,
+    buttons: type === 'pointerup' ? 0 : 1,
+    clientX: r.left + x, clientY: r.top + y,
+  }, extra || {});
+  el.dispatchEvent(new w.PointerEvent(type, init));
+  return sleep(30);
+}
+
+/* ══════════ 场景 A：390×844 触摸视口下的触控可用性 ══════════ */
+async function scenarioA() {
+  log('\n▌场景 A · 390×844 触摸视口（--touch-events=enabled 让 (pointer:coarse) 真的匹配）');
+  const { w, app } = await boot();
+  results.env = {
+    innerWidth: w.innerWidth, innerHeight: w.innerHeight,
+    coarse: w.matchMedia('(pointer: coarse)').matches,
+    fine: w.matchMedia('(pointer: fine)').matches,
+    anyCoarse: w.matchMedia('(any-pointer: coarse)').matches,
+    hoverNone: w.matchMedia('(hover: none)').matches,
+  };
+  log('  视口 ' + w.innerWidth + '×' + w.innerHeight
+    + ' · (pointer:coarse)=' + results.env.coarse
+    + ' · (hover:none)=' + results.env.hoverNone);
+  if (!results.env.coarse) {
+    log('  ⚠ 这个浏览器实例没把指针报成 coarse —— 命中尺寸与 touch-action 的结论会失真', 'bad');
+  }
+
+  const d = w.document;
+  const cv = d.getElementById('canvas');
+
+  // ── A1：器材真的动了吗 ──
+  const ent = app.addEntity('resistor', 120, 120);
+  const before = ent ? { x: ent.x, y: ent.y, w: ent.w, h: ent.h } : null;
+  const r = cv.getBoundingClientRect();
+  results.canvasRect = { w: Math.round(r.width), h: Math.round(r.height) };
+  results.entity = { type: 'resistor', before };
+
+  // 手指落在器材中心；先 +6,+6（阈值内，应仍算单击）→ 再 +60,+12（越过阈值）
+  const sx = Math.round(before.x), sy = Math.round(before.y);
+  await fire(w, cv, 'pointerdown', sx, sy);
+  await fire(w, cv, 'pointermove', sx + 6, sy + 6);
+  const inSlop = { x: ent.x, y: ent.y };
+  await fire(w, cv, 'pointermove', sx + 60, sy + 12);
+  await fire(w, cv, 'pointerup', sx + 60, sy + 12);
+  const after = { x: ent.x, y: ent.y };
+  results.entity.inSlop = inSlop;
+  results.entity.after = after;
+
+  check('A1 派发 touch 类型的 pointerdown/move/up 之后器材真的被移动了',
+    after.x !== before.x || after.y !== before.y,
+    '前 (' + before.x + ',' + before.y + ') → 后 (' + after.x + ',' + after.y + ')');
+  check('A1b 起步阈值内的抖动不写回坐标（仍按单击处理，B4 语义未破）',
+    inSlop.x === before.x && inSlop.y === before.y,
+    '第一次 +6,+6 后仍是 (' + inSlop.x + ',' + inSlop.y + ')；手指阈值 10px / 鼠标 3px');
+
+  // ── A2：拖动过程中页面没有滚动 ──
+  const se = d.scrollingElement;
+  results.scroll = { top: se.scrollTop, left: se.scrollLeft, docElTop: d.documentElement.scrollTop };
+  check('A2 拖动过程中页面没有滚动（scrollTop/scrollLeft 保持 0）',
+    se.scrollTop === 0 && se.scrollLeft === 0,
+    'scrollTop=' + se.scrollTop + ' scrollLeft=' + se.scrollLeft);
+
+  // ── A3：#canvas 的 touch-action ──
+  const taCss = w.getComputedStyle(cv).touchAction;
+  results.touchAction = { computed: taCss, inline: cv.style.touchAction };
+  check('A3 #canvas 计算样式的 touch-action = none', taCss === 'none',
+    'computed=' + JSON.stringify(taCss) + '，内联=' + JSON.stringify(cv.style.touchAction));
+
+  // ── A4：长按主题圆钮 = 桌面上的右键（换主题，而不是切深浅色）──
+  const orb = d.querySelector('.fx-orb');
+  const dots = d.querySelectorAll('.theme-dot');
+  const themeBefore = d.documentElement.dataset.theme;
+  const modeBefore = d.documentElement.dataset.mode;
+  if (orb) {
+    await fireLocal(w, orb, 'pointerdown', orb.offsetWidth / 2, orb.offsetHeight / 2);
+    await sleep(640);                                     // 长按判定 550ms，真等过去
+    await fireLocal(w, orb, 'pointerup', orb.offsetWidth / 2, orb.offsetHeight / 2);
+    await sleep(80);
+  }
+  const themeAfter = d.documentElement.dataset.theme;
+  const modeAfter = d.documentElement.dataset.mode;
+  results.longPress = {
+    orbFound: !!orb, dots: dots.length,
+    themeBefore, themeAfter, modeBefore, modeAfter,
+  };
+  check('A4 长按主题圆钮后主题真的切换了（与右键等效），且没有顺带切一次深浅色',
+    !!orb && themeAfter !== themeBefore && modeAfter === modeBefore,
+    '主题 ' + themeBefore + ' → ' + themeAfter + '；深浅色 ' + modeBefore + ' → ' + modeAfter
+    + '（长按生效后把随之而来的 click 吃掉一次，否则会再切一次深浅色）');
+
+  // ── A4b：长按期间移动超过阈值即取消 ──
+  const t2 = d.documentElement.dataset.theme;
+  if (orb) {
+    await fireLocal(w, orb, 'pointerdown', 20, 20);
+    await fireLocal(w, orb, 'pointermove', 60, 60);       // 位移 56px > LONG_PRESS_SLOP=10
+    await sleep(640);
+    await fireLocal(w, orb, 'pointerup', 60, 60);
+    await sleep(80);
+  }
+  check('A4b 长按期间移动超过阈值 → 不触发（滑动不会误换主题）',
+    d.documentElement.dataset.theme === t2,
+    '主题仍为 ' + d.documentElement.dataset.theme);
+
+  // ── A6：触摸设备下命中目标 ≥44px ──
+  const rect = (el) => el ? el.getBoundingClientRect() : null;
+  const orbR = rect(orb);
+  const dotR = rect(dots[0]);
+  const toolBtn = d.querySelector('.tool-btn');
+  const toolR = rect(toolBtn);
+  // 伪元素撑出来的透明命中区量不到 rect，用 computedStyle 的 inset 反推真实可点范围
+  const hitOf = (el) => {
+    if (!el) return null;
+    const a = w.getComputedStyle(el, '::after');
+    const b = el.getBoundingClientRect();
+    if (a.content === 'none') return { w: b.width, h: b.height };
+    const g = (p) => Math.abs(parseFloat(a[p]) || 0);
+    return { w: b.width + g('left') + g('right'), h: b.height + g('top') + g('bottom') };
+  };
+  const toolHit = hitOf(toolBtn);
+  const size = (o) => o ? Math.round(Math.min(o.width != null ? o.width : o.w, o.height != null ? o.height : o.h)) : null;
+  results.hitTargets = {
+    fxOrb: size(orbR), themeDot: size(dotR),
+    toolBtnBox: size(toolR), toolBtnHit: toolHit ? Math.round(Math.min(toolHit.w, toolHit.h)) : null,
+  };
+  const targets = [
+    ['浮动圆钮 .fx-orb', size(orbR)],
+    ['主题圆点 .theme-dot', size(dotR)],
+    ['工具按钮 .tool-btn 命中区', toolHit ? Math.round(Math.min(toolHit.w, toolHit.h)) : null],
+  ];
+  const small = targets.filter(t => t[1] == null || t[1] < 44);
+  // 命中尺寸的合格线是 **pointer: coarse** 下定的（touch.css 第 5b 节）。
+  // 本页的 iframe 拿到的是运行它的那个浏览器实例的指针能力：合成的 PointerEvent 改不了
+  // matchMedia —— 实测 env.coarse=false / fine=true，所以这里量到的是桌面档位的盒子
+  // （.fx-orb 保持 38px）。拿桌面档位的读数去判粗指针的合格线，判的是错的命题。
+  // 这个环境下**验不了**，交给 tools/touch-check.mjs（它用 Emulation.setTouchEmulationEnabled
+  // 真的把 pointer:coarse 打开，实测 .fx-orb 命中盒 44×44）。不要在这里硬凑一个通过。
+  if (!results.env.coarse) {
+    note('A6 触摸设备下命中目标全部 ≥44px（本页指针不是 coarse，验不了）',
+      '本页 (pointer:coarse)=false，(any-pointer:coarse)=' + results.env.anyCoarse + '。'
+      + '本页量到：' + targets.map(t => t[0] + '=' + (t[1] == null ? '没找到' : t[1] + 'px')).join('，')
+      + '（这是桌面档位的值）。命中热区的正式判据在 tools/touch-check.mjs 的 H1~H4：'
+      + '那里 pointer:coarse 与 any-pointer:coarse 都真的为真，.fx-orb 命中盒 44×44。');
+  } else {
+    check('A6 触摸设备下命中目标全部 ≥44px', small.length === 0,
+      targets.map(t => t[0] + '=' + (t[1] == null ? '没找到' : t[1] + 'px')).join('，')
+      + (small.length ? ' · 不足 44px：' + small.map(t => t[0]).join('、') : ''));
+  }
+
+  // ── A8：键位提示在触摸设备上换成触控文案（不是两者都藏掉）──
+  const keys = d.querySelector('.hint-keys');
+  const touch = d.querySelector('.hint-touch');
+  const display = (el) => el ? w.getComputedStyle(el).display : '(元素不存在)';
+  results.hint = {
+    keysDisplay: display(keys), touchDisplay: display(touch),
+    touchText: touch ? touch.textContent.trim() : null,
+  };
+  // 提示文案的互换挂在 @media (pointer: coarse) 下（只有真没有鼠标的设备才肯定是「没有键盘」）。
+  // 本页 pointer:coarse 为假，两个 span 都不该显示 —— 那是正确行为，不是回归。
+  // 窄屏下 main.css 的 .hintline{display:none} 也把整段藏起来了，所以这里两个都是 none。
+  if (!results.env.coarse) {
+    note('A8 触摸设备显示触控提示、隐藏键位提示（本页指针不是 coarse，验不了）',
+      '本页 (pointer:coarse)=false，所以「换文案」那条不该生效：'
+      + '.hint-keys=' + results.hint.keysDisplay + '，.hint-touch=' + results.hint.touchDisplay
+      + ' 是正确行为（窄屏下 main.css 把整段提示藏了，触摸设备才放回来）。'
+      + '正式判据在 tools/touch-check.mjs 的 K1：那里 pointer:coarse 为真，'
+      + '实测手机与 1920px 触控大屏都只显示触控提示、触屏笔记本保留键位提示。');
+  } else {
+    check('A8 触摸设备显示触控提示、隐藏键位提示',
+      !!keys && !!touch && display(keys) === 'none' && display(touch) !== 'none' && !!touch.textContent.trim(),
+      '.hint-keys display=' + results.hint.keysDisplay
+      + '，.hint-touch display=' + results.hint.touchDisplay
+      + '，文案=「' + results.hint.touchText + '」');
+  }
+
+  // 安全区（无头下 env() 恒为 0，只记录数值，不作通过判据）
+  results.safeArea = {
+    statusbarPaddingBottom: w.getComputedStyle(d.getElementById('statusbar')).paddingBottom,
+    topbarPaddingTop: w.getComputedStyle(d.getElementById('topbar')).paddingTop,
+  };
+}
+
+/* ══════════ 场景 B：390×844 下的三栏 → 浮层改造 ══════════ */
+async function scenarioB() {
+  log('\n▌场景 B · 390×844 下的三栏 → 浮层改造与开合');
+  const { w } = await boot();
+  const d = w.document;
+  const q = (s) => d.querySelector(s);
+  const rect = (el) => el ? el.getBoundingClientRect() : null;
+  const wOf = (el) => el ? Math.round(el.getBoundingClientRect().width) : null;
+
+  const cols = w.getComputedStyle(q('#body')).gridTemplateColumns;
+  results.mobileGrid = {
+    bodyColumns: cols, stage: wOf(q('#stage')),
+    palette: wOf(q('#palette')), sidebar: wOf(q('#sidebar')),
+  };
+  log('  #body 栅格列 = ' + cols + ' · #stage 宽 = ' + results.mobileGrid.stage + 'px');
+
+  const posPal = w.getComputedStyle(q('#palette')).position;
+  const posSide = w.getComputedStyle(q('#sidebar')).position;
+  check('B1 手机宽度下左器材栏与右侧边栏都变成浮层（position:fixed）',
+    posPal === 'fixed' && posSide === 'fixed',
+    '#palette position=' + posPal + '，#sidebar position=' + posSide);
+
+  check('B2 实验台独占视口宽度（不再被两栏挤成一条）',
+    results.mobileGrid.stage >= w.innerWidth - 1 && results.mobileGrid.stage > 0,
+    '390px 视口下 #stage=' + results.mobileGrid.stage + 'px（视口 ' + w.innerWidth + 'px，'
+    + '桌面三栏要占 196+270=466px）');
+
+  // ── 抽屉开合 ──
+  const btnPal = q('#btnPalette');
+  const btnSide = q('#btnSidebar');
+  if (!btnPal || !btnSide) {
+    check('B3/B4/B5 顶栏抽屉入口存在', false,
+      '#btnPalette=' + !!btnPal + '，#btnSidebar=' + !!btnSide + '（touch.css 只让它们在窄屏显示）');
+    return;
+  }
+  const btnR = rect(btnPal);
+  results.dockButtons = {
+    paletteBox: { w: Math.round(btnR.width), h: Math.round(btnR.height) },
+    display: w.getComputedStyle(btnPal).display,
+    title: btnPal.title,
+  };
+
+  // 点左入口（用真实指针序列，不直接调 .click()）
+  await fireLocal(w, btnPal, 'pointerdown', btnR.width / 2, btnR.height / 2);
+  await fireLocal(w, btnPal, 'pointerup', btnR.width / 2, btnR.height / 2);
+  btnPal.click();
+  // 开合过程中把 #palette 的 left 连采一遍：滑进来应该从 -320 走到 0。
+  // 只采一次读数分不清「没滑」和「滑了一半还没到」——采一条轨迹就能分清。
+  const slide = [];
+  for (let i = 0; i < 9; i++) {
+    slide.push(Math.round(rect(q('#palette')).left));
+    await sleep(40);
+  }
+  results.paletteSlide = slide;
+  // Lead 裁决①的有界补救：位移是 transition，getComputedStyle 取到的是**当前动画值**，
+  // 合成帧提交前读到的就是起始值 —— 而 -320 恰好就是起点，这本身就是个信号。
+  // B3/B4/B5 全部改成「等过渡结束再读」。
+  const settled = await waitTransition(q('#palette'), 600);
+  // 诊断读数：data-open 明明为真却读不到位移，就在这里把「选择器到底匹不匹配、
+  // 计算值到底是什么」当场取下来，省得靠推断。
+  results.paletteDiag = (() => {
+    const p = q('#palette');
+    const cs = w.getComputedStyle(p);
+    return {
+      hasAttr: p.hasAttribute('data-open'),
+      attrValue: p.getAttribute('data-open'),
+      matchesSel: (() => { try { return p.matches('#palette[data-open]'); } catch (e) { return 'err:' + e.message; } })(),
+      computedTf: cs.transform,
+      computedVis: cs.visibility,
+      computedTd: cs.transitionDuration,
+      reducedMotion: w.matchMedia('(prefers-reduced-motion: reduce)').matches,
+      narrowMQ: w.matchMedia('(max-width: 1024px), ((pointer: coarse) and (max-width: 1180px))').matches,
+      innerW: w.innerWidth,
+      // 命中 #palette[data-open] 这条规则的通配选择器里，最终生效的那条 transform
+      winning: (() => {
+        const out = [];
+        for (const sh of d.styleSheets) {
+          let rs; try { rs = sh.cssRules; } catch (e) { continue; }
+          (function walk(list, stack) {
+            for (const r of list) {
+              if (r.media) { walk(r.cssRules, stack.concat('@' + r.media.mediaText)); continue; }
+              try {
+                if (r.selectorText && r.style && r.style.transform && p.matches(r.selectorText)) {
+                  out.push({ sel: r.selectorText, tf: r.style.transform, media: stack.join('>') || '-' });
+                }
+              } catch (e) { /* 忽略非法选择器 */ }
+            }
+          })(rs, []);
+        }
+        return out;
+      })(),
+    };
+  })();
+  const palR = rect(q('#palette'));
+  const palOpen = {
+    attr: q('#palette').hasAttribute('data-open'),
+    left: Math.round(palR.left), w: Math.round(palR.width),
+    vis: w.getComputedStyle(q('#palette')).visibility,
+    mask: w.getComputedStyle(q('#drawerMask')).display,
+    aria: btnPal.getAttribute('aria-expanded'),
+  };
+
+  // 点右入口：应先关掉左边、只开右边。同样等到过渡结束再量（0.26s 位移）。
+  btnSide.click();
+  await waitTransition(q('#sidebar'), 600);
+  const sideR = rect(q('#sidebar'));
+  const sideOpen = {
+    attr: q('#sidebar').hasAttribute('data-open'),
+    palAttr: q('#palette').hasAttribute('data-open'),
+    rightGap: Math.round(w.innerWidth - sideR.right), w: Math.round(sideR.width),
+    aria: btnSide.getAttribute('aria-expanded'),
+    tf: w.getComputedStyle(q('#sidebar')).transform,
+  };
+
+  // 点遮罩收起
+  q('#drawerMask').click();
+  await waitTransition(q('#sidebar'), 600);
+  const closed = {
+    pal: q('#palette').hasAttribute('data-open'),
+    side: q('#sidebar').hasAttribute('data-open'),
+    maskDisplay: w.getComputedStyle(q('#drawerMask')).display,
+    vis: w.getComputedStyle(q('#sidebar')).visibility,
+  };
+  results.drawers = { palOpen, sideOpen, closed };
+  results.drawerTransition = w.getComputedStyle(q('#palette')).transitionDuration;
+  results.paletteAfterTransition = settled;
+
+  // ── B3~B5 在本页（iframe）里**不做断言**，只留读数（Lead 裁决②）────────────────
+  // 原因（已定性，不再是「待裁决」）：index.html 被装进一个 left:-30000px 的 iframe，
+  // 这个 iframe 里抽屉的位移读数恒为 translateX(-320px)、transitionend 一次都不触发；
+  // 把 iframe 挪到屏幕内重跑结果完全一样（已实测，否掉「离屏不合成」这个解释）。
+  // 而**产品里调色板跑在顶层文档**，不在 iframe 里 —— 所以真正有效的判据在主 realm，
+  // 那里同一页面同一时序得到 palX=0 / identity。主 realm 版已落在 tools/touch-check.mjs
+  // 的 B3~B5（真实 CDP 触摸输入 + 等过 --t-slow），并且验证过它能红。
+  // 这里保留原始读数作为**已知事实**：一个永远红的断言会训练所有人忽略红色，
+  // 所以它转写成说明（文件头第 3 条）+ 这里的读数，而不是一条 fail。
+  note('B3~B5(iframe) 已知事实：本页 iframe 内抽屉位移不推进',
+    '过渡读数[' + settled.how + '] left=' + settled.x + 'px transform=' + settled.tf
+    + ' visibility=' + settled.vis + '；slide 轨迹=' + (results.paletteSlide || []).join(',')
+    + '；data-open=' + palOpen.attr + '，遮罩 display=' + palOpen.mask
+    + '，aria-expanded=' + palOpen.aria
+    + '；右栏 data-open=' + sideOpen.attr + ' 右边距=' + sideOpen.rightGap + 'px'
+    + '；收起后 visibility=' + closed.vis + ' 遮罩=' + closed.maskDisplay
+    + '；有效判据见 touch-check.mjs 的 B3~B5（主 realm）');
+  check('B6 抽屉入口按钮在触摸设备上也是 ≥44px 命中目标',
+    Math.min(btnR.width, btnR.height) >= 44,
+    '实测盒 ' + Math.round(btnR.width) + '×' + Math.round(btnR.height)
+    + 'px（.dock-btn 在窄屏档是 width:44px;height:44px。'
+    + '⚠ 这里原来写「加伪元素左右/上下各 4px → 命中 52×52」，那是错的：'
+    + '.dock-btn::after 带 pointer-events:none，对命中测试透明，那 8px 一个像素都点不到；'
+    + '逐像素扫描实测就是 44×45。该伪元素规则已删除，命中区由真盒子给足。）');
+  results.safeAreaMobile = {
+    statusbar: w.getComputedStyle(q('#statusbar')).paddingBottom,
+    sidebarPane: w.getComputedStyle(d.querySelector('#sidebar .pane')).paddingBottom,
+  };
+}
+
+/* ══════════ 场景 C：为什么必须改（桌面三栏在 390px 宽下的栅格账） ══════════ */
+async function scenarioC() {
+  log('\n▌场景 C · 为什么必须改：桌面三栏在 390px 宽下的栅格账');
+  const { w } = await boot();
+  const bodyEl = w.document.getElementById('body');
+  const cols = w.getComputedStyle(bodyEl).gridTemplateColumns.split(/\s+/).map(x => Math.round(parseFloat(x)));
+  // 桌面轨道宽度：main.css 的 --pal-w 在 max-width:1024px 时改为 196px、--side-w 改为 270px。
+  // 两栏都是固定 px 轨道，容器不够宽时它们不会收缩 —— 中间那列被挤成 0，整行还会溢出。
+  const desktopTracks = [196, 270];
+  const sum = desktopTracks[0] + desktopTracks[1];
+  results.desktopMath = {
+    viewport: 390, desktopTracks, sum, overflows: sum > 390,
+    mobileBodyCols: cols, palW: w.getComputedStyle(w.document.documentElement).getPropertyValue('--pal-w').trim(),
+    sideW: w.getComputedStyle(w.document.documentElement).getPropertyValue('--side-w').trim(),
+  };
+  log('  桌面固定的两条边栏轨道：196 + 270 = ' + sum + 'px > 390px 视口（中间列被挤成 0，整行溢出）');
+  log('  改造后 #body 只剩一列：' + JSON.stringify(cols));
+  check('C1 桌面三栏的固定轨道（466px）已经超过 390px 手机宽度 → 必须收成浮层',
+    sum > 390 && cols.length === 1,
+    '桌面轨道合计 ' + sum + 'px > 视口 390px；改造后 #body 栅格列数=' + cols.length
+    + '，列宽=' + JSON.stringify(cols) + '（token：--pal-w=' + results.desktopMath.palW
+    + '，--side-w=' + results.desktopMath.sideW + '）');
+}
+
+/* ══════════ 场景 D：宽屏 + 细指针下三栏必须还在原位（不能改坏桌面） ══════════ */
+async function scenarioD() {
+  log('\n▌场景 D · 回归：宽屏 + 细指针下三栏仍在原位，浮层入口不出现');
+  const { w } = await boot(true);          // 1280×820 的 iframe，媒体查询按它自己的宽度求值
+  const d = w.document;
+  const q = (s) => d.querySelector(s);
+  const cols = w.getComputedStyle(q('#body')).gridTemplateColumns.split(/\s+/).map(x => Math.round(parseFloat(x)));
+  const btn = q('#btnPalette');
+  results.desktopRegression = {
+    innerWidth: w.innerWidth, bodyColumns: cols,
+    stage: Math.round(q('#stage').getBoundingClientRect().width),
+    palette: Math.round(q('#palette').getBoundingClientRect().width),
+    sidebar: Math.round(q('#sidebar').getBoundingClientRect().width),
+    paletteVisibility: w.getComputedStyle(q('#palette')).visibility,
+    stagePosition: w.getComputedStyle(q('#stage')).position,
+    dockBtnDisplay: btn ? w.getComputedStyle(btn).display : '(不存在)',
+    hintKeysDisplay: w.getComputedStyle(q('.hint-keys')).display,
+  };
+  // 命中尺寸那几条量的是「有鼠标/触控板时」的盒子，此时 .fx-orb 保持桌面尺寸 —— 它不是失败。
+  check('D1 1280px 宽 + 细指针：仍是三栏、器材栏可见、浮层入口按钮不出现',
+    cols.length === 3 && results.desktopRegression.paletteVisibility === 'visible'
+    && (results.desktopRegression.dockBtnDisplay === 'none'
+        || results.desktopRegression.dockBtnDisplay === '(不存在)')
+    && results.desktopRegression.palette > 0 && results.desktopRegression.sidebar > 0,
+    '栅格列=' + JSON.stringify(cols) + '，器材栏=' + results.desktopRegression.palette
+    + 'px，实验台=' + results.desktopRegression.stage + 'px，侧栏=' + results.desktopRegression.sidebar
+    + 'px，入口按钮 display=' + results.desktopRegression.dockBtnDisplay);
+  // 为什么允许 '(不存在)'：这两个抽屉入口是 touch.js 在**窄屏时新建**的
+  // （installDockButtons 里 `if (w > 1024) return`），宽屏档位下它们根本不会被创建，
+  // 所以量到的是 '(不存在)'，永远不可能是 'none'。
+  // 两者表达同一件事 —— 浮层入口不出现。旧断言只认 'none'，把正确实现判成了失败。
+  results.desktopStage1280 = results.desktopRegression.stage;
+}
+
+/* ══════════ 场景 E：真机才能确认的项（只做代理解释，不谎报） ══════════ */
+function realDeviceNotes() {
+  log('\n▌场景 E · 无头环境**验不了**、必须真机确认的项（本节不产生通过/不通过）');
+  note('粘滞 hover（tap 之后 :hover 留在元素上）',
+    '代码侧保证：main.css 的 18 处 :hover 全部在 @media (hover:hover) and (pointer:fine) 内；'
+    + 'interact.js 在 coarse 指针下不再维护 e.hovered。真机要看：点一下工具按钮后它不保持高亮。');
+  note('点击高亮 -webkit-tap-highlight-color',
+    '代码侧保证：touch.css 给 html 写了 -webkit-tap-highlight-color:transparent。'
+    + '无头浏览器不绘制这层高亮，真机要看 iOS Safari / Android Chrome 上还有没有灰块。');
+  note('安全区 env(safe-area-inset-*) 实际值',
+    '无头浏览器恒为 0（本次实测 statusbar padding-bottom=' + JSON.stringify(results.safeArea
+      ? results.safeArea.statusbarPaddingBottom : null) + '）。'
+    + '真机要看：iPhone 的 home indicator 不再压住状态栏、刘海不再压住顶栏。');
+  note('软件键盘（interactive-widget / 输入框防缩放）',
+    '代码侧保证：viewport 带 interactive-widget=resizes-content，输入类元素 16px。'
+    + '真机要确认：聚焦输入框时页面不放大、键盘弹起后布局跟着缩。');
+  note('地址栏收放与 100dvh',
+    '代码侧保证：#app 用 100vh 打底、100dvh 覆盖。真机要确认：滚动收起地址栏时状态栏仍在屏内、页面不溢出。');
+  note('多指手势与下拉刷新',
+    '本阶段不做捏合缩放/画布平移（YAGNI）。能验的只有「第二根手指按下 → 本轮手势整体作废」'
+    + '（interact.js 的 multi 标记，本轮用合成事件覆盖不到真实多指时序）。'
+    + 'overscroll-behavior:none 也只有真机下拉手势才看得出来。');
+  note('setPointerCapture 拖动中指针移出画布',
+    '合成 PointerEvent 没有真实指针，setPointerCapture 会抛 NotFoundError（代码里已 catch）——'
+    + '所以「拖到侧栏上方仍然跟随」这条只有真机能确认。');
+}
+
+/* ══════════ 主流程 ══════════ */
+(async function main() {
+  const t0 = Date.now();
+  try {
+    await scenarioA();
+    await scenarioB();
+    await scenarioC();
+    await scenarioD();
+  } catch (e) {
+    check('探针自身跑完', false, '探针抛异常：' + (e && e.stack ? e.stack : e));
+  }
+  realDeviceNotes();
+  const failed = results.checks.filter(c => !c.ok);
+  results.summary = {
+    total: results.checks.length,
+    passed: results.checks.length - failed.length,
+    failed: failed.map(c => c.id + ': ' + c.detail),
+    ms: Date.now() - t0,
+  };
+  log('\n══ 汇总：' + results.summary.passed + '/' + results.summary.total + ' 通过，用时 '
+    + results.summary.ms + 'ms ══', failed.length ? 'bad' : 'ok');
+  log('TOUCH_JSON ' + JSON.stringify(results));
+  document.title = failed.length ? 'TOUCH_PROBE_FAIL' : 'TOUCH_PROBE_OK';
+})();
+</script>
+</body>
+</html>

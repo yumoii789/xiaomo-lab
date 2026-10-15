@@ -202,7 +202,11 @@ function createWindow() {
   if (st.maximized) mainWindow.maximize();
 
   mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
+    // 自检必须在无人值守环境下也能跑（它是给 CI / 远程 / 公共场合用的），
+    // 所以 --selftest 全程不显示窗口。其余情况照旧显示。
+    // 隐藏窗口仍会渲染：webPreferences.paintWhenInitiallyHidden 默认 true，
+    // 加上上面的 backgroundThrottling:false，自检拿到的仍是真实渲染结果。
+    if (!SELFTEST) mainWindow.show();
     if (IS_DEV) mainWindow.webContents.openDevTools({ mode: 'detach' });
   });
 

@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>器材包探针 · 导入入口 / 校验 / 指纹回放</title>
+<style>
+  body { font: 13px/1.65 ui-monospace, Consolas, monospace; margin: 16px; color: #23302a; }
+  pre { white-space: pre-wrap; }
+  /* 被测应用放在 1px 的离屏 iframe 里：不弹窗、不出声，也不抢用户焦点 */
+  iframe { position: fixed; right: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+<pre id="out">器材包探针：导入入口 / 校验 / 指纹回放（无头；tools/ 不参与打包，属仓库外内容）
+
+验证什么：
+  · 用户需求「支持导入器材包」的**真实入口**能不能端到端跑通：
+    importText(文本) → 校验 → derive 注册 → 器材栏出现 → 卸载 → 栏里不留陈旧条目；
+  · 坏包在 derive() **之前**被拒，且理由是**可读的**（不是原生 JS 错），注册表与存盘都不被污染；
+  · 声明了 sha256 的包：对得上才装，对不上整包拒绝；
+  · 安装时自算的指纹 _fp：重载后**合格的回放会装回来**、被改过的**不装**、
+    记录**仍然保留**且抽屉里标明「校验不通过」（正反两面都有对照，避免"什么都没装"也算通过）；
+  · 手写的同步 sha256 与浏览器的 crypto.subtle 逐字符一致（手写密码学必须自证）。
+
+怎么看：
+  逐行 [PASS]/[FAIL]；最后一行 PACK_JSON 是机器可读结论（ok=false 表示有 FAIL），
+  同一份结论也写进 document.title —— 长正文会被读取工具截断，标题永远在最上面。
+  注意 pass 是**断言条数**，total 是**注册表条目数**，两者无关。
+
+为什么分四次加载应用（A/B/C/D）：
+  回放校验只在「重新打开软件」时发生，所以在同一次加载里测不出来。
+  B 是阳性对照（合格记录必须装回来），C 是阴性对照（改过的必须不装），
+  D 是老记录的迁移路径（早期版本没有 _fp，补写指纹而不是拒绝）。
+
+注意（踩过的坑）：本机浏览器是多人共用的，标签页被切到后台时 setTimeout 会被压制，
+  所以这个探针一律用 MessageChannel 让出主线程，不用定时器；谁在前台都不影响它跑完。
+</pre>
+<iframe id="fr" title="被测应用"></iframe>
+<script>
+const out = document.getElementById('out');
+const fr = document.getElementById('fr');
+const lines = [];
+const checks = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); };
+const check = (name, cond, detail) => {
+  checks.push({ name, ok: !!cond, detail: String(detail == null ? '' : detail) });
+  log(`[${cond ? 'PASS' : 'FAIL'}] ${name}${detail ? ' —— ' + detail : ''}`);
+};
+const fin = (extra) => {
+  const fail = checks.filter((c) => !c.ok).length;
+  const json = Object.assign({ ok: fail === 0, pass: checks.length - fail, fail, checks }, extra || {});
+  document.title = `PACK ${json.ok ? 'ok' : 'FAIL'} pass=${json.pass} fail=${json.fail} total=${json.total == null ? '?' : json.total}`;
+  log('');
+  log(`PACK_JSON ${JSON.stringify(json)}`);
+};
+
+const chan = new MessageChannel();
+const step = () => new Promise((r) => { chan.port1.onmessage = () => r(); chan.port2.postMessage(0); });
+const steps = async (n) => { for (let i = 0; i < n; i++) await step(); };
+const until = async (fn, ms = 15000) => {
+  const t0 = Date.now();
+  for (;;) { if (fn()) return true; if (Date.now() - t0 > ms) return false; await step(); }
+};
+
+// ── 冻结基准：规范化文本 + 它的 sha256 ────────────────────────────
+// 两个值都由 node:crypto 独立算出来（见 %TEMP%/xm-sha-check.mjs 的对照输出）。
+// 把它们写死在这里，是为了让「规范化器改了」或「sha256 实现改错了」都能当场变红 ——
+// 若只在运行时用实现自己算，实现错了探针也会跟着错，等于没测。
+const GOLDEN_CANON = '[{"defaults":{"ratedP":3,"ratedV":6},"desc":"派生器材：额定电压更高的灯泡","h":46,"icon":"💡","name":"探针灯泡","proto":"lamp","tags":["探针"],"type":"probe.pack.lamp","w":46},{"defaults":{"capacity":750},"name":"探针烧杯","proto":"beaker","type":"probe.pack.beaker"}]';
+const GOLDEN_SHA = '92e56504ccd1243e8e092bcbc2ca99bd71b99a6cc035208024ede3fe447bf19e';
+
+const GOOD_EQ = [
+  { type: 'probe.pack.lamp', proto: 'lamp', name: '探针灯泡', desc: '派生器材：额定电压更高的灯泡', icon: '💡', w: 46, h: 46, defaults: { ratedV: 6, ratedP: 3 }, tags: ['探针'] },
+  { type: 'probe.pack.beaker', proto: 'beaker', name: '探针烧杯', defaults: { capacity: 750 } },
+];
+const PACK_ID = 'probe.k1.pack-a';
+const KEY = 'xiaomo.packs.v1';
+const NEW_TYPES = GOOD_EQ.map((e) => e.type);
+const freshEq = () => JSON.parse(JSON.stringify(GOOD_EQ));
+const goodPack = () => ({
+  format: 'xiaomo.equipment.pack', version: 1, id: PACK_ID, name: '探针器材包',
+  author: '探针', desc: '端到端导入用的纯 JSON 器材包（声明了 sha256）',
+  sha256: GOLDEN_SHA, equipment: freshEq(),
+});
+
+/** 坏包：名字 → 篡改函数 → 期望出现在理由里的字样 */
+const BAD_CASES = [
+  ['声明 sha256 对不上', (p) => { p.sha256 = (p.sha256[0] === 'f' ? 'e' : 'f') + p.sha256.slice(1); }, /sha256 与实际内容不一致/],
+  ['缺 type', (p) => { delete p.equipment[0].type; }, /缺少 type/],
+  ['w 类型非法（字符串 "152"）', (p) => { p.equipment[0].w = '152'; }, /w 应该是正数，收到 string/],
+  ['ports 非数组', (p) => { p.equipment[0].ports = 'x'; }, /ports 应该是数组，收到 string/],
+  ['defaults 非对象', (p) => { p.equipment[0].defaults = 5; }, /defaults 应该是对象，收到 number/],
+  ['tags 元素非字符串', (p) => { p.equipment[0].tags = [1]; }, /tags 应该是字符串数组/],
+  ['version 过新', (p) => { p.version = 99; }, /只懂 v1/],
+  ['sha256 格式非法', (p) => { p.sha256 = 'zz'; }, /64 位小写十六进制/],
+  ['proto 不存在', (p) => { p.equipment[0].proto = 'no-such-proto'; }, /引用了不存在的原型/],
+  ['type 已被占用', (p) => { p.equipment[0].type = 'lamp'; }, /已被占用/],
+];
+
+/** 打开一次应用；返回这一轮的句柄。每次都会新建一个 App 实例（localStorage 是共用的）。 */
+async function reload(tag) {
+  const p = new Promise((r) => fr.addEventListener('load', r, { once: true }));
+  fr.src = '../index.html?cb=' + Math.random().toString(36).slice(2, 8) + '#' + tag;
+  await p;
+  const w = fr.contentWindow, d = fr.contentDocument;
+  const ready = await until(() => !!(w.xiaomo && w.xiaomo.host && w.xiaomo.services && w.xiaomo.services.packs));
+  if (!ready) throw new Error(`应用没就绪（第 ${tag} 次加载）`);
+  const app = w.xiaomo;
+  return {
+    w, d, app,
+    REG: () => app.host.registry('equipment'),
+    ROWS: () => [...d.querySelectorAll('#paletteList .pitem')],
+    LISTTEXT: () => (d.getElementById('paletteList') || {}).textContent || '',
+    packs: () => app.services.packs,
+  };
+}
+const subtleSha = async (text) => {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+};
+
+let endInfo = '';
+let raw0 = null;          // 探针开始时的存盘原样，收尾按它还原
+
+// 只跑一次：reload() 自己负责每次加载，这里如果也监听 iframe 的 load 就会被
+// 自己触发的加载反复唤醒（每轮 reload 都新建 run()，然后互相触发 → 死循环）。
+run().catch((e) => { check('探针自身没抛错', false, e && (e.stack || e.message)); fin(); });
+
+async function run() {
+  // 父窗口自己再 import 一份模块：纯函数（规范化 / 哈希）与环境无关，
+  // 独立实例反而更好 —— 它证明的是「模块导出的函数本身」而不是某个活着的宿主状态。
+  const mod = await import('../src/plugins/system.pack.js');
+  const A = await reload('a');
+  const tx0 = await (async () => { try { return await subtleSha('abc'); } catch (e) { return 'ERR:' + e.message; } })();
+
+  let N0 = 0, R0 = 0, stored0 = 0;
+  try {
+    raw0 = A.w.localStorage.getItem(KEY);
+    N0 = A.REG().size;
+    R0 = A.ROWS().length;
+    stored0 = A.packs().list().length;
+
+    // ── ① 入口与基线 ────────────────────────────────────────────
+    const svc = A.packs();
+    check('器材包服务在场，且导出五个动作（导入入口可被调用）',
+      !!(svc && svc.install && svc.uninstall && svc.list && svc.validate && typeof svc.importText === 'function'),
+      `keys=${JSON.stringify(Object.keys(svc || {}))}`);
+    check('基线：器材栏就是注册表的投影',
+      R0 === N0 && A.ROWS().every((r) => A.REG().has(r.dataset.type)),
+      `注册表 ${N0} 条 / 器材栏 ${R0} 行；存盘 ${stored0} 个包`);
+
+    // ── ② 手写 sha256 自证（三路对照：node 冻结值 / 同步实现 / 浏览器 crypto.subtle）──
+    check('规范化文本与冻结基准逐字符相同（规范化器没漂）',
+      mod.canonicalEquipmentText(freshEq()) === GOLDEN_CANON,
+      `长度 ${mod.canonicalEquipmentText(freshEq()).length}（基准 ${GOLDEN_CANON.length}）`);
+    check('同步 sha256 与 node:crypto 冻结值一致',
+      mod.sha256Hex(GOLDEN_CANON) === GOLDEN_SHA, mod.sha256Hex(GOLDEN_CANON));
+    check('同步 sha256 与浏览器 crypto.subtle 一致（手写密码学自证）',
+      (await subtleSha(GOLDEN_CANON)) === GOLDEN_SHA && tx0 === mod.sha256Hex('abc'),
+      `subtle(canon)=${(await subtleSha(GOLDEN_CANON)).slice(0, 16)}… / subtle('abc')=${tx0.slice(0, 16)}… / 实现('abc')=${mod.sha256Hex('abc').slice(0, 16)}…`);
+    check('键序打乱后指纹不变（规范化真的在起作用）',
+      mod.contentFingerprint({ equipment: [Object.fromEntries(Object.entries(freshEq()[0]).reverse()), freshEq()[1]] }) === GOLDEN_SHA,
+      '逆序键 → 同一指纹');
+
+    // ── ③ 成功路径：importText → 注册表 → 器材栏 ─────────────────
+    const notif = { n: 0 };
+    const off = A.REG().onChange(() => { notif.n++; });
+    const g = svc.importText('good.xiaomo-pack', JSON.stringify(goodPack()));
+    off();
+    await steps(3);
+    check('importText 接受一个合格包（真实入口：文本 → 解析 → 校验 → 安装）',
+      !!(g && g.ok) && g.kind === 'installed' && (g.made || []).length === NEW_TYPES.length,
+      `ok=${g && g.ok} kind=${g && g.kind} made=${JSON.stringify(g && g.made)} err=${(g && g.error) || '无'}`);
+    check('【更正计数器】合格的导入确实触发了注册表变更通知（否则下面"0 次通知"是空断言）',
+      notif.n > 0, `导入期间 onChange 触发 ${notif.n} 次`);
+    check('新器材进了注册表', NEW_TYPES.every((t) => A.REG().has(t)), NEW_TYPES.join(', '));
+    check('新器材也进了器材栏（栏 = 注册表的投影）',
+      A.ROWS().length === R0 + NEW_TYPES.length && !A.ROWS().some((r) => !A.REG().has(r.dataset.type)),
+      `栏 ${R0} → ${A.ROWS().length} 行 / 注册表 ${N0} → ${A.REG().size} 条`);
+    check('器材栏里能看到新器材的名字',
+      NEW_TYPES.every((t) => A.LISTTEXT().includes(t)) || /探针灯泡|探针烧杯/.test(A.LISTTEXT()),
+      '栏文本含「探针灯泡/探针烧杯」：' + /探针灯泡|探针烧杯/.test(A.LISTTEXT()));
+    const rec1 = svc.list().find((p) => p.id === PACK_ID);
+    check('存盘记录里带了安装时自算的指纹 _fp，且与内容一致',
+      !!(rec1 && rec1._fp === GOLDEN_SHA) && rec1.sha256 === GOLDEN_SHA,
+      `_fp=${rec1 && rec1._fp} / 声明 sha256=${rec1 && rec1.sha256}`);
+
+    // 同 id 重装：文档承诺「先卸旧的再装新的，改完直接重导即可」，不能累积、也不能被自己的旧条目挡住
+    const v2 = goodPack();
+    delete v2.sha256;                       // 内容变了，旧声明必然对不上；这里要测的是重装路径本身
+    v2.equipment[0].name = '探针灯泡 v2';
+    const g2 = svc.importText('good-v2.xiaomo-pack', JSON.stringify(v2), { silent: true });
+    await steps(3);
+    check('同 id 重装（改了内容）被接受：不累积重复条目、也不报「已被占用」',
+      !!(g2 && g2.ok) && A.REG().size === N0 + NEW_TYPES.length && svc.list().length === stored0 + 1
+        && new Set(svc.list().map((p) => p.id)).size === svc.list().length,
+      `ok=${g2 && g2.ok} err=${(g2 && g2.error) || '无'}；注册表 ${A.REG().size}（期望 ${N0 + NEW_TYPES.length}）/ 存盘 ${svc.list().length} 个包`);
+    const def2 = (A.REG().list() || []).find((dd) => dd.type === 'probe.pack.lamp') || {};
+    check('同 id 重装后新版本的内容真的生效（名称已更新）—— 文档承诺的「改完直接重导」成立',
+      def2.name === '探针灯泡 v2', `注册表里 name=${def2.name}`);
+
+    // ── ③b 导出模板：必须自带算好的 sha256，而且它本身要是个合格包 ──
+    // 拦下 URL.createObjectURL 拿到 Blob，再把 <a>.click() 换成空操作（别真触发下载）。
+    let blob = null;
+    const origCreate = A.w.URL.createObjectURL, origRevoke = A.w.URL.revokeObjectURL;
+    const origAnchorClick = A.w.HTMLAnchorElement.prototype.click;
+    A.w.URL.createObjectURL = (b) => { blob = b; return 'blob:probe'; };
+    A.w.URL.revokeObjectURL = () => {};
+    A.w.HTMLAnchorElement.prototype.click = function () {};
+    if (A.d.getElementById('btnPacks')) A.d.getElementById('btnPacks').click();
+    await steps(3);
+    const expBtn = A.d.querySelector('[data-act=export]');
+    if (expBtn) expBtn.click();
+    await steps(4);
+    A.w.URL.createObjectURL = origCreate; A.w.URL.revokeObjectURL = origRevoke;
+    A.w.HTMLAnchorElement.prototype.click = origAnchorClick;
+    const expText = blob ? await blob.text() : null;
+    let expJson = null;
+    try { expJson = JSON.parse(expText); } catch (e) { expJson = null; }
+    const expV = expJson ? A.packs().validate(expJson) : { ok: false, error: '导不出内容' };
+    check('导出的示例包自带算好的 sha256，且它自己就是个合格包（模板即正确用法）',
+      !!expJson && typeof expJson.sha256 === 'string' && expJson.sha256 === mod.contentFingerprint(expJson)
+        && !('_fp' in expJson) && expV.ok === true,
+      `sha256=${expJson && expJson.sha256}；内部字段 _fp 是否泄漏=${!!(expJson && '_fp' in expJson)}；validate=${JSON.stringify(expV.error || 'ok')}`);
+
+    // ── ④ 坏包：必须在 derive() 之前被拒，理由可读，且什么都不留下 ──
+    const notifBad = { n: 0 };
+    const offBad = A.REG().onChange(() => { notifBad.n++; });
+    const results = [];
+    for (const [label, mutate, want] of BAD_CASES) {
+      const p = goodPack();
+      // 只有 sha256 那一类保留声明：否则「声明与实际不一致」会先于结构检查报出来，
+      // 十类坏包就都变成同一句理由，测不到各自的结构判据（这是刻意保留的检查顺序：
+      // 完整性优先于结构）。
+      if (!/sha256/.test(label)) delete p.sha256;
+      mutate(p);
+      const nBefore = A.REG().size, sBefore = svc.list().length;
+      const r = svc.importText('bad.xiaomo-pack', JSON.stringify(p), { silent: true });
+      results.push({ label, ok: r.ok, kind: r.kind, error: r.error, regBefore: nBefore, regAfter: A.REG().size, storedAfter: svc.list().length, readable: want.test(String(r.error || '')), native: /is not a function|not iterable|undefined is not/.test(String(r.error || '')), want: String(want) });
+    }
+    offBad();
+    await steps(2);
+    // ⚠ 非空前置：`[].every(...)` 恒为 true —— 坏包清单一旦为空（或循环没跑到），
+    // 下面两条聚合断言会**静默全绿**，而这正是「断言失去红绿能力」的典型样子。
+    // 所以先证明清单真的被跑过，并且没有被悄悄瘦身。
+    //
+    // REQUIRED_BAD 这五类各自走**不同的拒绝机制**（内容指纹完整性 / 必需字段 / 字段类型 /
+    // 原型引用解析 / 类型名冲突），少任何一类都说明这套检查的覆盖面缩水了 —— 那是必须红的
+    // 退化，不该因为「剩下的坏包照样全被拒」而变绿。（改标签名也会红：这是刻意的，改名的
+    // 同时必须回来更新这份骨干清单。）
+    const REQUIRED_BAD = ['声明 sha256 对不上', '缺 type', 'w 类型非法（字符串 "152"）', 'proto 不存在', 'type 已被占用'];
+    const missingBad = REQUIRED_BAD.filter((k) => !results.some((r) => r.label === k));
+    check('坏包清单没有被悄悄瘦身：五类骨干坏法都实测过（空集合上的 every 恒真）',
+      results.length > 0 && results.length === BAD_CASES.length && missingBad.length === 0,
+      `实测 ${results.length} 类（清单 ${BAD_CASES.length} 类）；缺失：${JSON.stringify(missingBad)}`);
+    check('坏包全部被拒，且理由都是**可读主张**（不是原生 JS 错）',
+      results.length > 0 && results.every((r) => r.ok === false && r.readable && !r.native),
+      `${results.filter((r) => r.ok === false).length}/${results.length} 被拒；`
+        + `理由不可读的：${JSON.stringify(results.filter((r) => !r.readable).map((r) => r.label + '→' + r.error))}`);
+    check('坏包在 derive() 之前就被拒：注册表变更通知 0 次（阳性对照见上一段的计数器）',
+      notifBad.n === 0, `坏包期间 onChange 触发 ${notifBad.n} 次`);
+    check('坏包不污染注册表、也不写盘',
+      results.length > 0 && results.every((r) => r.regAfter === r.regBefore) && svc.list().length === stored0 + 1,
+      `最后：注册表 ${A.REG().size} 条 / 存盘 ${svc.list().length} 个包（应为 ${stored0 + 1}）`);
+    const r_missing = results.find((r) => r.label === '缺 type');
+    check('缺 type 的理由保持了改造前的原文（既有文案不回归）',
+      r_missing && r_missing.error === '第 1 件器材缺少 type', r_missing && r_missing.error);
+    const r_w = results.find((r) => r.label.startsWith('w 类型非法'));
+    check('w:"152" 被当成类型错误拒掉（改造前会静默变成 NaN 布局）',
+      r_w && /w 应该是正数，收到 string/.test(String(r_w.error)), r_w && r_w.error);
+    const r_ports = results.find((r) => r.label === 'ports 非数组');
+    check('ports:"x" 在装之前被拒（改造前会抛原生 «is not a function»）',
+      r_ports && /ports 应该是数组/.test(String(r_ports.error)) && !r_ports.native, r_ports && r_ports.error);
+    const r_sha = results.find((r) => r.label === '声明 sha256 对不上');
+    check('声明的 sha256 对不上 → 整包拒绝，理由是「不一致」而不是「格式不对」',
+      r_sha && /与实际内容不一致/.test(String(r_sha.error)), r_sha && r_sha.error);
+    log('  · [trace] 十类坏包的原始理由逐条：');
+    for (const r of results) log(`      ${r.label} → ${r.error}`);
+
+    const pre = svc.importText('broken.json', '{ 这 不是 JSON');
+    check('不是 JSON 的文本：可读理由 + 什么都没留下',
+      !!(pre && !pre.ok) && pre.kind === 'parse' && A.REG().size === N0 + NEW_TYPES.length && svc.list().length === stored0 + 1,
+      `${pre && pre.error}`);
+
+    // ── ⑤ 卸载：未点击即读，栏里不得留陈旧条目（task-12/task-19 的判据）──
+    svc.uninstall(PACK_ID);
+    await steps(3);
+    const stale = A.ROWS().filter((r) => !A.REG().has(r.dataset.type));
+    check('运行时卸包：类型确实从注册表消失了', NEW_TYPES.every((t) => !A.REG().has(t)),
+      `注册表 ${A.REG().size} 条`);
+    check('运行时卸包：**未点击即读**，器材栏里不得有任何陈旧条目（红绿守卫）',
+      stale.length === 0,
+      `卸包后未点击即读：残留 ${stale.length} 条；栏 ${A.ROWS().length} 行 / 注册表 ${A.REG().size} 条`
+        + (stale.length ? `；陈旧类型 ${JSON.stringify(stale.map((r) => r.dataset.type))}` : ''));
+    check('卸载后存盘里也没有这个包',
+      svc.list().length === stored0 && !svc.list().some((p) => p.id === PACK_ID), `存盘 ${svc.list().length} 个包`);
+
+    // ── ⑥ 阳性对照：合格记录重载后必须装回来（否则下面的阴性对照是空断言）──
+    const ast = svc.importText('good.xiaomo-pack', JSON.stringify(goodPack()), { silent: true });
+    await steps(3);
+    check('为回放对照重新装入合格包', !!(ast && ast.ok) && A.REG().has(NEW_TYPES[0]), `made=${JSON.stringify(ast && ast.made)}`);
+  } catch (e) {
+    check('探针主体没抛错', false, e && (e.stack || e.message));
+  }
+
+  // ── B：合格记录的重新加载（阳性对照）──────────────────────────
+  let B = null;
+  try {
+    B = await reload('b');
+    const N = B.REG().size, R = B.ROWS().length;
+    const rec = B.packs().list().find((p) => p.id === PACK_ID);
+    check('回放（阳性对照）：合格的包重载后真的装回来了',
+      NEW_TYPES.every((t) => B.REG().has(t)) && N === N0 + NEW_TYPES.length,
+      `注册表 ${N} 条（基线 ${N0}）`);
+    check('回放（阳性对照）：器材栏同步出现，且没有陈旧条目',
+      R === R0 + NEW_TYPES.length && !B.ROWS().some((r) => !B.REG().has(r.dataset.type)),
+      `栏 ${R} 行（基线 ${R0}）`);
+    check('回放（阳性对照）：指纹是安装时写下的那一个', !!(rec && rec._fp === GOLDEN_SHA), `_fp=${rec && rec._fp}`);
+    const defB = (B.REG().list() || []).find((dd) => dd.type === 'probe.pack.lamp') || {};
+    check('回放（阳性对照）：装回来的是**存盘里那一版**的内容，不是上一轮的残留',
+      defB.name === '探针灯泡' && rec && rec._fp === GOLDEN_SHA,
+      `注册表里 name=${defB.name}（存盘版应为「探针灯泡」；被替换掉的 v2 则是「探针灯泡 v2」）`);
+
+    // 篡改存盘指纹 —— 模拟「有人手改了 localStorage / 存盘被写脏」
+    const arr = JSON.parse(B.w.localStorage.getItem(KEY) || '[]');
+    const r0 = arr.find((p) => p.id === PACK_ID);
+    const tampered = (r0._fp[0] === 'f' ? 'e' : 'f') + r0._fp.slice(1);
+    r0._fp = tampered;
+    B.w.localStorage.setItem(KEY, JSON.stringify(arr));
+    log(`  · [trace] 把存盘里的 _fp 从 ${String(GOLDEN_SHA).slice(0, 12)}… 改成 ${tampered.slice(0, 12)}…（模拟手改存盘）`);
+  } catch (e) {
+    check('回放阳性对照没抛错', false, e && (e.stack || e.message));
+  }
+
+  // ── C：被改过的记录（阴性对照）────────────────────────────────
+  try {
+    const C = await reload('c');
+    const rec = C.packs().list().find((p) => p.id === PACK_ID);
+    check('回放（阴性对照）：指纹不符的包**不装载**',
+      !NEW_TYPES.some((t) => C.REG().has(t)) && C.REG().size === N0,
+      `注册表 ${C.REG().size} 条（基线 ${N0}）；${NEW_TYPES.join('/')} 在册=${NEW_TYPES.map((t) => C.REG().has(t)).join(',')}`);
+    check('回放（阴性对照）：器材栏也没有它', !NEW_TYPES.some((t) => C.LISTTEXT().includes(t)),
+      `栏 ${C.ROWS().length} 行（基线 ${R0}）`);
+    check('回放（阴性对照）：**记录仍然保留**，绝不静默丢弃用户数据',
+      !!rec && C.packs().list().length === stored0 + 1,
+      `存盘 ${C.packs().list().length} 个包，含 ${PACK_ID}=${!!rec}`);
+    check('回放（阴性对照）：存盘里的指纹没有被偷偷"修好"（只报告，不改写）',
+      !!(rec && rec._fp !== GOLDEN_SHA), `_fp=${rec && String(rec._fp).slice(0, 12)}…`);
+
+    // 界面：抽屉里必须看得见「校验不通过」和原因
+    const btn = C.d.getElementById('btnPacks');
+    if (btn) btn.click();
+    const shown = await until(() => !!C.d.querySelector('.pack-card[data-bad="1"]'), 8000);
+    const badRow = C.d.querySelector('.pack-card[data-bad="1"]');
+    const rowText = (badRow && badRow.textContent) || '';
+    check('回放（阴性对照）：抽屉里那一行标明「校验不通过」', shown && /校验不通过/.test(rowText),
+      rowText.trim().slice(0, 60) || '（没找到 data-bad 行）');
+    check('回放（阴性对照）：给出了可读原因（含期望值与实际值的前缀）',
+      /指纹不符/.test(rowText) && rowText.includes(String(rec._fp).slice(0, 12)) && rowText.includes(String(GOLDEN_SHA).slice(0, 12)),
+      rowText.trim().slice(0, 140));
+    log('  · [trace] 抽屉里那一行的原文：' + JSON.stringify(rowText.replace(/\s+/g, ' ').trim()));
+
+    // ── D：老记录的迁移路径（早期版本没有 _fp）────────────────────
+    const arr = JSON.parse(C.w.localStorage.getItem(KEY) || '[]');
+    const r0 = arr.find((p) => p.id === PACK_ID);
+    delete r0._fp;
+    C.w.localStorage.setItem(KEY, JSON.stringify(arr));
+    const D = await reload('d');
+    const recD = D.packs().list().find((p) => p.id === PACK_ID);
+    check('回放（迁移）：没有 _fp 的老记录**照常装回来**（升级不能让已装的包集体失效）',
+      NEW_TYPES.every((t) => D.REG().has(t)) && D.REG().size === N0 + NEW_TYPES.length,
+      `注册表 ${D.REG().size} 条（期望 ${N0 + NEW_TYPES.length}）`);
+    check('回放（迁移）：顺手把指纹补写回存盘', !!(recD && recD._fp === GOLDEN_SHA), `_fp=${recD && recD._fp}`);
+    if (D.d.getElementById('btnPacks')) D.d.getElementById('btnPacks').click();
+    await steps(3);
+    check('回放（迁移）：抽屉里不再有「校验不通过」', !D.d.querySelector('.pack-card[data-bad="1"]'),
+      `data-bad 行数=${D.d.querySelectorAll('.pack-card[data-bad="1"]').length}`);
+
+    // 收尾：把这个包卸掉，并按原始存盘内容还原
+    D.packs().uninstall(PACK_ID);
+    await steps(3);
+    check('收尾：卸载后注册表与器材栏回到基线',
+      D.REG().size === N0 && D.ROWS().length === R0 && !D.ROWS().some((r) => !D.REG().has(r.dataset.type)),
+      `注册表 ${D.REG().size}（基线 ${N0}）/ 栏 ${D.ROWS().length}（基线 ${R0}）`);
+    endInfo = `注册表 ${D.REG().size} 条 / 栏 ${D.ROWS().length} 行 / 存盘 ${D.packs().list().length} 个包`;
+  } catch (e) {
+    check('回放阴性对照与迁移没抛错', false, e && (e.stack || e.message));
+  }
+
+  // 存盘还原（探针和用户共用同一份 localStorage，不能留下残局）
+  try {
+    const w = fr.contentWindow;
+    if (w && w.localStorage) {
+      if (raw0 === null) w.localStorage.removeItem(KEY);
+      else w.localStorage.setItem(KEY, raw0);
+    }
+    check('收尾：存盘已还原成探针开始前的原样',
+      (fr.contentWindow.localStorage.getItem(KEY) || 'null') === (raw0 === null ? 'null' : raw0),
+      `localStorage['${KEY}'] = ${String(fr.contentWindow.localStorage.getItem(KEY)).slice(0, 40)}`);
+  } catch (e) {
+    check('收尾还原没抛错', false, e && e.message);
+  }
+  if (endInfo) log(`收尾：${endInfo}`);
+  fin({ total: (fr.contentWindow.xiaomo && fr.contentWindow.xiaomo.host.registry('equipment').size) || 0 });
+}
+</script>
+</body>
+</html>

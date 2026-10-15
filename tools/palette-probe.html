@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>器材栏探针 · 注册表投影 / 陈旧视图 / 键控协调</title>
+<style>
+  body { font: 13px/1.65 ui-monospace, Consolas, monospace; margin: 16px; color: #23302a; }
+  pre { white-space: pre-wrap; }
+  /* 被测应用放在 1px 的离屏 iframe 里：不弹窗、不出声，也不抢用户焦点 */
+  iframe { position: fixed; right: 0; bottom: 0; width: 1px; height: 1px; opacity: 0; border: 0; pointer-events: none; }
+</style>
+</head>
+<body>
+<pre id="out">器材栏探针：注册表投影（无头诊断；tools/ 不参与打包，属仓库外内容）
+
+验证什么：
+  · 器材栏只是 registry('equipment') 的投影，停用器材插件后栏里不许留陈旧条目；
+  · 投影走「按 type 键控协调」：复用行的节点身份、事件、aria 都不许变；
+  · 用户状态（搜索词 / 分页签）不被一次同步抹掉；
+  · 点陈旧类型不抛未捕获异常、不落进实验台，并给出可读提示；
+  · 运行时装卸器材包这条路径的信号缺口，如实量出来。
+
+怎么看：
+  逐行 [PASS]/[FAIL]；最后一行 PALETTE_JSON 是机器可读结论（ok=false 表示有 FAIL），
+  同一份结论也写进 document.title —— 长正文会被读取工具截断，标题永远在最上面。
+
+注意（踩过的坑）：本机浏览器是多人共用的，标签页被切到后台时 setTimeout 会被压制，
+  所以这个探针一律用 MessageChannel 让出主线程，不用定时器；谁在前台都不影响它跑完。
+</pre>
+<iframe id="fr" title="被测应用"></iframe>
+<script>
+const out = document.getElementById('out');
+const fr = document.getElementById('fr');
+const lines = [];
+const checks = [];
+const log = (s) => { lines.push(s); out.textContent = lines.join('\n'); };
+const check = (name, cond, detail) => {
+  checks.push({ name, ok: !!cond, detail: String(detail == null ? '' : detail) });
+  log(`[${cond ? 'PASS' : 'FAIL'}] ${name}${detail ? ' —— ' + detail : ''}`);
+};
+const fin = (extra) => {
+  const fail = checks.filter((c) => !c.ok).length;
+  const json = Object.assign({ ok: fail === 0, pass: checks.length - fail, fail, checks }, extra || {});
+  document.title = `PALETTE ${json.ok ? 'ok' : 'FAIL'} pass=${json.pass} fail=${json.fail} total=${json.total == null ? '?' : json.total}`;
+  log('');
+  log(`PALETTE_JSON ${JSON.stringify(json)}`);
+};
+
+/**
+ * 让出一轮主线程：用 MessageChannel，不用 setTimeout。
+ * 标签页被别的东西切到后台时，setTimeout 会被浏览器压制 ——
+ * 实测点完一行器材之后，一个 15ms 的等待 20 秒都没回来，探针就那样卡在半路。
+ * MessageChannel 的任务不受定时器节流影响，照样能让出主线程。
+ */
+const chan = new MessageChannel();
+const step = () => new Promise((r) => { chan.port1.onmessage = () => r(); chan.port2.postMessage(0); });
+const steps = async (n) => { for (let i = 0; i < n; i++) await step(); };
+/** 等到条件成立：用挂钟兜底，同样不依赖定时器 */
+const until = async (fn, ms = 15000) => {
+  const t0 = Date.now();
+  for (;;) { if (fn()) return true; if (Date.now() - t0 > ms) return false; await step(); }
+};
+
+fr.src = '../index.html?cb=' + Math.random().toString(36).slice(2, 8);
+fr.addEventListener('load', () => {
+  run().catch((e) => { check('探针自身没抛错', false, e && (e.stack || e.message)); fin(); });
+});
+
+async function run() {
+  const w = fr.contentWindow, d = fr.contentDocument;
+  // 等应用把 window.xiaomo 挂上（main.js:671）：条件轮询 + 挂钟兜底
+  await until(() => { const a = w.xiaomo; return !!(a && a.host && a.inventory && a.pluginState && a.palette); });
+  const x = w.xiaomo;                                   // window.xiaomo 就是 App 实例
+  if (!x || !x.host || !x.inventory || !x.pluginState || !x.palette) {
+    check('应用与器材栏就绪', false,
+      `window.xiaomo=${!!x} host=${!!(x && x.host)} inventory=${!!(x && x.inventory)} palette=${!!(x && x.palette)}`);
+    return fin();
+  }
+  const app = x, host = x.host, inv = x.inventory, state = x.pluginState;
+  const PAL = () => app.palette;                       // 槽被宿主重挂载时实例会换新，所以每次现取
+
+  const REG = () => host.registry('equipment');
+  const keys = () => REG().keys();
+  const LIST = () => d.getElementById('paletteList');
+  const ROWS = () => [...LIST().querySelectorAll('.pitem')];
+  const typesOf = (rs) => rs.map((r) => r.dataset.type);
+  const staleRows = () => ROWS().filter((r) => !REG().has(r.dataset.type));
+  const sameSet = (a, b) => a.length === b.length && [...a].sort().join('|') === [...b].sort().join('|');
+  const SEARCH = () => d.getElementById('paletteSearch');
+  const EQ_IDS = inv.snapshot().items.filter((i) => i.kind === 'equipment').map((i) => i.id);
+  const H = EQ_IDS.includes('xiaomo.equipment.heating') ? 'xiaomo.equipment.heating' : EQ_IDS[0];
+  const PACK_ID = 'probe.k3.palette-pack';
+
+  // 把宿主的两个副作用口装成录音机：断言不靠翻 DOM，靠"真的被调用过"
+  const toasts = [];
+  const toastBak = app.toast, addBak = app.addEntity;
+  app.toast = function (m, k) { toasts.push(String(m)); return toastBak.apply(app, arguments); };
+  let addCalls = 0;
+  app.addEntity = function (t) { addCalls++; return addBak.apply(app, arguments); };
+
+  // 未捕获异常也要数出来：陈旧条目最怕的就是偷偷抛一条
+  const errs = [];
+  const onErr = (e) => errs.push(String((e && (e.message || e.reason)) || e));
+  w.addEventListener('error', onErr);
+  w.addEventListener('unhandledrejection', onErr);
+
+  const setQuery = async (v) => {
+    const s = SEARCH();
+    s.value = v;
+    s.dispatchEvent(new w.Event('input', { bubbles: true }));
+    await steps(2);
+  };
+  const tabTo = async (name) => {
+    [...d.querySelectorAll('#paletteTabs button')].find((b) => b.dataset.tab === name).click();
+    await steps(2);
+  };
+  /** 落一件器材并立刻清场：只想知道"这一行还能不能用" */
+  const clickRow = async (row, how = 'click') => {
+    const before = new Set(app.world.entities);
+    const n0 = addCalls;
+    if (how === 'click') row.click();
+    else row.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    const added = app.world.entities.find((e) => !before.has(e));
+    const type = added && added.def && added.def.type;
+    app.select(null);
+    if (added) app.world.remove(added);
+    log(`  · [trace] ${how} ${row.dataset.type}：addEntity ${addCalls - n0} 次，落进去的类型 ${type}，清场后 world=${app.world.entities.length}`);
+    return { called: addCalls - n0, type };
+  };
+
+  let endInfo = '';
+  try {
+    // 探针要一个确定的基线：先把器材插件全部打开。
+    // 若上一轮探针崩在半路（或用户自己关过某个器材插件），基线就会漂 ——
+    // 把发现的原样报出来，收尾一律恢复成全开（与内核探针同一个约定）。
+    const forcedOpen = [];
+    for (const it of inv.snapshot().items) {
+      if (it.kind === 'equipment' && it.offBy) { forcedOpen.push(`${it.id}(${it.offBy})`); state.setItem(it.id, true); host.enable(it.id); }
+    }
+    state.setBundle('equipment', true);
+    if (forcedOpen.length) {
+      log(`  · [trace] 入口发现 ${forcedOpen.length} 个器材插件处于停用，已临时打开：${forcedOpen.join(', ')}`);
+      await steps(2);
+    }
+
+    // ── ⓪ 基线：栏 = 注册表的投影 ─────────────────────────────
+    const baseKeys = keys();
+    check('应用与器材栏就绪', ROWS().length === baseKeys.length && staleRows().length === 0,
+      `注册表 ${baseKeys.length} 条 / 器材栏 ${ROWS().length} 行；陈旧 ${staleRows().length} 条`);
+    check('每一行都带 type 键（键控协调与断言的锚点）', ROWS().every((r) => !!r.dataset.type),
+      ROWS().filter((r) => !r.dataset.type).length + ' 行缺 data-type');
+
+    // ── ① 单项停用：只摘它自己，其余节点身份不变 ────────────────
+    const hTypes = keys().filter((k) => REG().ownerOf(k) === H);
+    const beforeRow = new Map(ROWS().map((r) => [r.dataset.type, r]));
+    const beforeOrder = typesOf(ROWS());
+    state.setItem(H, false); host.disable(H, 'item');
+    await steps(2);
+    check('单项停用后：它贡献的器材真的从注册表里没了',
+      hTypes.length > 0 && hTypes.every((t) => !REG().has(t)),
+      `${H} 贡献 ${hTypes.length} 件：${hTypes.join(', ')}`);
+    check('单项停用后：器材栏里没有任何「注册表里没有」的条目',
+      staleRows().length === 0 && ROWS().length === REG().size,
+      `陈旧 ${staleRows().length} 条；注册表 ${REG().size} / 栏 ${ROWS().length}`);
+    const kept = ROWS();
+    check('单项停用只摘掉它自己：其余行节点身份逐个不变',
+      kept.length > 0 && kept.every((r) => beforeRow.get(r.dataset.type) === r),
+      `${kept.length} 行全部 === 旧节点`);
+    check('其余行的相对顺序也没变',
+      sameSet(typesOf(kept), beforeOrder.filter((t) => REG().has(t))),
+      `顺序 ${typesOf(kept).slice(0, 6).join(',')}…`);
+    check('复用行的无障碍属性原样保留',
+      kept.every((r) => r.getAttribute('role') === 'button' && r.tabIndex === 0
+        && /^添加器材：/.test(r.getAttribute('aria-label') || '') && !!r.getAttribute('title')),
+      'role=button / tabindex=0 / aria-label=添加器材：… / title 都在');
+
+    const clickA = await clickRow(kept[0], 'click');
+    check('复用行仍然响应点击（事件没被协调弄丢）',
+      clickA.called === 1 && clickA.type === kept[0].dataset.type,
+      `addEntity 调用 ${clickA.called} 次；落进去的类型 ${clickA.type}`);
+    const clickB = await clickRow(kept[1], 'key');
+    check('复用行仍然响应键盘（Enter 落器材）',
+      clickB.called === 1 && clickB.type === kept[1].dataset.type,
+      `addEntity 调用 ${clickB.called} 次；落进去的类型 ${clickB.type}`);
+
+    state.setItem(H, true); host.enable(H);
+    await steps(2);
+    check('单项恢复后：条目回来且与注册表一一对应',
+      ROWS().length === REG().size && sameSet(typesOf(ROWS()), keys()) && staleRows().length === 0,
+      `${ROWS().length} 行 / 注册表 ${REG().size} 条`);
+
+    // ── ② 包级停用：整包摘掉，栏里不许留一条 ────────────────────
+    state.setBundle('equipment', false);
+    for (const id of EQ_IDS) host.disable(id, 'bundle');
+    await steps(2);
+    check('包级停用后：器材栏里没有任何陈旧条目（逐个比对注册表）',
+      staleRows().length === 0,
+      `陈旧 ${staleRows().length} 条；注册表 ${REG().size} / 栏 ${ROWS().length}；停用了 ${EQ_IDS.length} 个器材插件`);
+    check('包级停用后：器材栏与注册表数量一致', ROWS().length === REG().size, `${ROWS().length} === ${REG().size}`);
+    state.setBundle('equipment', true);
+    for (const id of EQ_IDS) host.enable(id);
+    await steps(2);
+    check('包级恢复后：条目全部回来且与注册表一一对应',
+      ROWS().length === baseKeys.length && sameSet(typesOf(ROWS()), keys()) && staleRows().length === 0,
+      `${ROWS().length} 行（基线 ${baseKeys.length}）/ 注册表 ${REG().size} 条`);
+
+    // ── ③ 反复启停：不累积、不出重复 ───────────────────────────
+    const nodesBefore = LIST().querySelectorAll('*').length;
+    for (let i = 0; i < 3; i++) {
+      state.setItem(H, false); host.disable(H, 'item'); await steps(2);
+      state.setItem(H, true); host.enable(H); await steps(2);
+    }
+    check('反复停用/启用 3 轮后：器材栏元素总数不增长',
+      LIST().querySelectorAll('*').length === nodesBefore,
+      `${nodesBefore} → ${LIST().querySelectorAll('*').length} 个元素`);
+    check('反复启停后没有重复行、也没有陈旧行',
+      new Set(typesOf(ROWS())).size === ROWS().length && staleRows().length === 0,
+      `行 ${ROWS().length} / 去重 ${new Set(typesOf(ROWS())).size}；陈旧 ${staleRows().length}`);
+
+    // ── ④ 用户状态不被一次同步抹掉 ─────────────────────────────
+    await setQuery('水');
+    const visWithQuery = ROWS().length;
+    state.setItem(H, false); host.disable(H, 'item'); await steps(2);
+    check('同步不会重置搜索词，也不会改动可见条数',
+      SEARCH().value === '水' && PAL().q === '水' && ROWS().length === visWithQuery,
+      `搜索框「${SEARCH().value}」/ p.q=「${PAL().q}」；可见 ${visWithQuery} → ${ROWS().length} 行`);
+    state.setItem(H, true); host.enable(H); await steps(2);
+    await setQuery('');
+
+    await tabTo('physics');
+    const phys = typesOf(ROWS());
+    state.setItem(H, false); host.disable(H, 'item'); await steps(2);
+    check('同步不会重置分页签（域过滤保持）',
+      PAL().domain === 'physics' && d.querySelector('#paletteTabs button.active').dataset.tab === 'physics'
+        && sameSet(typesOf(ROWS()), phys.filter((t) => REG().has(t))),
+      `domain=${PAL().domain}；可见 ${ROWS().length} 行，期望 ${phys.filter((t) => REG().has(t)).length}`);
+    state.setItem(H, true); host.enable(H); await steps(2);
+    await tabTo('all');
+
+    // ── ⑤ 信号顺序：摘条目在推送之前，投影在同一轮里就位 ─────────
+    const t3 = keys().find((k) => REG().ownerOf(k) === H);
+    const samples = [];
+    // 探针的订阅晚于器材栏（插件装载时就订了），所以每次推送到达时读到的就是"同一轮之后"的状态
+    const offSub = inv.onChange(() => samples.push({ regHas: REG().has(t3), staleNow: staleRows().length }));
+    state.setItem(H, false); host.disable(H, 'item'); await steps(2);
+    offSub();
+    // 只看「注册表里那条已经没了」之后的推送：之前那几次属于上一轮状态变化，拿它判断顺序会误判
+    const afterRemoval = samples.filter((s) => !s.regHas);
+    check('顺序：摘条目发生在清单推送之前（推送到达时注册表已经改了）',
+      afterRemoval.length > 0,
+      `${samples.length} 次推送，其中 ${afterRemoval.length} 次在摘条目之后：${JSON.stringify(samples)}`);
+    check('顺序：摘条目之后的每次推送里，器材栏都已经重投影完（陈旧恒 0）',
+      afterRemoval.length > 0 && afterRemoval.every((s) => s.staleNow === 0),
+      JSON.stringify(afterRemoval));
+    state.setItem(H, true); host.enable(H); await steps(2);
+
+    // ── ⑥ 陈旧类型：手持离线旧节点再点它 ───────────────────────
+    const victim = ROWS()[0];
+    const vType = victim.dataset.type;
+    const vName = victim.querySelector('b').textContent;
+    const vOwner = REG().ownerOf(vType);
+    state.setItem(vOwner, false); host.disable(vOwner, 'item'); await steps(2);
+    check('停用后这个类型真的不在注册表里了', !REG().has(vType), `${vType}（${vName}）owner=${vOwner}`);
+    check('陈旧行已经不在栏里（而不是留在那儿点了没反应）',
+      !LIST().contains(victim) && staleRows().length === 0,
+      `栏内陈旧 ${staleRows().length} 条；节点仍在栏内=${LIST().contains(victim)}`);
+    const errs0 = errs.length, add0 = addCalls;
+    toasts.length = 0;
+    victim.click();                                  // 真实事件路径：离线节点自己的监听器照样会跑
+    await steps(2);
+    check('离线旧节点被点：不抛未捕获异常', errs.length === errs0, `未捕获异常 ${errs.length - errs0} 条`);
+    check('离线旧节点被点：没有偷偷落进实验台', addCalls === add0, `addEntity 被调用 ${addCalls - add0} 次`);
+    check('离线旧节点被点：给出可读提示', toasts.some((t) => /已被卸载|无法添加/.test(t)),
+      `toast：${JSON.stringify(toasts)}`);
+    let apiOk = true, apiRet = 'n/a';
+    try { apiRet = app.addEntity(vType); } catch (e) { apiOk = false; apiRet = 'throw: ' + e.message; }
+    check('直接 addEntity(陈旧类型)：不抛错、返回 null', apiOk && apiRet === null, `返回 ${String(apiRet)}`);
+    state.setItem(vOwner, true); host.enable(vOwner); await steps(2);
+    check('恢复后：器材栏与注册表重新一致',
+      ROWS().length === REG().size && staleRows().length === 0 && errs.length === errs0,
+      `${ROWS().length} 行 / 注册表 ${REG().size} 条；新增未捕获异常 ${errs.length - errs0} 条`);
+
+    // ── ⑦ 运行时装卸器材包：量出信号缺口（内核目前只在 define 时通知）──
+    const packSvc = app.services && app.services.packs;
+    check('器材包服务在场（运行时装卸的入口）', !!(packSvc && packSvc.install && packSvc.uninstall),
+      `app.services.packs=${!!packSvc}`);
+    const baseType = keys()[0];
+    const ins = packSvc.install({
+      format: 'xiaomo.equipment.pack',       // 少了这个字段 validatePack 会直接拒收
+      id: PACK_ID, name: '探针器材包',
+      equipment: [{ type: 'xiaomo.probe.widget', proto: baseType, name: '探针件', desc: '探针临时器材' }],
+    }, { silent: true });
+    await steps(3);
+    const made = (ins && ins.made) || [];
+    check('运行时装包：新器材立刻出现在器材栏（define 有通知）',
+      !!(ins && ins.ok) && made.length > 0 && made.every((t) => REG().has(t))
+        && ROWS().some((r) => r.dataset.type === made[0]) && staleRows().length === 0,
+      `装机 ${(ins && ins.ok) ? 'ok' : '失败：' + (ins && ins.error)}；新增 ${made.join(',')}；`
+      + `栏 ${ROWS().length} 行 / 注册表 ${REG().size} 条`);
+    packSvc.uninstall(PACK_ID);
+    await steps(3);
+    check('运行时卸包：类型确实从注册表消失了', made.every((t) => !REG().has(t)), made.join(','));
+
+    // 【红绿守卫】必须在**任何点击之前**读器材栏与注册表的差集，而且必须是一条能判红的硬判据。
+    // 为什么强调「点击之前」：place() 里有一条「点击时查注册表」的兜底，点一下就把陈旧行就地摘掉了。
+    // 一旦先点再读，测到的是那个兜底、不是内核发出的信号 —— 于是内核修没修都绿，断言失去红绿能力。
+    // （task-12 实测：内核修前与修后，这条路径都是 ok=true pass=36 fail=0，守卫能力为零。）
+    const residualBeforeClick = staleRows();
+    check('运行时卸包：未点击即读，器材栏里不得有任何陈旧条目（红绿守卫）',
+      residualBeforeClick.length === 0,
+      `卸包后未点击即读：残留 ${residualBeforeClick.length} 条；栏 ${ROWS().length} 行 / 注册表 ${REG().size} 条`
+        + (residualBeforeClick.length
+          ? `；陈旧类型 ${JSON.stringify(residualBeforeClick.map((r) => r.dataset.type))}（移除没有通知到订阅者）`
+          : ''));
+
+    const residual = staleRows();
+    const victim2 = residual[0];
+    const errs1 = errs.length, add1 = addCalls;
+    toasts.length = 0;
+    if (victim2) victim2.click();
+    await steps(2);
+    check('运行时卸包：残留条目（若有）点下去不抛错、不落盘、有可读提示',
+      errs.length === errs1 && addCalls === add1 && (!victim2 || toasts.some((t) => /已被卸载|无法添加/.test(t))),
+      `残留 ${residual.length} 条（卸包后未点击即读；点击兜底会就地摘掉它，所以本行只作诊断，`
+      + `判据在上一行的红绿守卫）；`
+      + `点后栏内陈旧 ${staleRows().length} 条；toast=${JSON.stringify(toasts)}`);
+    check('运行时卸包：点过一次之后，陈旧条目被就地摘掉（栏内陈旧归零）',
+      staleRows().length === 0, `栏内陈旧 ${staleRows().length} 条`);
+
+    // ── ⑧ 空态与搜索框的移动端输入语义 ─────────────────────────
+    await setQuery('zzz不存在的器材');
+    check('搜不到时给空态文案（且不残留行）',
+      !!LIST().querySelector('.pal-empty') && ROWS().length === 0 && LIST().textContent.includes('zzz不存在的器材'),
+      LIST().textContent.trim().slice(0, 40));
+    await setQuery('');
+    check('清空搜索后条目全部回来', ROWS().length === REG().size && staleRows().length === 0,
+      `${ROWS().length} 行 / 注册表 ${REG().size} 条`);
+    const s = SEARCH();
+    const attrs = {
+      inputmode: s.getAttribute('inputmode'), enterkeyhint: s.getAttribute('enterkeyhint'),
+      autocapitalize: s.getAttribute('autocapitalize'), autocorrect: s.getAttribute('autocorrect'),
+      type: s.getAttribute('type'), autocomplete: s.getAttribute('autocomplete'), spellcheck: s.getAttribute('spellcheck'),
+    };
+    check('搜索框带移动端输入语义',
+      attrs.inputmode === 'search' && attrs.enterkeyhint === 'search'
+        && attrs.autocapitalize === 'none' && attrs.autocorrect === 'off',
+      JSON.stringify(attrs));
+    check('搜索框原有语义没被改坏',
+      attrs.type === 'search' && attrs.autocomplete === 'off' && attrs.spellcheck === 'false',
+      `type=${attrs.type} autocomplete=${attrs.autocomplete} spellcheck=${attrs.spellcheck}`);
+
+    endInfo = `栏 ${ROWS().length} 行 / 注册表 ${REG().size} 条 / 陈旧 ${staleRows().length}`;
+
+  // ── 还原：探针和用户共用同一份 localStorage，不能留下残局 ──
+  } finally {
+    try { if (app.services && app.services.packs) app.services.packs.uninstall(PACK_ID); } catch (e) { /* 尽力而为 */ }
+    try {
+      for (const it of inv.snapshot().items) {
+        if (it.offBy) { state.setItem(it.id, true); state.setBundle(it.kind, true); host.enable(it.id); }
+      }
+      state.setBundle('equipment', true);
+      for (const id of EQ_IDS) host.enable(id);
+      await steps(3);
+      const end = inv.snapshot();
+      check('还原后：没有 offBy、没有失败，器材栏与注册表一致',
+        end.items.every((it) => it.offBy === null) && end.counts.failed === 0
+          && ROWS().length === REG().size && staleRows().length === 0,
+        JSON.stringify(end.counts) + `；栏 ${ROWS().length} / 注册表 ${REG().size}`);
+    } catch (e) {
+      check('还原本身没抛错（否则盘上会留下停用状态）', false, e && e.message);
+    }
+    app.toast = toastBak; app.addEntity = addBak;
+    w.removeEventListener('error', onErr);
+    w.removeEventListener('unhandledrejection', onErr);
+    if (endInfo) log(`收尾：${endInfo}；未捕获异常合计 ${errs.length} 条`);
+  }
+  fin({ total: REG().size });
+}
+</script>
+</body>
+</html>

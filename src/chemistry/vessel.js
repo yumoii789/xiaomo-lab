@@ -32,6 +32,8 @@ export class VesselModel {
 
     // 由耦合总线每帧写入
     this.electricCurrent = 0;      // 通过溶液的电流 A
+    this.currentSigned = 0;        // 带符号电流（+ 正向 / − 反向），只给化学层定电解方向 A
+    this.currentU = 0;             // 带符号电压（与 currentSigned 同参考方向），供面板出「瞬间电压」V
     this.electrodes = [];          // 插入的电极（字符串描述）
     this.heatIn = 0;               // 本帧接收的热功率 W（瞬时）
 
@@ -274,6 +276,11 @@ export class VesselModel {
     const vol = this.volume * f;
     if (vol <= 0 && this.solid.size === 0) return 0;
 
+    // ⚠ 目标容器可以自报「我只留液体」（retainSolids）—— 过滤就是这一条能力。
+    //    · 缺省 undefined ⇒ false ⇒ 既有行为逐字不变；
+    //    · 先例：thermal.js:225 也是器材往自己的 vessel 上挂活参数（this.vessel.coolK = …）；
+    //    · 沉淀 precip 与气体 gas **本来就不被搬** ⇒ 过滤只需额外处理 solid 这一项。
+    const retain = !!other.retainSolids;
     const room = other.capacity - other.volume;
     const v = Math.min(vol, room);
     if (v <= 0) return 0;
@@ -290,11 +297,13 @@ export class VesselModel {
       if (this.mol.get(id) < 1e-12) this.mol.delete(id);
       other.mol.set(id, (other.mol.get(id) || 0) + move);
     }
-    for (const [id, g] of [...this.solid]) {
-      const move = g * f;
-      this.solid.set(id, g - move);
-      if (this.solid.get(id) < 1e-9) this.solid.delete(id);
-      other.solid.set(id, (other.solid.get(id) || 0) + move);
+    if (!retain) {
+      for (const [id, g] of [...this.solid]) {
+        const move = g * f;
+        this.solid.set(id, g - move);
+        if (this.solid.get(id) < 1e-9) this.solid.delete(id);
+        other.solid.set(id, (other.solid.get(id) || 0) + move);
+      }
     }
     // 混合温度
     const m1 = this.totalMass(), m2 = other.totalMass();

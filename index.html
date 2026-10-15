@@ -2,12 +2,62 @@
 <html lang="zh-CN" data-theme="mint" data-mode="dark">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
 <meta name="color-scheme" content="dark light" />
+<!-- 手机状态栏 / 浏览器 chrome 的颜色。必须是**单条无 media** 的标签：
+     本应用可以手动切深浅色（圆钮单击 auto → 浅 → 深），只按 OS 的
+     prefers-color-scheme 写两条，就会出现「用户手动选深色、系统却是浅色」时
+     浅色状态栏配深色页面。所以 content 由 JS 在算出生效值之后写入：
+     下面那段同步内联脚本写首屏（绘制前，不闪），src/core/theme.js 应用主题时再写一次
+     （覆盖后续所有切换路径）。初始值给深色的兜底值，脚本被禁用时也不过是个可接受的错色。 -->
+<meta name="theme-color" content="#0b0f0d" />
 <meta name="description" content="小墨实验室 —— 物理与化学器材共处同一张实验台，两种器材可以相互交互" />
 <title>小墨实验室 · XiaoMo Lab</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%23a3e635'/><text x='16' y='23' font-size='19' text-anchor='middle' fill='%230b0f0d' font-family='sans-serif' font-weight='bold'>墨</text></svg>" />
 <link rel="stylesheet" href="styles/main.css" />
+<!-- 触控 / 移动端基线层。必须排在 main.css 之后：同优先级下后加载的样式表胜出，
+     它靠这一条覆盖 main.css 里「手机上不适配」的规则（最典型的是 #app 的 height:100vh）。 -->
+<link rel="stylesheet" href="styles/touch.css" />
+<!-- 大屏可读模式（开关在「设置 → 显示」）。必须排在 touch.css 之后：它用 html.big-read 前缀提升特异性覆盖前两张表，加载顺序是同一优先级下的第二道保险。 -->
+<link rel="stylesheet" href="styles/display.css" />
+<script>
+  // 首屏配色必须在样式表生效前定好，否则「跟随系统」的浅色用户会先闪一下深色 ——
+  // 而那恰恰是默认策略（跟随系统）最要紧的场景。首屏的同步内联脚本只有两段
+  // （本段管配色，下面一段管大屏可读模式），每段只干一件事；
+  // 口径与 src/main.js 的 applyThemeFromStore() 一致，改一处必须同步改另一处。
+  try {
+    var MK = 'xiaomo.mode.v1';
+    // 旧版本每次开机都会往这个键写「当时生效的值」，所以老档案里的值分不清是用户选的还是
+    // 代码写的。用 xiaomo.mode.intent.v1 作一次性标记：没有标记就视为代码写的并清掉它，
+    // 让老用户也能真正落到「跟随系统」这个默认策略上。
+    if (!localStorage.getItem('xiaomo.mode.intent.v1')) {
+      localStorage.removeItem(MK);
+      localStorage.setItem('xiaomo.mode.intent.v1', '1');
+    }
+    var m = localStorage.getItem(MK);
+    var eff = (m === 'dark' || m === 'light') ? m
+      : (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    document.documentElement.dataset.mode = eff;
+    document.documentElement.style.colorScheme = eff;
+    // meta[theme-color] 只能有一个生效值，而它必须跟着「生效的主题」走。
+    // 这里是绘制前的唯一一次机会：不写，手动选深色 + 系统浅色的用户
+    // 会先看到一条浅色状态栏（而且之后也没人再改它）。
+    // 这段脚本在样式表之前执行，所以 --bg 还取不到，只能用 eff 对应的兜底值；
+    // 真正的配色真值在 styles/main.css（由 src/core/theme.js 写入），
+    // 主题一应用就会把这里写的值覆盖成准确值。
+    var tc = document.querySelector('meta[name="theme-color"]');
+    if (tc) tc.setAttribute('content', eff === 'light' ? '#eef2ef' : '#0b0f0d');
+  } catch (e) { /* 存储不可用就按 index.html 上写死的 data-mode 兜底 */ }
+</script>
+<script>
+  // 同一条规矩的第二个偏好：大屏可读模式的 class 也必须在**绘制前**挂上。
+  // 它平时由插件挂载期应用，而插件是 type="module"（defer）—— 慢机上会先画一片 12.5px
+  // 小字、再「跳」成 15.5px，投影给整个教室看时非常显眼。上面那段立下的规矩，这段照办。
+  // 只读偏好、不写回；口径与 src/plugins/ui.settings.js 的 applyBigRead() 一致，改一处必须同步改另一处。
+  try {
+    if (localStorage.getItem('xiaomo.display.v1') === '1') document.documentElement.classList.add('big-read');
+  } catch (e) { /* 存储不可用就当「关」，插件挂载期还有一次机会 */ }
+</script>
 </head>
 <body>
 
@@ -30,7 +80,7 @@
   <!-- ══ 主体 ══ -->
   <main id="body">
 
-    <!-- 左：器材栏 -->
+    <!-- 左：器材栏（窄屏 / 触摸设备上由 styles/touch.css 收成浮层抽屉，data-open 表示开着） -->
     <aside id="palette" data-slot="palette"></aside>
 
     <!-- 中：实验台 -->
@@ -45,7 +95,7 @@
       <div id="toast" class="toast"></div>
     </section>
 
-    <!-- 右：检查器 -->
+    <!-- 右：检查器（窄屏 / 触摸设备上同上收成浮层抽屉） -->
     <aside id="sidebar">
       <nav id="sideTabs">
         <button type="button" data-pane="inspector" class="active">属性</button>
@@ -67,18 +117,26 @@
     <span class="st" id="stCount">0 件器材</span>
     <span class="st-sep"></span>
     <span class="st" id="stCircuit">电路断开</span>
-    <span class="st-sep"></span>
-    <span class="st" id="stCoupling">耦合 0 处</span>
+    <span class="st-sep st-sep-coupling"></span>
+    <span class="st st-coupling" id="stCoupling">耦合 0 处</span>
     <span class="st-spacer"></span>
-    <span class="st hintline">V 选择 · W 连线 · P 倾倒 · X 删除 · 空格 运行 · Ctrl+S 保存</span>
+    <!-- 两段提示各占一个 span，由 styles/touch.css 按指针能力显示其中一个：
+         触摸设备上没有键盘，那串键位说明摆在那里没有意义，换成手指真正可用的操作。 -->
+    <span class="st hintline hint-keys">V 选择 · W 连线 · P 倾倒 · X 删除 · 空格 运行 · Ctrl+S 保存</span>
+    <span class="st hintline hint-touch">拖动移动 · 点接线柱连线 · 双击空白取消 · 长按主题钮换主题</span>
     <span class="st st-fps" id="fps">– fps</span>
   </footer>
 
 </div>
 
-<!-- 浮层：管理员弹窗、插件抽屉 -->
+<!-- 浮层：管理员弹窗、插件抽屉。窄屏下也用作器材栏 / 侧边栏的遮罩（点它收起浮层）。 -->
+<div id="drawerMask"></div>
 <div class="overlay-layer" data-slot="overlay"></div>
 
 <script type="module" src="src/main.js"></script>
+<!-- 触控行为层（src/ui/touch.js）不再单独加载：它只导出函数，由 src/main.js 在
+     `mountSlots(); afterSlots();` 之后调用 bootTouch() 装配 ✓。
+     原先靠「两个模块脚本的 defer 顺序」保证时机 —— 那个前提**不成立**：
+     实测插槽里的内容（主题圆钮、顶栏两个入口）会晚于本文件执行。 -->
 </body>
 </html>

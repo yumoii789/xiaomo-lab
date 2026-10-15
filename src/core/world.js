@@ -35,21 +35,33 @@ export class World {
     this.time = 0;          // 仿真时间（秒）
     this.running = true;
     this.frame = 0;
+    /** 撤销/重做栈（C9 骨架）：由 main.js 建好后挂上来；为 null ⇒ 全部挂钩自然失效 */
+    this.undo = null;
   }
 
   // ─── 器材 ─────────────────────────────────────────────
   add(ent, silent = false) {
+    ent.world = this;          // 器材回指世界：撤销挂钩靠它找到栈（entity.setProp）
     this.entities.push(ent);
     this.byId.set(ent.id, ent);
     ent.onAdd?.(this);
     if (!silent) bus.emit(EV.ENTITY_ADD, ent);
     bus.emit(EV.SCENE_DIRTY);
+    // 撤销栈（C9）：`silent` 的内部调用（存档载入 / 预设 / 逆动作）不记账
+    const u = this.undo;
+    if (u && !silent) {
+      u.push({
+        kind: 'add', label: `放置 ${ent.def ? ent.def.name : ent.type}`, ent,
+        undo: () => this.remove(ent),
+        redo: () => this.add(ent),
+      });
+    }
     return ent;
   }
 
   remove(ent) {
-    // 连带移除挂在它上面的所有连线
-    const dead = this.wires.filter(w => w.a.e === ent.id || w.b.e === ent.id);
+    // 连带移除挂在它上面的所有连线（复用 wiresOf：不再各写一份过滤）
+    const dead = this.wiresOf(ent);
     for (const w of dead) this.disconnect(w, true);
     const i = this.entities.indexOf(ent);
     if (i >= 0) this.entities.splice(i, 1);
@@ -57,6 +69,17 @@ export class World {
     ent.onRemove?.(this);
     bus.emit(EV.ENTITY_REMOVE, ent);
     bus.emit(EV.SCENE_DIRTY);
+    // 撤销栈（C9）：逆动作必须**把连带断掉的线接回去** ✗
+    // 否则"删除 → 撤销"之后器材回来了、线却少了几根（最难发现的那类不完整还原）
+    const u = this.undo;
+    if (u) {
+      const refs = dead.map((w) => [{ ...w.a }, { ...w.b }, w.kind]);
+      u.push({
+        kind: 'remove', label: `删除 ${ent.def ? ent.def.name : ent.type}`, ent,
+        undo: () => { this.add(ent); for (const [a, b, k] of refs) this.connect(a, b, k); },
+        redo: () => this.remove(ent),
+      });
+    }
     return dead.length;
   }
 
@@ -142,6 +165,17 @@ export class World {
     this.wires.push(w);
     bus.emit(EV.WIRE_ADD, w);
     bus.emit(EV.SCENE_DIRTY);
+    // 撤销栈（C9）：重做会造出**新的** Wire 对象 ⇒ 必须刷新被捕获的引用 ✗
+    // 否则「接线 → 撤销 → 重做 → 再撤销」会拿一条已经不在世界里的旧线去断（引用走空）
+    const u = this.undo;
+    if (u) {
+      let cur = w;
+      u.push({
+        kind: 'wire', label: '接线',
+        undo: () => this.disconnect(cur),
+        redo: () => { cur = this.connect({ ...refA }, { ...refB }, kind); },
+      });
+    }
     return w;
   }
 
@@ -149,6 +183,17 @@ export class World {
     const i = this.wires.indexOf(w);
     if (i >= 0) this.wires.splice(i, 1);
     if (!silent) { bus.emit(EV.WIRE_REMOVE, w); bus.emit(EV.SCENE_DIRTY); }
+    // 撤销栈（C9）：内部连带断线（remove 传 silent=true）不记账；
+    // `i >= 0` ⇒ 空断线（本来就没这根线）不该产生历史条目
+    const u = this.undo;
+    if (u && !silent && i >= 0) {
+      const a = { ...w.a }, b = { ...w.b }, k = w.kind;
+      u.push({
+        kind: 'unwire', label: '断线',
+        undo: () => { this.connect(a, b, k); },
+        redo: () => { this.disconnect(w); },
+      });
+    }
     return w;
   }
 

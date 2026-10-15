@@ -1,0 +1,150 @@
+/* ══════════════════════════════════════════════════════════
+   小墨实验室 · 大屏可读模式（教学投影）
+   ──────────────────────────────────────────────────────────
+   什么时候用它：同一台设备两种用法 —— 站在屏幕前用手指操作（现状够用），
+   或者投给整个教室看（现状 10.5–12.5px，3 米外看不清）。
+   设备自己猜不出「房间里有没有人在看」，所以它是**用户可控的一个开关**，
+   默认关，位置在「设置 → 显示 → 大屏可读模式」（src/plugins/ui.settings.js）。
+
+   它做什么（这就是契约，改这里必须同步改 tools/display-probe.html 的断言）：
+     · 生效方式：根元素上**一个 class** `html.big-read`。没有 !important，
+       没有逐元素 JS 改样式，没有新动效，没有新颜色。
+     · 同一个比例尺（下面三个变量，全表只此一组数字）：
+         --br-fs   正文/描述的字号增量            +3px   （12.5→15.5、10.5→13.5）
+         --br-min  最小字号地板                   13px   （10/10.5/11px 的次要文字抬到地板）
+         --br-ctl  关键控件的高度增量              +6px   （32→38、28→34、24→30）
+       「+3px」是一个常量而不是每处各写一个数：投影上要的是整体抬升，
+       各处按比例放大会让原本就大的标题更大、小的还是小。
+     · 「看得清」而不只是「放大」，另外三个变量一起动：
+         - 对比度：次要文字 var(--text-2) → var(--text)，三级 var(--text-3) → var(--text-2)。
+           **只用现有 token**，所以深浅色/青柠三种主题都成立 —— 投影仪对比度低时
+           最先糊掉的就是这些灰字，而不是字号。
+         - 字重：正文 400 → 500。投影仪的细笔画会糊成一团。
+         - 行距：多行描述 1.4/1.6 → 1.5/1.7。
+     · 为了「看得清」而**故意没做**的两件事（见交付说明的「未做到」）：
+         - 不加宽三栏（--pal-w / --side-w 不动），因为验收要求实验台可见宽度不变；
+           代价是器材名更容易被 ellipsis 截断。
+         - 不加 max-width 到 .tb-select，避免窄窗口下顶栏溢出。
+
+   为什么不能直接改 styles/main.css（本文件只做覆盖）：
+     · 它此刻由动效批次（task-13）独占；两个人同时改同一个样式表，
+       谁的改动都会把对方的语义一起改掉。所以这里一律用
+       `html.big-read <原选择器>` 提升一个 class 的特异性来覆盖，
+       加载顺序上 display.css 又在 main.css / touch.css 之后（index.html）。
+     · 每条规则后面注明它覆盖 main.css 的哪一行，便于日后对照。
+
+   与 styles/touch.css 的共存（它也是别人的写域）：
+     · touch.css 把命中热区钉在 ≥44px：@media (any-pointer:coarse) 里 `.tool-btn, .tb-check
+       { min-height: 44px }`；@media (pointer:coarse) 里 .theme-dot/.fx-orb/.drawer-x/
+       .dock-btn 直接给 44px。（它自己记着那段历史：::after 扩边必须带 pointer-events:none，
+       而带了这个属性对命中测试是透明的，实测一个像素都量不到。）
+     · **跨层共享控件的「最小尺寸」只能有一个属主，属主是 touch.css**（它是热区需求方）。
+       理由是一条实测出来的 CSS 事实：`height` 与 `min-height` 相遇是安全的
+       （used = max(两者)，所以 32+6 不会压掉 44）；但 **`min-height` 与 `min-height`
+       相遇由特异性定胜负** —— 特异度高的一方**直接替换**对方，能把 44px 压成 38px。
+     · 实测反例：**同一处犯过两代，本文件两次都在肇事者位置上。**
+       一代（task-25 之前）：.tb-check 用 `height:38px` 盖掉 touch.css 的 44px
+         → 视觉 44→38、真实命中 45→39，探针 ⑥ 抓到；
+       二代（task-26 修成 min-height 之后）：touch.css 那版把 44px 改成了 `min-height`，
+         于是变成同属性对抗，本表 (0,2,1) > (0,2,0) → **命中 45→39、视觉 44→38，
+         4 个受测列（1920/390 × 桌面/触控形态）全红**，由 task-26 的跨层热区矩阵抓到。
+       结论：本表现在**完全不声明 .tb-check 的盒高**，可读性由字号承担，盒子交回触控层。
+     · 剩下的两处盒高声明都要能被未来触碰：`.tb-btn` 用 min-height（touch.css 目前对它
+       用 height:36px → max 安全 ✓；**若哪天 touch.css 改成 min-height，同一坑会重现**，
+       由 tools/display-probe.html 的 ⑨「开 ≥ 关」断言当场报警）；`.tb-select` 同理。
+     · 其余属性（字号/颜色/图标盒）不受这条约束 —— 那些不是 touch.css 的目标。
+   ══════════════════════════════════════════════════════════ */
+
+/* 关闭态下这些变量根本不存在：没有 .big-read 就没有任何一条规则命中 */
+html.big-read {
+  --br-fs: 3px;
+  --br-min: 13px;
+  --br-ctl: 6px;
+}
+
+/* ── 1. 顶栏：品牌、按钮、下拉、复选 ───────────────────── */
+html.big-read .brand-name { font-size: calc(13.5px + var(--br-fs)) }        /* 覆盖 main.css:90 */
+html.big-read .brand-tag  { font-size: max(calc(10.5px + var(--br-fs)), var(--br-min)) } /* :92 */
+html.big-read .tb-btn {                                                     /* 覆盖 main.css:114-117 */
+  min-height: calc(32px + var(--br-ctl));   /* min-height：见文件头「只抬高、不压低」—— touch.css 若把
+                                               它抬到 44px，本表不许压回 38px */
+  min-width: calc(32px + var(--br-ctl));
+  font-size: calc(12.5px + var(--br-fs));
+  font-weight: 500;
+  color: var(--text);                    /* 未激活按钮也拉到正文色，投影上才看得见 */
+}
+/* ⚠ 实测：这行在本机 4 个受测列里**从未生效** —— touch.css:86 的
+   `#app select.tb-select { height: 36px }` 是 id 级 (1,1,1)，永远压过这里的 (0,2,1)。
+   保留它只为「纯精细指针」环境（any-pointer:coarse 为假，那时它才生效，也正是它的设计意图）。
+   属性由 height 改成 min-height：今后 touch.css 若给 .tb-select 也加地板，max 语义保证我不压回去。 */
+html.big-read .tb-select { min-height: calc(32px + var(--br-ctl)); font-size: calc(12.5px + var(--br-fs)) } /* :134-138 */
+/* .tb-check 的盒高**故意不在这里声明**：属主是 touch.css 的 min-height:44px（见文件头）。
+   本表一旦声明同属性，就会因特异性更高把 44 压成 38 —— 实测命中 45→39、视觉 44→38，4 列全红。
+   大屏模式对它的可读性贡献只剩字号（12.5+3 → 15.5px）。 */
+html.big-read .tb-check  { font-size: calc(12.5px + var(--br-fs)) }        /* :144-146，盒高交给 touch.css */
+html.big-read .tb-check input { width: 16px; height: 16px }                 /* :150（13px 的勾选框太小） */
+
+/* ── 2. 器材栏行：名称、描述、图标盒 ───────────────────── */
+html.big-read .pitem .pi-txt b {                                            /* 覆盖 main.css:229-232 */
+  font-size: calc(12.5px + var(--br-fs));
+  font-weight: 500;
+}
+html.big-read .pitem .pi-txt small {                                        /* :233-236 */
+  font-size: max(calc(10.5px + var(--br-fs)), var(--br-min));
+  color: var(--text);
+  line-height: 1.5;
+}
+html.big-read .pitem .pi-ico {                                              /* :220-224 */
+  width: calc(28px + var(--br-ctl));
+  height: calc(28px + var(--br-ctl));
+  font-size: calc(15px + var(--br-fs));
+}
+
+/* ── 3. 状态栏：11px 的三级灰字，投影下最先看不见的一行 ── */
+html.big-read #statusbar {                                                  /* 覆盖 main.css:522-526 */
+  font-size: max(calc(11px + var(--br-fs)), var(--br-min));
+  color: var(--text-2);
+  font-weight: 500;
+}
+html.big-read #statusbar .st-fps { color: var(--text-2) }                   /* :115 的 – fps 是三级色 */
+
+/* ── 4. 右栏页签（属性 / 数据 / 日志）─────────────────── */
+html.big-read #sideTabs button { font-size: calc(12.5px + var(--br-fs)) }   /* 覆盖 main.css:365 */
+
+/* ── 5. 检查器：标题、字段标签、只读行、按钮 ───────────── */
+html.big-read .ihead .tt b     { font-size: calc(13.5px + var(--br-fs)) }   /* 覆盖 main.css:401 */
+html.big-read .ihead .tt small { font-size: max(calc(11px + var(--br-fs)), var(--br-min)) } /* :402 */
+html.big-read .field > label > span:first-child {                           /* :414 属性字段标签 */
+  font-size: calc(12px + var(--br-fs));
+  color: var(--text);
+}
+html.big-read .field > label .v { font-size: calc(12px + var(--br-fs)) }    /* :415 当前值 */
+/* 表单控件按元素类型选，不依赖 main.css 里那串具体选择器：.field 里只有输入控件 */
+html.big-read .field input,
+html.big-read .field select,
+html.big-read .field textarea { font-size: calc(12px + var(--br-fs)) }      /* :430 */
+html.big-read .ro .k { font-size: max(calc(11.5px + var(--br-fs)), var(--br-min)); color: var(--text-2) } /* :447 */
+html.big-read .ro .v { font-size: calc(12px + var(--br-fs)) }               /* :449 */
+html.big-read .btn { height: calc(28px + var(--br-ctl)); font-size: calc(12px + var(--br-fs)) } /* :455 */
+html.big-read .mini-btn { height: calc(24px + var(--br-ctl)); font-size: calc(11.5px + var(--br-fs)) } /* :494 */
+
+/* ── 6. 抽屉 / 设置面板正文 ────────────────────────────── */
+html.big-read .drawer-head h2 { font-size: calc(15px + var(--br-fs)) }      /* 覆盖 main.css:597 */
+html.big-read .drawer-sub { font-size: max(calc(11.5px + var(--br-fs)), var(--br-min)) } /* :598 */
+html.big-read .drawer-foot { font-size: max(calc(11px + var(--br-fs)), var(--br-min)) }  /* :609 */
+html.big-read .drawer-x { font-size: calc(14px + var(--br-fs)) }            /* :600（盒子尺寸交给 touch.css） */
+html.big-read .plug-sec-head h3 {                                           /* :626 分组小标题 */
+  font-size: max(calc(11px + var(--br-fs)), var(--br-min));
+  color: var(--text-2);
+}
+html.big-read .plug-title b { font-size: calc(12.5px + var(--br-fs)) }      /* :663 */
+html.big-read .plug-id { font-size: max(calc(10px + var(--br-fs)), var(--br-min)) } /* :664 插件 id */
+html.big-read .plug-desc {                                                  /* :666 开关说明正文 */
+  font-size: max(calc(11.5px + var(--br-fs)), var(--br-min));
+  color: var(--text);
+  line-height: 1.7;
+}
+html.big-read .plug-chip { font-size: max(calc(10px + var(--br-fs)), var(--br-min)) } /* :668 */
+html.big-read .plug-chip.soft { color: var(--text) }                        /* :672 灰药丸 → 正文色 */
+/* 关掉的开关行原本 45% 不透明，投影上几乎消失；调到 70% 仍一眼看出是关的 */
+html.big-read .plug-row.off { opacity: .7 }                                 /* :634 */

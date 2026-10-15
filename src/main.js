@@ -15,9 +15,13 @@ import { Engine } from './core/engine.js';
 import { bus, EV } from './core/bus.js';
 import { theme } from './core/theme.js';
 import { PluginHost } from './core/plugin.js';
+import { PluginInventory, PluginState } from './core/inventory.js';
 import { bindRegistry, create, get } from './equipment/registry.js';
+import { feedInto } from './equipment/lab.js';
 import { CouplingBus } from './coupling/bridge.js';
+import { UndoStack } from './core/undo.js';
 import { solveCircuit, fmtA } from './physics/circuit.js';
+import { bootTouch } from './ui/touch.js';
 
 // ── 插件清单 ──────────────────────────────────────────────
 // 名单在 src/plugins/index.js 里（唯一一份），这里只是转手：
@@ -44,6 +48,12 @@ class App {
     this.version = VERSION;
     this.canvas = $('#canvas');
     this.world = new World();
+    /**
+     * 撤销/重做栈（C9 骨架）：世界侧的增删改与接线都会记到这里。
+     * ⚠ 它**不是** `markDirty()` —— 那个只是重绘脏标记，历史与重绘是两件事。
+     */
+    this.undo = new UndoStack({ limit: 100 });
+    this.world.undo = this.undo;
     this.engine = new Engine(this.canvas, this.world);
     this.circuit = null;
     this.selected = null;
@@ -57,6 +67,8 @@ class App {
     this._lastFx = 0;
     /** 重绘脏标记：由 markDirty() 置位，引擎渲染后清位 */
     this._dirty = false;
+    /** 插槽协调缓存：slotName → Map<条目身份, {render, nodes, ok}>。见 mountSlot()。 */
+    this._slotCache = new Map();
 
     // ① 插件宿主
     this.host = new PluginHost(this);
@@ -67,10 +79,14 @@ class App {
     for (const p of ALL_PLUGINS) {
       try { this.host.define(p); } catch (e) { console.error('[boot] 插件声明失败', p && p.id, e); }
     }
-    let disabled = new Set();
-    try { disabled = new Set(JSON.parse(localStorage.getItem('xiaomo.plugins.disabled') || '[]')); }
-    catch { /* 坏数据就当作没停用 */ }
-    const st = this.host.installAll(disabled);
+    // 启停选择归 PluginState 所有 —— 它顺带把旧键 `xiaomo.plugins.disabled`
+    // （ui.manager 一直在写的那一个）迁进新结构，用户已有的停用选择不会丢。
+    // 装之前就要有它，因为「要不要装」在装之前就得回答，那时宿主还没有记录可读。
+    this.pluginState = new PluginState();
+    // 清单是宿主之上的只读投影，界面看它、不看宿主；装之前就建好，装载过程的变化也有人接住。
+    this.inventory = new PluginInventory(this.host, { state: this.pluginState });
+    // toOffMap 给出 Map<id,'bundle'|'item'>：宿主据此既知道跳过谁，也知道是谁关的
+    const st = this.host.installAll(this.pluginState.toOffMap(this.host.list()));
     this.bootStats = st;
 
     // ③ 装完之后才有耦合总线
@@ -82,6 +98,11 @@ class App {
 
     this.mountSlots();
     this.afterSlots();
+
+    // 触控行为层：装配必须在**插槽渲染过一轮之后** —— 主题圆钮由 ui.themeswitch 创建、
+    // 顶栏两个开合入口由插件渲染进插槽，早于这一步它们都还不存在（实测就是这么漏的 ✗）。
+    // 内部自带「缺件重试」（MutationObserver + 上限），插槽被重建时按钮与圆钮找得回来 ✓。
+    bootTouch();
 
     // ④ 界面与外设
     this.engine.onFps = (f) => { const el = $('#fps'); if (el) el.textContent = f + ' fps'; };
@@ -97,25 +118,104 @@ class App {
   }
 
   // ══════════ 插件插槽 ══════════
+  /**
+   * 冷启动挂载：每个插槽清空一次，再交给增量协调器。
+   *
+   * 这里必须清空 —— 此刻还没有任何条目被跟踪，缓存认不出「残留节点是谁的」，
+   * 不清就会在全量渲染之后叠出一份重复界面。热路径（mountSlot）从此不再整体清空。
+   */
   mountSlots() {
+    this._slotCache = new Map();
     for (const name of this.host.slotNames()) {
       const el = document.querySelector(`[data-slot="${name}"]`);
       if (!el) continue;
       el.innerHTML = '';
-      for (const item of this.host.slotItems(name)) {
-        try { item.render(el, name); }
-        catch (e) { console.error(`[slot] ${name} / ${item.pluginId} 渲染失败`, e); }
-      }
+      this.mountSlot(name);        // 与热路径共用一套协调逻辑，避免两份实现各自漂移
     }
     bus.on('slot:changed', ({ name }) => this.mountSlot(name));
   }
 
+  /**
+   * 按条目增量协调一个插槽：只重渲染「身份变了或节点已不在树上」的条目，其余原地复用。
+   *
+   * 为什么不能继续 innerHTML='' + 全量重建：任何一个条目的增减都会把同插槽里**其他**
+   * 条目的 DOM 整批换掉。渲染闭包里的状态（抽屉开着没有、焦点在哪）随之消失，渲染函数里
+   * 注册的 window 监听器还会每重建一次多一份 —— 而它们只进 ctx.onDispose，只有插件卸载
+   * 时才会跑。拨一下设置里的学分开关（overlay 槽条目增减）能同时看到这两件事。
+   */
   mountSlot(name) {
     const el = document.querySelector(`[data-slot="${name}"]`);
     if (!el) return;
-    el.innerHTML = '';
+    if (!this._slotCache) this._slotCache = new Map();
+    let cache = this._slotCache.get(name);
+    if (!cache) { cache = new Map(); this._slotCache.set(name, cache); }
+
+    const alive = new Set();
+    /** 本次「该就位的已跟踪节点」，按 slotItems() 的顺序收 */
+    const ordered = [];
+
     for (const item of this.host.slotItems(name)) {
-      try { item.render(el, name); } catch (e) { console.error(`[slot] ${name}`, e); }
+      // chain 是给「包裹式改造」用的串联插槽，它没有可挂载的 DOM，跑法是 host.runSlot()。
+      // 把它当渲染器调用等于把它的第一个函数当绘制函数执行，所以这里必须跳过。
+      if (item.kind === 'chain') continue;
+
+      // 身份 = 插件 + 插入序号 + key，而且必须**再比对渲染函数本身**：
+      // keyed 替换时新条目会「继承原条目的 seq」（core/plugin.js 为保持位置而写死的行为），
+      // 只认 (pluginId, seq) 的话，替换后的新渲染函数会被判成老条目而永远不再执行 ——
+      // 那比全量重建更糟：界面从此停在旧内容上。render 换了就必须重渲染。
+      const id = `${item.pluginId}\u0000${item.seq}\u0000${item.key ?? ''}`;
+      alive.add(id);
+      const prev = cache.get(id);
+      const reusable = !!prev && prev.ok && prev.render === item.render
+        && prev.nodes.length > 0
+        && prev.nodes.every((n) => el.contains(n));
+
+      if (reusable) {
+        for (const n of prev.nodes) if (n.parentNode === el) ordered.push(n);
+        continue;
+      }
+
+      // 要重渲染：先摘掉这个条目上一次贡献的节点，否则同一份界面会叠成两份
+      if (prev) for (const n of prev.nodes) if (n.parentNode === el) el.removeChild(n);
+
+      const before = new Set(el.children);
+      let ok = true;
+      try { item.render(el, name); }
+      catch (e) { ok = false; console.error(`[slot] ${name} / ${item.pluginId} 渲染失败`, e); }
+
+      // 用「渲染前后的直接子节点差集」认领这次新增的节点：一个 render 里可能 append
+      // 好几个节点（也常见 innerHTML 一次塞一坨），差集都能收齐，不必要求插件上报。
+      const nodes = [...el.children].filter((n) => !before.has(n));
+      if (nodes.length) {
+        cache.set(id, { render: item.render, nodes, ok });
+        for (const n of nodes) ordered.push(n);
+      } else {
+        // 产出 0 个节点时**绝不能**写缓存：「这次条件不满足所以什么都没渲染」一旦被缓存住，
+        // 这个条目就永久钉死在空状态，之后条件满足了也不会再渲染。
+        cache.delete(id);
+      }
+    }
+
+    // 条目消失了（被停用 / 卸载 / 被单例顶掉）：只摘「被本协调器跟踪过、这次不在」的节点。
+    // 绝不碰未跟踪的节点 —— 有插件不经过 render 直接往宿主里塞浮层，误删是灾难性回归。
+    for (const [id, prev] of [...cache]) {
+      if (alive.has(id)) continue;
+      for (const n of prev.nodes) if (n.parentNode === el) el.removeChild(n);
+      cache.delete(id);
+    }
+
+    // 末端让已跟踪节点回到 slotItems() 的顺序。appendChild / insertBefore 对已在树上的节点
+    // 是「移动」而非重渲染，但移动会打断进行中的 CSS 过渡，所以相对顺序本来就对时一根手指都不碰。
+    // 比较只看已跟踪节点之间的次序：未跟踪节点插在中间不算乱序，也就不会被顺手挪走。
+    const want = new Set(ordered);
+    const current = [...el.children].filter((n) => want.has(n));
+    if (!(current.length === ordered.length && current.every((n, i) => n === ordered[i]))) {
+      let anchor = null;             // 逆序回填：锚点恒为「本节点后面该接的那一个」
+      for (let i = ordered.length - 1; i >= 0; i--) {
+        const n = ordered[i];
+        if (n.parentNode !== el || n.nextSibling !== anchor) el.insertBefore(n, anchor);
+        anchor = n;
+      }
     }
   }
 
@@ -130,11 +230,16 @@ class App {
 
   applyThemeFromStore() {
     const id = localStorage.getItem('xiaomo.theme.v1') || 'mint';
-    const mode = localStorage.getItem('xiaomo.mode.v1') || 'dark';
+    // 首次访问（没有任何记录）落在 'system'，也就是跟随系统 —— 用户拍板的默认策略。
+    // index.html 头部有一段同步内联脚本按同一口径算首屏配色，改这里要同步改那里。
+    const mode = localStorage.getItem('xiaomo.mode.v1') || 'system';
     theme.use(id, mode);
-    theme.onChange((t, eff) => {
+    theme.onChange((t) => {
       localStorage.setItem('xiaomo.theme.v1', t.id);
-      localStorage.setItem('xiaomo.mode.v1', eff);
+      // 存「意图」（system / dark / light），不存当时生效的值。
+      // 早先这里存的是 eff，而 apply() 结尾就会发 theme:changed —— 于是开机第一次就把
+      // 'system' 洗成了 'dark'/'light'，桌面壳据此认定用户手动选过，从此不再跟随系统。
+      localStorage.setItem('xiaomo.mode.v1', theme.mode);
     });
   }
 
@@ -301,17 +406,15 @@ class App {
       return;
     }
 
-    if (from.type.startsWith('reagent-')) {
-      const id = from.props.reagent;
-      const s = get('reagent-' + id);
-      if (s && s.cat === '固体药品') {
-        tv.addSolid(id, from.props.dose);
-        this.toast(`加入 ${from.props.dose} g ${s.name}`);
-      } else {
-        tv.addLiquid(id, from.props.dose);
-        this.toast(`加入 ${from.props.dose} mL ${s ? s.name : id}`);
-      }
-      this.log.push('chem', `加入试剂：${s ? s.name : id} → ${to.def.name}`, this.world.time);
+    // 加料能力判定：判据是「器材自带一份物质与取用量」，**不是 type 前缀**。
+    // 原来这里写 get('reagent-' + id) 反查，等于把命名当契约 ——
+    // 新增加料器材（滴瓶、洗瓶……）就必须回来改这一行。
+    const fed = feedInto(from, tv);
+    if (fed) {
+      this.toast(fed.solid
+        ? `加入 ${fed.dose} g ${fed.name}`
+        : `加入 ${fed.dose} mL ${fed.name}`);
+      this.log.push('chem', `加入试剂：${fed.name} → ${to.def.name}`, this.world.time);
     }
   }
 
@@ -332,7 +435,20 @@ class App {
     this.coupling.links = [];
     this.coupling.branches = [];
     this._shortWarned = false;
+    // 撤销栈（C9）：载入**不是**用户单步动作 ⇒ 挂起记录
+    // （否则 `entity.setProp` 与 `world.connect` 会把整份存档灌成上百条历史）
+    // (甲) 用 try/finally：载入体里任何一步抛出（例如 `sc.wires` 里的坏数据）都必须**解挂**，
+    // 否则闸门会静静地一直挂着 —— 之后用户真的动手改参数时，历史一条都不记（最难发现的那类失效）。
+    this.undo.beginSilent();
+    try { this._applyScene(sc); } finally { this.undo.endSilent(); }
+    bus.emit(EV.SCENE_DIRTY);
+  }
 
+  /**
+   * 把一份场景数据落到世界里。**必须**在 undo 挂起中调用（载入不产生历史条目）。
+   * 从 `loadScene` 原样搬出：缩进未变、逐字节相同，只为给挂起配上 try/finally。
+   */
+  _applyScene(sc) {
     const ents = [];
     for (const o of sc.entities || []) {
       const ent = create(o.type, o.x, o.y);
@@ -355,7 +471,6 @@ class App {
       this.world.connect({ e: a.id, p: w[1] }, { e: b.id, p: w[3] }, w[4]);
     }
     this.world.time = 0;
-    bus.emit(EV.SCENE_DIRTY);
   }
 
   // ══════════ 存档 ══════════
@@ -390,25 +505,42 @@ class App {
       this.world.clear();
       this.select(null);
       if (this.data) this.data.clear();
-      const ents = [];
-      for (const o of data.entities || []) {
-        const ent = create(o.type, o.x, o.y);
-        if (!ent) continue;
-        ent.loadJSON(o);
-        if (o.vessel && ent.vessel) ent.vessel.loadJSON(o.vessel);
-        this.world.add(ent, true);
-        ents.push(ent);
-      }
-      for (const w of data.wires || []) {
-        const a = ents[w[0]], b = ents[w[2]];
-        if (!a || !b) continue;
-        this.world.connect({ e: a.id, p: w[1] }, { e: b.id, p: w[3] }, w[4]);
-      }
-      this.toast(`已载入 ${ents.length} 件器材`);
+      // 撤销栈（C9）：读档同 `loadScene` —— 挂起记录，整份存档不产生历史条目
+      // (甲2) 与 `loadScene` **同一形状**：`beginSilent()` 与 `try` 之间不夹任何语句
+      // ⇒ 挂起残留从"被断言保护"变成"结构上不可能"，而不是"今天恰好安全"。
+      this.undo.beginSilent();
+      let n;
+      try { n = this._applySave(data); } finally { this.undo.endSilent(); }
+      this.toast(`已载入 ${n} 件器材`);
       this.log.push('sys', '场景已载入', this.world.time);
     } catch (err) {
+      // ⚠ 这里**故意不再** `endSilent()`：解挂已由上面那行的 finally 结构性保证 ✓。
+      //   留着它会把"将来有人把 `beginSilent` 挪到 `try` 之外"这类失误**重新藏起来**
+      //   （catch 兜住 ⇒ 探针不会红 ⇒ 又是一次"被兜底盖住的真实缺口"）。
       this.toast('载入失败：' + err.message, 'warn');
     }
+  }
+
+  /**
+   * 把一份存档数据落到（已清空的）世界里，返回器材数组。**必须**在 undo 挂起中调用。
+   * 从 `load()` 原样搬出（缩进由 6 归到 4，与 `_applyScene` 同一层次），逻辑一字未改。
+   */
+  _applySave(data) {
+    const ents = [];
+    for (const o of data.entities || []) {
+      const ent = create(o.type, o.x, o.y);
+      if (!ent) continue;
+      ent.loadJSON(o);
+      if (o.vessel && ent.vessel) ent.vessel.loadJSON(o.vessel);
+      this.world.add(ent, true);
+      ents.push(ent);
+    }
+    for (const w of data.wires || []) {
+      const a = ents[w[0]], b = ents[w[2]];
+      if (!a || !b) continue;
+      this.world.connect({ e: a.id, p: w[1] }, { e: b.id, p: w[3] }, w[4]);
+    }
+    return ents;
   }
 
   exportPng() {
@@ -472,6 +604,13 @@ class App {
     this.world.time = 0;
     this._shortWarned = false;
     if (this.data) this.data.clear();
+    // 撤销栈（C9）(乙) 口径定案：**重置是基线操作 —— 不产生历史，也不是"一堆用户动作"**。
+    //   · 它整体换掉基线（`state` / `props` / `vessel` 一起重写）；把其中两行 `props` 单独改走
+    //     `setProp` 只会让它变成"半挂账"——比任一种极端都差；
+    //   · 走 `setProp` 还会触发 `onProp` 钩子 ⇒ 那是**行为变化**，本轮无人要求、也无验收覆盖。
+    //   ⇒ 定案：直接写 + **清空历史**（旧历史对重置后的世界不再成立）。
+    //   ⇒ 这条口径由 `tools/undo-probe.mjs` §6 锁住（源码断言 + 机制断言 + 两个定向变异体），不靠注释自觉。
+    this.undo.clear();
     this.markDirty();     // 全部状态被重置，等兜底观测量会白画一帧
     this.toast('已重置全部状态');
     this.log.push('sys', '实验台已重置', 0);

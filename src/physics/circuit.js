@@ -49,9 +49,10 @@ function gauss(A, z, n) {
   return x;
 }
 
-function emptyResult() {
+/** 解不出来时也要说清是哪一步解不出来：ok:false 不再是一个无信息的黑洞 */
+function emptyResult(reason) {
   return {
-    ok: false, closed: false, shorted: false,
+    ok: false, closed: false, shorted: false, reason: reason || 'unknown',
     branches: new Map(), nodeV: new Map(),
     totalI: 0, maxI: 0, iterations: 0,
   };
@@ -89,12 +90,28 @@ export function solveCircuit(world, extra = []) {
       getBr: () => x,
     });
   }
-  if (list.length === 0) return emptyResult();
+  if (list.length === 0) return emptyResult('no-branch');
 
   // ── 2. 导线把端点并成电学节点 ──────────────────────────
   for (const w of world.wires) {
     if (w.kind !== 'wire') continue;
     dsu.union(w.a.e + ':' + w.a.p, w.b.e + ':' + w.b.p);
+  }
+
+  // ── 2b. 电学连通分量：每个分量各自接地 ──────────────────
+  // 只认「会导电的支路」把两边连起来：open 本来就是断路，不该把两边算成一个分量。
+  //
+  // 为什么必须按分量接地：整张矩阵只挑**一个**全局参考节点时，一个完全悬空的子电路
+  // （例如并排摆着、没有任何导线相连的第二个回路）内部只有 1e-12 的 gmin 撑着，
+  // 消元到那一块的枢轴会掉到 1e-12 量级 → 被 gauss 的 `max < 1e-12` 判成秩亏 →
+  // 整张结果变成 ok:false，**所有**实体的 U/I 静默变 undefined（用户只看到读数全空）。
+  // 物理上每个分量的电位本来就只确定到一个任意常数，各自选一个参考节点即可；
+  // 等价于「按分量分别求解」，但矩阵仍是同一张，不用把组装逻辑拆成两条路。
+  const comp = new DSU();
+  for (const b of list) {
+    const br = b.getBr();
+    if (!br || br.type === 'open') continue;
+    comp.union(dsu.find(b.ka), dsu.find(b.kb));
   }
 
   // ── 3. 节点编号 ────────────────────────────────────────
@@ -106,11 +123,16 @@ export function solveCircuit(world, extra = []) {
       if (!nodeIdx.has(r)) { nodeIdx.set(r, roots.length); roots.push(r); }
     }
   }
-  if (roots.length < 2) return emptyResult();
+  if (roots.length < 2) return emptyResult('too-few-nodes');
 
-  const n = roots.length - 1;                 // 参考节点(0)接地
   const rowOf = new Map();
-  for (let i = 0; i < roots.length; i++) rowOf.set(roots[i], i === 0 ? -1 : i - 1);
+  const refOf = new Set();                    // 每个连通分量选一个参考节点接地
+  let n = 0;                                  // 未知量 = 非参考节点的节点数
+  for (const r of roots) {
+    const cr = comp.find(r);
+    if (!refOf.has(cr)) { refOf.add(cr); rowOf.set(r, -1); continue; }
+    rowOf.set(r, n++);
+  }
 
   // ── 4. 电压源 ──────────────────────────────────────────
   const sources = [];
@@ -120,7 +142,7 @@ export function solveCircuit(world, extra = []) {
   }
   const m = sources.length;
   const size = n + m;
-  if (size <= 0) return emptyResult();
+  if (size <= 0) return emptyResult('no-unknowns');
 
   // ── 5. 定点迭代求解 ────────────────────────────────────
   const prevU = new Map();
@@ -155,7 +177,7 @@ export function solveCircuit(world, extra = []) {
 
     for (const s of sources) {
       const ia = rowOf.get(dsu.find(s.b.ka)), ib = rowOf.get(dsu.find(s.b.kb));
-      if (ia === ib) return { ...emptyResult(), shorted: true };
+      if (ia === ib) return { ...emptyResult('source-shorted'), shorted: true };
       const k = n + s.idx;
       if (ia >= 0) { A[ia][k] += 1; A[k][ia] += 1; }
       if (ib >= 0) { A[ib][k] -= 1; A[k][ib] -= 1; }
@@ -164,13 +186,15 @@ export function solveCircuit(world, extra = []) {
       if (ri > 0) A[k][k] -= ri;
     }
 
-    // 每个节点对地加一个极小电导（gmin）。
-    // 没有它，一个完全悬空的子电路（例如两根没接线的电极之间的溶液）
-    // 会让节点方程组秩亏，高斯消元直接失败。
+    // 每个节点对地加一个极小电导（gmin）：给悬空子电路留一条到地的数值通路。
+    // ⚠ 它**替代不了**参考节点：一个只靠 gmin 撑着的分量，消元到最后那一块的枢轴会
+    // 掉到 1e-12 量级，被 gauss 的阈值判成秩亏 —— 那正是「两个互不连通的回路」曾经
+    // 整张结果 ok:false 的原因。真正的解法是上面的 2b（每个分量各自接地），
+    // gmin 现在只是残余方向的数值兜底。
     for (let i = 0; i < n; i++) A[i][i] += 1e-12;
 
     x = gauss(A, z, size);
-    if (!x) return emptyResult();
+    if (!x) return emptyResult('rank-deficient');
 
     let maxDelta = 0;
     for (const b of list) {
@@ -182,7 +206,7 @@ export function solveCircuit(world, extra = []) {
     }
     if (iter > 1 && maxDelta < 1e-5) break;
   }
-  if (!x) return emptyResult();
+  if (!x) return emptyResult('rank-deficient');
 
   // ── 6. 汇总 ────────────────────────────────────────────
   const nodeV = new Map();
@@ -204,7 +228,14 @@ export function solveCircuit(world, extra = []) {
     } else if (br.type === 'open') {
       I = 0; R = Infinity;
     } else {
-      R = Math.max(1e-4, resOf(b, U));
+      R = resOf(b, U);
+      // 与盖章路径同一条守卫（:169-170）：非正 / 非有限一律视为断路 1e9，再夹进 [1e-4, 1e9]。
+      // 不补这条守卫，上报值会与解出来的物理量差 13 个数量级 —— 实测 R=0 时报出 15000 A，
+      // 而同一回路的真实电流是 1.5e-9 A（详见 tools/circuit-rle0-probe.mjs）。
+      // ⚠ 只动「非正 / 非有限」这一档：**正的**小值（如 5e-9）两条路径本来就一致（都夹到 1e-4），
+      // 那一档不许变 —— 探针 §3 是它的回归护栏。
+      if (!(R > 0) || !isFinite(R)) R = 1e9;
+      R = Math.max(1e-4, Math.min(R, 1e9));
       I = U / R;
     }
     const P = Math.abs(U * I);

@@ -162,7 +162,14 @@ export class CouplingBus {
       if (!key.startsWith('sol:')) continue;
       const container = world.get(key.slice(4));
       if (container && container.vessel) {
+        // 两个字段，各司其职：
+        //   electricCurrent —— **幅度**（读数、闸门、法拉第速率都用它，语义不变）；
+        //   currentSigned   —— **带符号**，只给化学层定方向用。
+        // 为什么不是只留一个带符号的：电解池在两种极性下都照样分解电解质（水电解两个半周都出气），
+        // 真正需要「按符号互抵」的只有可逆的金属沉积 —— 由反应规则自己的 deposit 字段分辨（见 reactions.js）。
+        // 过去这里只有 Math.abs(rec.I)，符号在耦合这一行就丢了，于是对称交流被当成直流、铜单调沉积。
         container.vessel.electricCurrent = Math.abs(rec.I);
+        container.vessel.currentSigned = rec.I;
         container.vessel.currentU = rec.U;
       }
     }
@@ -235,20 +242,23 @@ export class CouplingBus {
       if (c.vessel) c.vessel.stir *= Math.pow(0.02, dt);
     }
 
-    // ── 天平称量上方容器 ──
+    // ── 天平称量上方物体（容器按体积/成分，非容器取参与者自报的 props.mass）──
     for (const bal of world.entities) {
       if (bal.type !== 'balance') continue;
       const plateY = bal.y - bal.h * 0.35;
       let total = 0, names = [];
       for (const c of world.entities) {
-        if (!c.vessel) continue;
         const dx = Math.abs(c.x - bal.x);
         const dy = Math.abs(c.y - plateY);
-        if (dx < bal.w * 0.55 && dy < 40) {
-          const m = c.vessel.totalMass() + (c.props.tare || 0);
-          total += m;
-          names.push(c.def.name);
-        }
+        if (!(dx < bal.w * 0.55 && dy < 40)) continue;
+        // 容器：体积/成分算出来的质量 + 皮重（与改造前逐字一致，不得改）
+        // 非容器：参与者自报的 props.mass（g）+ 皮重
+        const m = c.vessel
+          ? (c.vessel.totalMass() + (c.props.tare || 0))
+          : ((c.props.mass || 0) + (c.props.tare || 0));
+        if (!(m > 0)) continue;      // 质量非正的实体不上秤，也不进「称量对象」
+        total += m;
+        names.push(c.def.name);
       }
       if (bal.state.onPlate !== names.join(',')) {
         bal.state.onPlate = names.join(',');

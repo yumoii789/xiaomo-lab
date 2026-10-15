@@ -176,6 +176,7 @@ function condOK(r, v) {
   const c = r.cond || {};
   if (c.electric) {
     if (!v.hasElectrodes()) return false;
+    // 闸门取幅度：电流不够大就什么都不发生，与方向无关（正负半周都该过闸）
     if (Math.abs(v.electricCurrent || 0) < 0.004) return false;
     if (c.needIon && v.ionConc() < 0.02) return false;   // 纯水几乎不导电
   }
@@ -186,9 +187,12 @@ function condOK(r, v) {
 }
 
 /** 反应物是否都够（返回最多能推进的摩尔数，0 表示不能反应） */
-function available(r, v) {
+function available(r, v, dir = 1) {
+  // dir = −1 是反向推进（交流负半周把产物溶回去）：这时限制来自「产物还剩多少」，
+  // 而不是反应物 —— 拿反应物去算会出现「产物早溶光了还在继续溶」。
+  const src = dir < 0 ? r.out : r.in;
   let lim = Infinity;
-  for (const [id, coef] of Object.entries(r.in)) {
+  for (const [id, coef] of Object.entries(src)) {
     if (!(coef > 0)) continue;
     const have = v.amount(id);
     if (have <= 1e-9) return 0;
@@ -203,7 +207,9 @@ function rateOf(r, v) {
   const c = r.cond || {};
 
   if (c.electric) {
-    rate = r.k * Math.abs(v.electricCurrent || 0);      // 法拉第：速率正比于电流
+    // 法拉第幅度律：速率正比于电流的**大小**。方向不在这里定 —— 由 stepVessel 按电荷符号
+    // 决定正向沉积还是反向回溶（取绝对值在这里是对的，漏的是符号那一半）。
+    rate = r.k * Math.abs(v.electricCurrent || 0);
   } else {
     // 浓度项（固体按"存在"计 1）
     for (const [id, coef] of Object.entries(r.in)) {
@@ -223,20 +229,60 @@ function rateOf(r, v) {
   return Math.max(0, rate);
 }
 
-/** 推进一次反应 */
-function apply(r, v, extent) {
-  for (const [id, coef] of Object.entries(r.in)) {
-    if (coef > 0) v.consume(id, coef * extent);
+/**
+ * 这次推进的方向：+1 正向、−1 反向。
+ *
+ * 只有**可逆的金属沉积**类电解才吃电荷符号：正半周镀上去、负半周溶回来，对称交流因此净产物 ≈ 0。
+ * 规则表里用 deposit 字段分辨（ely-cucl2 / ely-cuso4 有，ely-water / ely-nacl 只有气体产物没有）。
+ * 只放气体的分解两个半周都在发生（水电解换个极也不过是两极互换），不互抵 —— 恒为正向，
+ * 于是直流不管哪一极接过来的电流都照旧电解，不会被反向掉。
+ *
+ * 电流从哪来：耦合层同时写 electricCurrent（幅度）与 currentSigned（符号）。
+ * 没有 currentSigned 时退回到 electricCurrent 的符号（存档/单测里的容器只有幅度字段，
+ * 那时行为与改动前一致：恒正向）。
+ */
+function electricDir(r, v) {
+  if (!(r.cond && r.cond.electric)) return 1;
+  if (!(r.deposit && r.deposit.length)) return 1;
+  const signed = (typeof v.currentSigned === 'number') ? v.currentSigned : (v.electricCurrent || 0);
+  return Math.sign(signed);
+}
+
+/**
+ * 扣掉某物质 mol 数。
+ * dir > 0 走 vessel.consume()（先溶解态、再固体）。
+ * dir < 0 要扣的是**生成物**，其中气态产物落在 v.gas 里，而 vessel.consume() 只认
+ * 溶解态与固体（vessel.js:70-90），所以气体这一支在这里补 —— 反向推进只有电解这一处调用方。
+ */
+function take(v, id, mol, dir) {
+  if (dir > 0 || (SP[id] || {}).st !== 'g') { v.consume(id, mol); return; }
+  const have = v.gas.get(id) || 0;
+  const use = Math.min(have, mol);
+  if (use <= 0) return;
+  v.gas.set(id, have - use);
+  if (v.gas.get(id) < 1e-12) v.gas.delete(id);
+}
+
+/**
+ * 推进一次反应。
+ * dir = −1 是**反向推进**（电解的负半周）：消耗侧与生成侧对调、焓变跟着反号；
+ * 报出的气体/沉淀增量带符号（负 = 被吸收），调用方与 UI 看到的就是净变化。
+ */
+function apply(r, v, extent, dir = 1) {
+  const ins = dir < 0 ? r.out : r.in;
+  const outs = dir < 0 ? r.in : r.out;
+  for (const [id, coef] of Object.entries(ins)) {
+    if (coef > 0) take(v, id, coef * extent, dir);
   }
   const madeGas = [], madePrecip = [];
-  for (const [id, coef] of Object.entries(r.out)) {
+  for (const [id, coef] of Object.entries(outs)) {
     if (!(coef > 0)) continue;
     v.produce(id, coef * extent);
-    if ((SP[id] || {}).st === 'g') madeGas.push([id, coef * extent]);
-    if ((SP[id] || {}).precip) madePrecip.push([id, coef * extent]);
+    if ((SP[id] || {}).st === 'g') madeGas.push([id, dir * coef * extent]);
+    if ((SP[id] || {}).precip) madePrecip.push([id, dir * coef * extent]);
   }
-  // 焓变：dH<0 放热 → 温度上升
-  const dQ = -(r.dH || 0) * extent * 1000;   // J
+  // 焓变：dH<0 放热 → 温度上升；反向推进时焓变反号
+  const dQ = -(r.dH || 0) * extent * 1000 * dir;   // J
   v.addHeat(dQ);
   return { gas: madeGas, precip: madePrecip };
 }
@@ -249,7 +295,10 @@ export function stepVessel(v, dt) {
   let fired = 0;
   for (let pass = 0; pass < 2; pass++) {
     for (const r of RULES) {
-      const lim = available(r, v);
+      const dir = electricDir(r, v);
+      if (dir === 0) continue;
+
+      const lim = available(r, v, dir);
       if (lim <= 1e-9) continue;
       if (!condOK(r, v)) continue;
 
@@ -260,9 +309,9 @@ export function stepVessel(v, dt) {
       const extent = Math.min(rate * dt, lim * 0.34);
       if (extent <= 1e-12) continue;
 
-      const res = apply(r, v, extent);
+      const res = apply(r, v, extent, dir);
       fired++;
-      v.noteReaction(r, extent, res);
+      v.noteReaction(r, dir * extent, res);   // 带符号：负值就是「这一次是回溶」
     }
   }
   return fired;

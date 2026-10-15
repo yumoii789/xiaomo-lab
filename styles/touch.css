@@ -1,0 +1,480 @@
+/* ══════════════════════════════════════════════════════════
+   小墨实验室 · 触控 / 移动端基线层
+   ──────────────────────────────────────────────────────────
+   这个文件只放**平台与触控基线**规则：
+     viewport 高度、touch-action、点击高亮、overscroll、安全区、
+     粗指针下的命中尺寸、以及手机竖屏把三栏收成浮层。
+   组件的外观设计（配色、圆角、阴影、组件自身的动效）一律仍归 main.css，
+   这里不新增任何组件观感，只做「同一个组件在手指上该怎么工作」。
+
+   必须在 index.html 里排在 styles/main.css **之后**加载：
+   同优先级下后加载的样式表胜出，本文件靠这一条覆盖 main.css 里的
+   移动端不适配规则（例如 #app 的 height:100vh）。
+   动效一律复用 main.css 顶部定义的 --t-* / --ease-* token，不另造曲线、不写裸毫秒。
+   ══════════════════════════════════════════════════════════ */
+
+/* ══════════ 1. 视口高度 ══════════
+   main.css 的 #app{height:100vh} 在手机上算的是「地址栏收起后」的最大高度：
+   页面一加载地址栏还在，就必然高出可视区一截，贴底的状态栏会被推出屏幕。
+   dvh 跟着地址栏收放实时变化，正是应用外壳要的语义。
+   两行同属性，第二行覆盖第一行；不认识 dvh 的旧浏览器忽略第二行，退回 vh（不是坏掉，只是不完美）。
+   **顺序不能反**：vh 必须写在前面。反过来写的话，认识 dvh 的浏览器两行都认、最终拿 dvh（正确），
+   但不认识 dvh 的旧浏览器两行都丢，等于没有兜底 —— 兜底行写在后面才是兜底。 */
+#app { height: 100vh; height: 100dvh; }
+
+/* ══════════ 2. 点击基线 ══════════ */
+html {
+  /* iOS/Android 给「有 click 处理的元素」铺一层半透明灰块。它是网页感最响的信号，
+     而且会盖掉我们自己设计的 :active 反馈。全站关掉，反馈改由各组件自己的 :active 提供。 */
+  -webkit-tap-highlight-color: transparent;
+  /* 横屏时不要自动放大正文字号 */
+  -webkit-text-size-adjust: 100%;
+  /* 下拉刷新 / 整页橡皮筋：本应用有自己的滚动容器和画布拖拽面，
+     整页回弹只会把画布上的拖动解释成滚页。内层滚动容器用 contain（见下）。 */
+  overscroll-behavior: none;
+}
+body { overscroll-behavior: none; }
+
+/* 可点元素：告诉浏览器这个元素不做双击缩放，click 就不必等 300ms 判定。
+   user-select/-webkit-touch-callout 只加在**控件**上 ——
+   正文必须保持可选中（用户要复制读数、报错信息）。 */
+button, a, [role="button"], label.tb-check {
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* 内层滚动容器：滚到头不要把滚动链交给页面（保住容器自己的回弹手感）。 */
+.pal-list, .pane, .log-list, .drawer-body { overscroll-behavior: contain; }
+
+/* 顶栏在窄屏会被设成横向可滚动（见第 6 节）。它的滚动同样不该串给页面 ——
+   overscroll-behavior-x 只有在元素真能横向滚时才起作用，桌面宽屏下顶栏根本不溢出，
+   所以这条对鼠标完全惰性，无条件生效即可（包进门控反而会在触屏笔记本上漏掉）。
+   放在这里而不是第 6 节里：它属 A 类（对鼠标惰性），不是 B 类（窄屏布局）。 */
+#topbar { overscroll-behavior-x: contain; }
+
+/* 输入类元素 ≥16px：iOS 聚焦到字号小于 16px 的输入框会放大整个页面且不会缩回来。
+   这条按**声明特定、无条件的单条规则**写，而不是一条 `input{font-size:16px}` 撒全站：
+   撒全站会把侧边栏每个输入框都放大 28%，那是看得见的桌面观感改动。
+   放在这里（不在任何 @media 里）是为了触屏笔记本 —— 它 pointer:fine、只有
+   any-pointer:coarse 为真，包在 pointer 查询里会漏掉它，而 iOS 的缩放问题与主指针无关。
+   #paletteSearch 是下决心接受代价的那一个：它是器材栏里唯一的文本输入、宽度占满整栏，
+   从 12.5px 到 16px 在窄栏里读起来更清楚，宽度不会溢出（box-sizing: border-box），
+   故无需跟改高度。其余输入类元素见下面受门控的那一块。
+   修因（字号）而不是禁果：user-scalable=no / maximum-scale=1 是可达性缺陷，本文件不许出现。 */
+#paletteSearch { font-size: 16px; }
+
+/* 其余输入类元素：这些**放大就是看得见的桌面改动**（属 B 类），
+   所以按「这台机器能被手指碰」门控 —— 一旦有条件就看得出，代价必须写清楚：
+     · .tb-select（12.5px）与 .field input/select（12px）在桌面是紧凑控件，
+       无条件提到 16px 会改变整条属性面板与顶栏的信息密度，那是桌面用户每眼都在看的东西；
+     · 复选框 / 单选 / 滑杆（.tb-check input 13px、.mini-check input 12px、
+       .field input[type=range]）本就不是 iOS 会缩放的文本输入，
+       给它们设字号毫无收益，只会在桌面撑出多余行高。
+   门控用 any-pointer: coarse，触屏笔记本（pointer:fine + any-pointer:coarse）也吃得到。 */
+@media (any-pointer: coarse) {
+  /* 特指度：main.css 用的是 #paletteSearch (1,0,0) 与 .tb-select (0,1,0)，
+     #app 前缀把这里抬到 (1,0,1)，压得住；只管字号与高度，不碰颜色/边框/圆角。 */
+  #app select, #app textarea,
+  #app input[type="text"], #app input[type="search"], #app input[type="number"],
+  #app input[type="email"], #app input[type="url"], #app input[type="tel"],
+  #app input[type="password"] { font-size: 16px; }
+
+  /* 字号提上去后，这几个固定高度会把 16px 的字顶出边框，跟着重排。 */
+  #app #paletteSearch { height: 40px; }
+  #app select.tb-select { height: 36px; }
+  #app .field input[type="text"], #app .field select { height: 38px; }
+}
+
+/* ══════════ 3. 安全区 ══════════
+   index.html 已有 viewport-fit=cover，所以 env() 真的会给出数值。
+   顶栏是贴顶元素、状态栏是贴底元素 —— 正是需要把内容从刘海与 home indicator 让开的两个。
+   顶栏用 padding 而不是 height，是为了不改变 main.css 里 --topbar-h 撑出的行高。 */
+#topbar { padding-top: env(safe-area-inset-top, 0px); }
+#statusbar {
+  /* 左内边距：990px 以上交给 main.css 的 12px；以下由后面 @media 里的 8px 接管 */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ══════════ 4. 手势所有权 ══════════
+   画布是拖拽面：在它上面浏览器不许滚页、不许双指缩放，否则拖器材时页面跟着跑。
+   这条所有权声明**只写在 src/ui/interact.js:56**（`this.canvas.style.touchAction='none'`，
+   无条件执行）。这里刻意**没有**再写一条 `#canvas{touch-action:none}`：
+   内联样式的优先级永远高于样式表，那样的规则永远不会生效 —— 留着它只是死代码，
+   外加一段解释它的注释，比不写更糟。 */
+@media (pointer: coarse) {
+  /* 抽屉里也要能滚，且滚出惯性手感（iOS 老写法，桌面浏览器忽略这条，惰性） */
+  .pal-list, .pane, .log-list, .drawer-body { -webkit-overflow-scrolling: touch; }
+}
+
+/* ══════════ 5. 命中热区（不可见）→ any-pointer: coarse ══════════
+   判据：**看不见的改动**（命中盒、热区扩边）用 any-pointer: coarse ——
+   它问的是「这台机器能被手指碰吗」。触屏笔记本的主指针是触控板
+   （pointer: fine、hover: hover 都成立），只有 any-pointer: coarse 为真；
+   若用 pointer: coarse 判，这类设备上的用户就得拿手指去戳 16px 的小圆点。
+   下面这些规则只改盒子的命中范围，视觉尺寸不变，所以对触控板用户零代价。 */
+@media (any-pointer: coarse) {
+  /* 手指的舒适下限约 44px。做法：把 16px 的圆点放进一个 44px 的盒子里，
+     圆点本身仍由下面的 radial-gradient 画成 6px，所以「视觉尺寸」不变。 */
+  .theme-dot {
+    width: 44px; height: 44px;
+    margin: 0;
+    border-radius: 50%;
+  }
+  /* ⚠ 上面这行的 margin 原来是 -14px 0（想「把 6px 列间距吃掉一半、保持视觉列高」），
+     那是**错的**：44px 高的盒子配 -14px 上下外边距 → 每个只占 16px 排版高度，
+     相邻圆点的盒子因此重叠 28px，重叠区的归属由浏览器决定。
+     实测（逐像素 elementFromPoint）：第 1、2 个圆点真实可命中只有 **1×23px**，
+     只有最后一个拿到完整的 44×44 —— 三个圆点里两个基本按不到，比浮动圆钮那条更严重。
+     改成 margin:0 + gap:0：44px 盒子首尾相接、互不抢像素，列高与原来一致
+     （1 + 3×44 = 133px）。代价是圆点视觉间距比桌面松一点 —— 值得，
+     那 6px 间距换来的是两个按不到的圆点。 */
+  /* 相邻圆点不许重叠：main.css 给 .theme-dots 的是 gap:6px，6px 间距加上 44px 盒子
+     会让相邻命中盒之间留 6px 死区；而这里真正要解决的是**重叠**（见上）。
+     所以 gap 归零，22px 间距完全由圆点自身的视觉半径承担（盒子变大、圆点仍是 6px）。 */
+  .theme-dots { gap: 0; }
+  /* 命中盒本身的改动一律挂这里（any-pointer: coarse，触屏笔记本也算）：
+     它撑大的是「手指能够到的面积」，而圆点**画多大**由下面 (pointer: coarse) 那段决定。
+     这正是「不可见的改动 → any-pointer、可见的改动 → pointer」这条分界的落点。 */
+  /* 独立的伪元素把命中半径钉在 22px（直径 44px）。
+     pointer-events:none 是关键：伪元素盖在按钮上面，不关掉命中就会被它自己吃掉，
+     整个按钮就变成一个「看得见点不动」的假按钮。 */
+  .theme-dot::before {
+    content: ''; position: absolute; inset: 0; border-radius: 50%;
+    pointer-events: none;
+  }
+
+  /* 顶栏里 main.css 定义的控件：视觉尺寸不动，靠**显式高度**把命中盒的纵向补到 44px。
+     ⚠ 这里原来用 `::after { top:-6px; bottom:-6px }` 扩边，那是**错的**：
+     伪元素为了不挡住宿主必须带 `pointer-events:none`，而带这个属性的盒子对命中测试
+     是**透明**的 —— 那 12px 扩边一个像素都量不到。逐像素 elementFromPoint 实测：
+     改之前 .tool-btn 盒子 32×32、真实可命中 32×33；.tb-check 盒子 79×32、真实可命中 79×33。
+     也就是「注释写着补到 44px、实测只有 33px」——比没做更糟，会让后来的人以为已达标。
+     现在让元素自己的 border-box 变成真命中区（任何浏览器都会算进去）。
+     ⚠ 只用 padding 是不够的：这两个控件在 main.css 里都写了**显式 height:32px**，
+     而全站 box-sizing:border-box —— 加 padding 只会吃掉内容盒、外框一点不长
+     （实测 .tb-check 加完上下 6px padding 仍是 32px 高）。所以必须显式给高度。
+     ⚠ 也**不做左右扩边**：相邻按钮只隔 4~8px，往左右各扩 6px 会与邻居重叠，
+     重叠区的归属由浏览器决定（实测扩完横向真实命中只有 36px，反而更差）——
+     那多出来的 4px 是从邻居身上抢的，不是净收益，所以不做。
+     结论：纵向 44px 是结构上真正做得到的（顶栏有 48px 空间），横向 32px 保持不动。
+     最后用等量负上下外边距把多出来的 12px 从排版占位里收回去，视觉间距不变。 */
+  .tool-btn, .tb-check { position: relative; }
+  .tool-btn, .tb-check {
+    min-height: 44px;
+    margin-top: -6px;
+    margin-bottom: -6px;
+  }
+
+  /* 窄屏顶栏里被 flex 压扁的标签型控件：
+     .tb-check（慢动作）是 inline-flex，主尺寸由里面 13px 的复选框决定（约 16px），
+     默认 flex-shrink:1 会让它在挤的时候被压到 16px 宽 —— 文字「慢动作」仍然画出来，
+     但**命中盒只有 16px 宽**，手指根本按不到，是一处真实的可用性缺陷（实测 16×32）。
+     .tb-select（预置实验 / 器材搜索）同理，它们的 max-width:190px 在窄屏会跟着缩。
+     这里只禁掉「变窄」这一个自由度：不撑大视觉尺寸，改由 #topbar 的横向滑动去承接
+     放不下的宽度（那是第 6 节已经选定的窄屏策略，不是把控件藏起来）。 */
+  .tb-check, .tb-select { flex-shrink: 0; }
+}
+
+/* ══════════ 5c. 触摸设备的命中地板：四个 <44px 控件（task-34） ══════════
+   为什么用 any-pointer: coarse 而不是 pointer: coarse（**这是本块存在的全部理由**）：
+     用户在需求里明说「电脑端也有使用触控屏的」「教室多媒体用的是触控大屏」。
+     触屏笔记本的主指针是触控板 ⇒ pointer:fine、hover:hover，**只有 any-pointer:coarse 为真**；
+     用 pointer:coarse 判，这类设备上 .drawer-x 就还是 28×28、手指点不中 —— 正是要修的场景。
+   为什么只用 min-height（D32 / k3 在 display.css 头部记录的那条 CSS 事实）：
+     `height` 与 `min-height` 相遇是安全的（used = max(两者)）；但 `min-height` 与
+     `min-height` 相遇由**特异性**定胜负，特异度高的一方直接**替换**对方、能把 44px 压成 38px。
+     所以：① 本块只用 min-height（只抬不压）；② 每条的**特异性必须足够高**，
+     压得住 display.css（k3 的，`html.big-read …`）与 main.css 里已声明的显式 height。
+     这两个文件我这轮都不动，只在**本表**里把地板定死。
+   横向一律不动：唯一宽度不达标的是 .tool-btn 的 32px，已定案（加宽会从邻居身上抢像素）。 */
+@media (any-pointer: coarse) {
+  /* 顶栏的按钮与下拉：main.css 给的是 height:32px（.tb-btn:115 / .tb-select:134）。
+     加 `#app` 前缀抬到 (1,1,0)，压得住 display.css 的 `html.big-read .tb-btn` (0,2,0)，
+     也不会跟上面 :86 的 `#app select.tb-select` (1,1,0) 打架（同特异性、后者在后）。
+     ⚠ 只在这里加 min-height，**不**去改 main.css 的 height —— 那是别人的写域。 */
+  #app .tb-btn, #app select.tb-select { min-height: 44px; }
+
+  /* 浮动圆钮：主指针是手指时它已在 :222 拿到 44×52；这一条是给**混合设备**的
+     （pointer:fine + any-pointer:coarse）。桌面细指针列 any-pointer 为假 ⇒ 不生效，
+     所以鼠标用户看到的仍是 38×38，零代价。
+     ⚠ 为什么是 45px 而不是 44px（这一段是**两次实测**的结论，别再试 44）：
+       圆钮下沿与下面第一个 .theme-dot 的上沿是**小数相接**的（圆钮 bottom 落在整数附近、
+       圆点 top 是 105.36 这种），那 1~2px 的整数行归谁由取整与文档顺序决定。
+       · round 后给 44px：中心点向外步进稳定只有 **43**（up22/down20，圆点接走一行）；
+       · 给 45px：**整矩形逐像素扫描**（dotscan --sel）得到 38×44 ⇒ 达标 ✓。
+       多要的这 1px 落在圆钮**自己**的盒子里，不从圆点身上抢（圆点仍 44×44）——
+       这是「有空间就抬」，不是「从邻居借」。
+     ⚠ 「单点步进 43 / 整矩形扫描 44」不是矛盾：单点采样先取一个中心点再走一条线，
+       中心恰好压在边界上时就会少算一行。整矩形扫描是**更强**的判据（全域 ⊃ 单点），
+       所以两者不一致时以 dotscan --sel 为准。 */
+  .fx-orb { min-height: 45px; }
+
+  /* 抽屉关闭按钮：桌面细指针列实测 28×28（main.css:599 只给了字号）。
+     min-height 只抬不压 —— 手指设备上 :231 的 44px 不受影响。 */
+  .drawer-x { min-height: 44px; }
+}
+
+/* ══════════ 5b. 粗指针下的观感与尺寸（可见）→ pointer: coarse ══════════
+   判据：**看得见的改动**用 pointer: coarse —— 它问的是「这台机器以手指为主」。
+   触屏笔记本虽然 any-pointer: coarse 为真，但主指针是触控板，用户要的是桌面精度，
+   所以这里不许把桌面尺寸整体放大到手机规格。 */
+@media (pointer: coarse) {
+  /* 圆点的观感：44px 的盒子里只画 6px 的实心圆 —— 视觉尺寸与桌面一致，
+     只是热区变大了。放在这里是因为它改了 background/border 这些看得见的东西。 */
+  .theme-dot {
+    background: radial-gradient(circle at 50% 50%, var(--dot) 0 6px, transparent 6px);
+    border: 0;
+  }
+  /* 「自动」圆点：原来是「左半深右半浅」的 16px 圆 —— 也缩到 16px，
+     否则它会比同列的其他圆点大一圈，一眼就能看出是补丁。 */
+  .theme-dot.auto {
+    background: radial-gradient(circle at 50% 50%, transparent 0 7px, var(--border-2) 7px 8px, transparent 8px),
+                linear-gradient(90deg, var(--bg) 0 50%, var(--text) 50% 100%);
+    background-size: 100% 100%, 16px 16px;
+    background-position: center, center;
+    background-repeat: no-repeat, no-repeat;
+    border: 0;
+  }
+  /* 选中态：触摸设备上用**不改变几何**的方式强调。
+     ⚠ 为什么不能用桌面那个 transform:scale(1.12)：
+     一列圆点是 margin:0 + gap:0 **首尾相接**的（见上，那正是修「相邻重叠 28px」时改的），
+     scale(1.12) 会让 44px 的盒子涨到 49.3px，向两侧各抢约 2.65px ——
+     与 .tool-btn 横向扩边被否掉的是同一件事：从邻居身上抢像素，抢多少还随选中态浮动。
+     所以 transform 保持 none（三个圆点恒为稳定的 44×44），改用 box-shadow 画环：
+     box-shadow **不参与命中测试、不改变盒模型、不占布局**，因此不从邻居抢任何像素。
+     内圈那条 ::before 描边保留（选中的具体是哪个圆），这条 44px 外环负责远距离可见性。 */
+  .theme-dot.active { transform: none; box-shadow: 0 0 0 2px var(--text-2); }
+  .theme-dot.active::before {
+    inset: 12px; border: 2px solid var(--text-2);
+  }
+  .theme-dot.auto.active::before { border-color: var(--border-3); }
+
+  /* 浮动圆钮：整体做成 44px（它凭空浮在画布上，没有排版约束）。
+     ⚠ 只写 44×44 是不够的 —— 实测真实可命中只有 **44×38**：
+     它在 top:14px，下沿 y=58（桌面 38px 时）→ 44px 盒子的下沿到 y=64，
+     而 .theme-dots 的起点就在 66px，第一个圆点是从 52px 开始的 44px 盒子，
+     于是圆点把圆钮的最后 3px 接走了；上面同样有 3px 被别的元素接走。
+     所以这里同时把圆钮高度再加一档、并把圆点列整体下移，让两者不再重叠，
+     改完的真实命中数字见「布局账」注释。 */
+  .fx-orb { width: 44px; min-height: 52px; margin-top: -4px; }
+  .theme-dots { top: 74px; }
+
+  /* 顶栏里带可见边框的按钮直接把本体加高到 36px（这是看得见的改动），
+     命中区仍由上面 any-pointer 那 6px 补足。 */
+  .tb-btn { height: 36px; }
+  .tb-select { height: 36px; }
+
+  /* 抽屉右上角的关闭按钮：只在浮层里出现，直接给足 44px 更好按 */
+  .drawer-x {
+    width: 44px; height: 44px;
+    /* task-34：它在**桌面细指针**列实测只有 28×28（main.css:599 只给了字号，
+        盒子是内容撑出来的）。触屏笔记本的主指针是触控板 ⇒ pointer:fine，
+        可用户仍会拿手指去戳它 —— 上面 any-pointer 块里补了地板。这里保持原样。 */
+  }
+}
+
+/* ══════════ 6. 手机与触摸设备的窄屏布局 ══════════
+   三栏（238 + 1fr + 318）在 390px 宽的手机上只剩不到一半给实验台，
+   格线还会被挤成一列。改成：实验台占满宽度，左右两栏变成浮层抽屉。
+   触发条件两个，逗号表示「或」：
+     · max-width:1024px —— 任何设备的窄屏窗口（含桌面把窗口拉窄）；
+     · (pointer:coarse) and (max-width:1180px) —— 平板横屏这种「宽但仍是手指」的情况。
+   桌面鼠标宽屏不受影响。 */
+@media (max-width: 1024px), ((pointer: coarse) and (max-width: 1180px)) {
+  /* #app 只声明了 grid-template-rows，列是隐式的那一条 —— 隐式列按 max-content
+     定宽，于是「顶栏那组控件的最小内容宽」会把整列顶到 900px 以上：
+     实测 390px 视口下 #app 宽 390 但 #body/#stage/#canvas 全是 906px，
+     实验台有 5/6 被推到屏幕外。显式声明成 minmax(0,1fr) 才是「容器多宽就多宽」。
+     这一行必须在最前面：它决定了下面所有子元素拿到的可用宽度。 */
+  #app { grid-template-columns: minmax(0, 1fr); }
+
+  /* 顶栏在 390px 宽下装不下：品牌名 98 + 工具组 140 + 运行组 221 + 右侧组 406 = 865px。
+     右侧组是学分徽章 + 预置实验下拉（它的固有宽度跟着最长那条实验名走）。
+     处理方式是「让顶栏横向滑动」而不是让内容溢出或把控件藏掉：
+     藏掉的控件用户永远够不着，而 overflow:hidden 会把两端的按钮切成半截。
+     滚动条本身不占视觉：隐藏它，但保留滑动。 */
+  #topbar {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+    /* overscroll-behavior-x 那条声明在文件上方，属 A 类（对鼠标惰性），不在这里重复。 */
+  }
+  #topbar::-webkit-scrollbar { display: none; }
+
+  #body { grid-template-columns: minmax(0, 1fr); }
+
+  #palette, #sidebar {
+    position: fixed;
+    /* 顶栏的实际高度 = main.css 的 --topbar-h + 刘海内边距 */
+    top: calc(var(--topbar-h) + env(safe-area-inset-top, 0px));
+    bottom: calc(var(--status-h) + env(safe-area-inset-bottom, 0px));
+    z-index: 30;
+    width: min(320px, 86vw);
+    /* 关着的时候不参与命中测试，也不进 tab 顺序 */
+    visibility: hidden;
+    transition: transform var(--t-slow) var(--ease-drawer),
+                visibility 0s linear var(--t-slow);
+  }
+  /* 退场快于入场：响应应快于刻意呈现（与 main.css 的抽屉同一条口径） */
+  #palette:not([data-open]), #sidebar:not([data-open]) {
+    transition: transform var(--t-base) var(--ease-drawer),
+                visibility 0s linear var(--t-base);
+  }
+  #palette {
+    left: 0; border-right: 1px solid var(--border-2); border-left: 0;
+    transform: translateX(-100%);
+  }
+  #sidebar {
+    right: 0; border-left: 1px solid var(--border-2);
+    transform: translateX(100%);
+  }
+  #palette[data-open], #sidebar[data-open] {
+    transform: translateX(0);
+    visibility: visible;
+    transition: transform var(--t-slow) var(--ease-drawer),
+                visibility 0s linear 0s;
+  }
+  /* 抽屉底部要给 home indicator 留位置（内容最后一行别压在它底下） */
+  #palette > .pal-foot,
+  #sidebar > .pane { padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px)); }
+
+  /* 浮层遮罩：点它收起抽屉 */
+  #drawerMask {
+    position: fixed; inset: 0; z-index: 25; display: none;
+    background: rgba(0, 0, 0, .42);
+    opacity: 0;
+    transition: opacity var(--t-base) var(--ease-out);
+  }
+  #drawerMask.show { display: block; }
+  #drawerMask.in { opacity: 1; }
+
+  /* 顶栏按钮：两栏各一个开合入口 */
+  .dock-btn {
+    position: relative;
+    width: 36px; height: 36px; border-radius: var(--radius-sm);
+    display: grid; place-items: center; color: var(--text-2);
+    background: var(--surface-2); border: 1px solid var(--border);
+    transition: background-color var(--t-press) var(--ease-out),
+               color var(--t-press) var(--ease-out),
+               border-color var(--t-press) var(--ease-out),
+               transform var(--t-press) var(--ease-out);
+  }
+  /* ⚠ 这里原来还有一条 .dock-btn::after { left/right/top/bottom: -4px; pointer-events: none }，
+     想再加 4px 命中边 —— 和 .tool-btn::after 是同一个坑：带 pointer-events:none 的盒子
+     对命中测试是透明的，那 8px 一个像素都点不到。逐像素 elementFromPoint 实测：
+     .dock-btn 的盒子就是 44×44，真实可命中也是 44×45（多出的 1px 是扫描边界），
+     伪元素对命中面积的贡献是 **0**。规则已删，不再留「注释说 52×52、实测 44」这种状态。
+     命中面积由上面那条 width:44px; height:44px 给足。 */
+  .dock-btn:active { transform: scale(.96); }
+  .dock-btn.active {
+    background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent);
+  }
+  .dock-btn svg { display: block; }
+
+  #topbar { gap: 6px; padding-left: 8px; padding-right: 8px; }
+  .dock-btn { flex: 0 0 auto; }
+  .brand-name { font-size: 12.5px; }
+  /* 顶栏在窄屏上要能挤下：品牌名与副标签先让位。
+     原来这里还藏了 .tb-check 的文字（慢动作）与复选框，但顶栏后来改成了横向可滑动，
+     藏字就不再是「挤得下」的手段，只剩下一条副作用：慢动作变成一个看不见名字、
+     命中盒只有 16px 宽的空标签（实测空标签 = 左右各 8px 内边距 + 0 内容）。
+     滑动能解决放不下，所以文字在能摸的屏上还给用户；纯鼠标的窄窗口保持原样。 */
+  .brand-tag, .tb-sep { display: none; }
+  #selPreset { max-width: 96px; }
+
+  /* 慢动作这条在窄屏原本没有任何可见文字，靠去猜。窄屏 + 可触摸时把
+     文字与复选框还给它 —— 属可见改动，故与本节其它窄屏观感同门控；
+     顶栏横向滑动承接多出来的宽度，不做截断。 */
+  .tb-check span, #chkSlow { display: revert; }
+  .tb-check { gap: 5px; }
+}
+
+/* 桌面端（宽 + 细指针）：浮层入口完全不出现，布局与 main.css 一致 */
+.dock-btn { display: none; }
+#drawerMask { display: none; }
+@media (max-width: 1024px), ((pointer: coarse) and (max-width: 1180px)) {
+  /* 顶栏两个抽屉入口是本文件新建的按钮，直接做成 44×44 本体。
+     不走前面那条伪元素补足：补足只扩大命中区，量出来的盒子仍是 36px，
+     而这两个按钮带可见边框、又是手机上最常按的东西，本体给足更直白。
+     放在这个窄屏块里而不是上面那个粗指针块里：手机竖屏也可能是「细指针 + 窄屏」
+     （桌面把窗口拉窄、或带鼠标的平板），那时粗指针块不生效，按钮就只有 36px。 */
+  .dock-btn { display: grid; width: 44px; height: 44px; }
+
+  /* ── 抽屉开着时，顶栏那两枚开合按钮仍要按得到 ─────────────────────
+     症状（实测）：点入口把抽屉打开后，同一个坐标再点一次**收不起来** ——
+     elementFromPoint(188,24) 从按钮变成了 DIV#drawerMask.show in。
+     原因是层叠顺序，而不是命中区：#drawerMask 是 #app 的**兄弟**且 z-index:25，
+     而两枚按钮在 #app 里面。给按钮自己加 z-index 没有用 —— 实测把它抬到 26
+     （computed z-index 确认是 "26"、position:relative、媒体查询也命中）
+     依然被遮罩接走：它在 #app 这棵子树里，抬不出 #app 的层叠顺序。
+     只有把 **#topbar** 整条抬到遮罩之上才有效：实测 #topbar{z-index:26;
+     position:relative} 后，开着抽屉再点同一点 → 命中自己 ✓，能收起、能再开。
+     position:relative 是必须的：z-index 对 static 定位不生效。
+     只在这个窄屏块里给，桌面档位不引入新的层叠上下文。
+     代价（明说）：遮罩不再覆盖顶栏那一条。原来那里点了也只是被遮罩吃掉、
+     没有别的行为，所以不丢任何现有能力，换来的是「开合入口始终可点」。 */
+  #topbar { position: relative; z-index: 26; }
+}
+
+/* 低于 990px 时状态栏的六个读数挤成两行，收窄间距并让提示语有机会先让位 */
+@media (max-width: 990px) {
+  #statusbar { gap: 6px; padding-left: 8px; padding-right: 8px; }
+  #fps { display: none; }
+}
+/* 400px 以下：只留「当前工具 + 器材数 + 电路」，耦合计数让位（它仍在右栏「数据」里） */
+@media (max-width: 400px) {
+  .st-coupling, .st-sep-coupling { display: none; }
+}
+
+/* ══════════ 7. 键位提示 ══════════
+   状态栏右侧那串「V 选择 · W 连线 …」在触摸设备上没有意义 —— 那里没有键盘。
+   判据是 **pointer: coarse**（也就是「这台机器没有鼠标这类精确指向设备」），
+   不是宽度，也不只是 any-pointer。
+   为什么不按宽度：教室里的 55–86 寸触控一体机是 1920×1080，屏幕很宽但没有任何键盘，
+   按宽度判会在这类设备上留着「V 选择 · W 连线」这种按不出来的提示（实测就是这样）。
+   为什么不用 any-pointer: coarse：触屏笔记本主指针是触控板（有键盘），
+   它同时满足 pointer:fine 和 any-pointer:coarse，用它会把键盘提示也换掉。
+   为什么 pointer: coarse 与「有没有键盘」在本项目里可以等同：能确定有一块接上的键盘、
+   却没有鼠标可用的触屏设备不在目标范围内，而 target 里其它两类设备都被判对了。
+   不是隐藏了事：换成触摸设备真正可用的操作提示，否则那一段位置就白扔了。
+   两段文案都在 index.html 里各占一个 span，由能力查询决定显示哪一个（不用 JS）。
+   两条媒体查询里的选择器都必须带 .hint-keys / .hint-touch，不能只写 .hintline ——
+   否则「窄屏放回来」那条会连键位提示一起放回来，触摸设备上两段同时出现。 */
+.hint-touch { display: none; }
+@media (pointer: coarse) {
+  .hint-keys { display: none; }
+  .hint-touch { display: inline; }
+}
+/* main.css 在 max-width:1180px 时把整段提示藏起来（.hintline{display:none}）。
+   触摸设备上这一段有用，要放回来 —— 但只放回触控那条：
+   特指度 .hintline.hint-touch(0,2,0) 高过 .hint-touch(0,1,0)，
+   所以这一条不会顺手把键位提示也放出来。 */
+@media (pointer: coarse) and (max-width: 1180px) {
+  .hintline.hint-touch { display: inline; }
+}
+
+/* ══════════ 8. 内层滚动容器：不把滚动串给页面 ══════════
+   第 2 节给 html/body 设的 overscroll-behavior:none 只管根节点。
+   器材栏、侧边栏、抽屉正文这些**内层**滚动容器滚到头时，滚动会串到页面：
+   手指在器材列表里继续往下滑，背后的整页会跟着弹一下 ——
+   在手机上看就是「界面突然整体位移」，非常廉价。
+   contain 的语义正是「保留自己的回弹手感，但到此为止」，
+   比 none（连自己的回弹也没有）更适合列表。
+   不用 touchmove + preventDefault 去做：那会把滚动彻底堵死，
+   而且监听器会退化成非被动，滚动掉帧。 */
+.pal-list, .pane, .log-list, .drawer-body { overscroll-behavior: contain; }
+
+/* ══════════ 9. 减少动态效果 ══════════
+   main.css 已有一条全局的 reduced-motion 处理，但它不认识本文件新加的
+   抽屉位移与按压缩放 —— 那两个是新引入的位移，必须在这里补掉。
+   保留透明度与颜色变化（淡入淡出不影响前庭），去掉位移与缩放。 */
+@media (prefers-reduced-motion: reduce) {
+  #palette, #sidebar { transition: none; }
+  #palette { transform: none; }
+  #sidebar { transform: none; }
+  #palette[data-open], #sidebar[data-open] { transform: none; }
+  #drawerMask { transition: opacity var(--t-fast) ease; }
+  .dock-btn:active { transform: none; }
+}

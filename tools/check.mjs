@@ -8,6 +8,7 @@ import { World } from '../src/core/world.js';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { PluginHost } from '../src/core/plugin.js';
+import { PluginState, PHASES, LEGACY_DISABLED_KEY } from '../src/core/inventory.js';
 import { create, list, bindRegistry, equipmentPlugins } from '../src/equipment/index.js';
 import { CouplingBus } from '../src/coupling/bridge.js';
 import { solveCircuit, fmtA } from '../src/physics/circuit.js';
@@ -411,6 +412,10 @@ head('⑩ 全部器材渲染 / 步进不抛异常（Canvas 用替身）');
 
 // ══════════════════════════════════════════════════════════
 // ══════════════════════════════════════════════════════════
+// 守卫的输出要跨 §⑪ 与 §⑫ 两节使用，所以在块外声明
+let guardOut = null;
+let guardErr = '';
+
 head('⑪ 插件装载守卫：真实的 ALL_PLUGINS 全部装得上（本次 bug 的漏检根因）');
 {
   // 上面那些用例只 import 了自己声明的少数插件，从不用真实的 ALL_PLUGINS，
@@ -419,8 +424,8 @@ head('⑪ 插件装载守卫：真实的 ALL_PLUGINS 全部装得上（本次 bu
   // 45 项却依然全绿。这里改为装载**真正启动用的那一批插件**（唯一名单）。
   // 守卫跑在独立进程里（tools/guard-plugins.mjs），它的 DOM 替身与 rAF 循环
   // 不会污染本套件其余用例。
-  let guardOut = null;
-  let guardErr = '';
+  guardOut = null;
+  guardErr = '';
   try {
     guardErr = execFileSync(process.execPath, ['tools/guard-plugins.mjs', '--quiet'], {
       cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
@@ -453,6 +458,213 @@ head('⑪ 插件装载守卫：真实的 ALL_PLUGINS 全部装得上（本次 bu
       `守卫装的名单与 main.js 导出的 ALL_PLUGINS 一致（${guardOut.pluginCount} 个）`);
     // 退化保护：名单被截断时上面几条会"全绿"，这一条挡住
     ok(guardOut.total >= 23, `插件总数 ${guardOut.total} ≥ 23（名单没被截断）`);
+
+    // ── 渲染路径的**覆盖证据**（task-43）────────────────────────────────
+    // 「没抛」不等于「走到了」✗：插槽的渲染函数可能半途 return、也可能尾部代码在空集合上
+    // 一次都没执行（替身 querySelectorAll 曾恒返回 [] ✗）。这类缺口此前只有裸跑闸门的人看得见 ✗。
+    ok(guardOut.renderOk === true,
+      `每个插槽的渲染函数都走到了最后一行（槽 ${(guardOut.slotNames || []).length} 个`
+      + `，无痕迹 ${(guardOut.tailMissing || []).length} 个`
+      + `${(guardOut.tailMissing || []).length ? '：' + guardOut.tailMissing.join('、') : ''}`
+      + `，痕迹不成立 ${(guardOut.tailBad || []).length} 个`
+      + `${(guardOut.tailBad || []).length ? '：' + guardOut.tailBad.join('、') : ''}）`);
+    // 收集型断言的**非空前置**（D35：空集合上 every() 恒真 ✗）＋ 每条痕迹必须能追溯到
+    // 具体某一行代码（what 里带 文件:行 ✓）—— 没有出处的"痕迹"事后无法复核 ✗。
+    const slots = guardOut.slotNames || [];
+    const anchored = slots.filter((n) => guardOut.slotTail && guardOut.slotTail[n]
+      && /\.js:\d/.test(String(guardOut.slotTail[n].what || '')));
+    ok(slots.length >= 9 && anchored.length === slots.length
+      && slots.every((n) => guardOut.renderTrace && guardOut.renderTrace[n]),
+      `逐槽痕迹都有代码出处（${anchored.length}/${slots.length}）且每槽都有 renderTrace 读数`);
+  }
+}
+
+// ══════════════════════════════════════════════════════════
+head('⑫ T1 插件管理：两级启停状态与只读清单的契约');
+{
+  // 这一节是为了取代某个一次性验证脚本：脚本删掉之后证据就不可复现了，
+  // 而契约必须每次都被机械检查。谁破坏了它，这里立刻变红。
+
+  // ① 阶段词表：恰好这五个词，多一个少一个都算破坏契约
+  ok(Array.isArray(PHASES) && PHASES.join(',') === 'pending,loading,active,failed,unloading',
+    `清单阶段词表恰好是五词：${Array.isArray(PHASES) ? PHASES.join(' / ') : '(不是数组)'}`);
+
+  const memStore = () => {
+    const m = new Map();
+    return {
+      getItem: (k) => (m.has(k) ? m.get(k) : null),
+      setItem: (k, v) => { m.set(k, String(v)); },
+      removeItem: (k) => { m.delete(k); },
+    };
+  };
+
+  // ② 旧键平滑迁移：老用户在旧界面里的停用选择不能丢
+  {
+    const st = memStore();
+    st.setItem(LEGACY_DISABLED_KEY, JSON.stringify(['xiaomo.ui.log']));
+    const ps = new PluginState(st);
+    ok(ps.isItemOff('xiaomo.ui.log') === true && ps.isItemOff('xiaomo.ui.data') === false,
+      '旧键 xiaomo.plugins.disabled 里的停用选择被迁进新结构（ui.log 停用，ui.data 未表态）');
+    ok(new PluginState(st).isItemOff('xiaomo.ui.log') === true,
+      '同一份存储重开一次，迁移结果仍在（这才是持久化的全部意义）');
+    st.setItem(LEGACY_DISABLED_KEY, JSON.stringify([]));
+    ok(new PluginState(st).isItemOff('xiaomo.ui.log') === false,
+      '旧界面里重新启用后新结构也跟着启用（两套界面不会各说各话）');
+  }
+
+  // ③ 两级优先级与交给宿主的停用表
+  {
+    const ps = new PluginState(memStore());
+    ps.setBundle('ui', false);
+    ps.setItem('xiaomo.ui.log', true);          // 单项想开，但包级关着
+    ok(ps.offByOf('xiaomo.ui.log', 'ui') === 'bundle',
+      `包级关优先于单项开：offBy = ${ps.offByOf('xiaomo.ui.log', 'ui')}`);
+    ps.setBundle('ui', true);
+    ps.setItem('xiaomo.ui.log', false);
+    ok(ps.offByOf('xiaomo.ui.log', 'ui') === 'item',
+      `包级开时单项关生效：offBy = ${ps.offByOf('xiaomo.ui.log', 'ui')}`);
+    ok(ps.offByOf('xiaomo.ui.log', 'equipment') === 'item',
+      '换一个包名判定的仍是这条单项选择（包名不参与单项判定）');
+    ok(ps.offByOf('xiaomo.never.touched', 'equipment') === null,
+      '没表过态的插件 offBy 为 null（不会被误判成被关掉）');
+    const ps2 = new PluginState(memStore());
+    ps2.setBundle('core', false);
+    const map = ps2.toOffMap([{ id: 'a', kind: 'core' }, { id: 'b', kind: 'core' }, { id: 'c', kind: 'ui' }]);
+    ok(map instanceof Map && map.get('a') === 'bundle' && map.get('b') === 'bundle' && !map.has('c'),
+      `包级关展开成逐 id 的停用表：${[...map].map(([k, v]) => k + '=' + v).join(' ')}`);
+  }
+
+  // ④ 只读清单的真宿主证据（守卫那一行 JSON 就是证据，这里只做断言）
+  if (guardOut && guardOut.inventory && !guardOut.inventory.error) {
+    const iv = guardOut.inventory;
+    ok(iv.total === guardOut.total && iv.itemCount === guardOut.total,
+      `真实 ${guardOut.total} 个插件全部进了清单（items = ${iv.itemCount}）`);
+    ok(iv.countsKeys.join(',') === 'pending,loading,active,failed,unloading',
+      `分桶键恰好是那五个词：${iv.countsKeys.join(' / ')}`);
+    ok(iv.counts.active === guardOut.installed && iv.counts.failed === guardOut.failed
+      && iv.counts.loading === 0 && iv.counts.unloading === 0,
+      `分桶数与装载结果一致：active=${iv.counts.active} failed=${iv.counts.failed}`
+      + ` loading=${iv.counts.loading} unloading=${iv.counts.unloading}`);
+    ok(iv.allActive && iv.unknownPhase.length === 0,
+      iv.unknownPhase.length
+        ? '有插件落在五词之外：' + iv.unknownPhase.join(', ')
+        : `${iv.itemCount} 条全部且仅落在五词之内`);
+    ok(iv.allOffByNull, '默认启动时没有任何插件被标记为「被谁关掉」（offBy 全 null）');
+    ok(iv.isCopy === true, '清单条目是拷贝而不是宿主记录本身（只读的技术保证）');
+    ok(iv.frozenCounts === 'frozen' && iv.frozenItems === 'frozen',
+      `快照真的冻结：改 counts → ${iv.frozenCounts}，改 items → ${iv.frozenItems}`);
+    ok(iv.subscriberPushed > 0,
+      `启停一次后订阅者被叫醒 ${iv.subscriberPushed} 次（界面不需要轮询）`);
+    ok(iv.phasesSeen.indexOf('unloading') >= 0 && iv.phasesSeen.indexOf('pending') >= 0
+      && iv.phasesSeen.indexOf('loading') >= 0,
+      `五个桶里的瞬时态真的报得出来，本次观察到：${iv.phasesSeen.join(' / ')}`);
+    ok(iv.roundTripPhase === 'active' && iv.roundTripEnabled === true,
+      `停用再启用一圈后回到 active/enabled：${iv.roundTripPhase} / ${iv.roundTripEnabled}`);
+  } else {
+    ok(false, '守卫没有回报名单信息：'
+      + ((guardOut && guardOut.inventory && guardOut.inventory.error) || '无 inventory 字段'));
+  }
+}
+
+
+// ══════════════════════════════════════════════════════════
+// ⑬ 插件市场契约（DSH catalog-provider 兼容）
+//
+// 市场承载着一个对外承诺：「同一份目录源 DSH 也能读」。承诺必须机器可查，
+// 所以这里钉三件事：① 自带目录过关且能力如实声明；② 坏数据被明确拒绝；
+// ③ 声明的 sha256 == 磁盘上的真实字节。
+//
+// ③ 是最容易悄悄失效的一条：有人改了示例插件却忘了改哈希，用户安装时
+// 会被我们自己的校验拒掉——而开发机上一切「看起来正常」。它同时也是
+// .gitattributes 里 eol=lf 的理由（CRLF 会让字节与哈希不符）。
+// 哈希用 Node 自带 crypto 独立算，不依赖 market.js 的实现，避免自证。
+// ══════════════════════════════════════════════════════════
+{
+  try {
+    const { readFileSync, existsSync } = await import('node:fs');
+    const { createHash } = await import('node:crypto');
+    const M = await import('../src/core/market.js');
+    const at = (rel) => fileURLToPath(new URL(rel, import.meta.url));
+    const readJson = (rel) => JSON.parse(readFileSync(at(rel), 'utf8'));
+    const codeOf = (fn) => {
+      try { fn(); return '(没有抛错)'; } catch (e) { return (e && e.code) || '(无 code)'; }
+    };
+
+    ok(typeof M.parseSource === 'function' && typeof M.parsePage === 'function'
+      && typeof M.parseExtensions === 'function' && typeof M.sha256Hex === 'function'
+      && typeof M.MarketClient === 'function',
+      '市场内核导出了契约要求的校验器与客户端');
+
+    // ① 自带来源 manifest：过关，且不许声称自己没有的能力
+    const src = readJson('../market/catalog-source.json');
+    const parsed = M.parseSource(src);
+    ok(parsed.transport.kind === 'https-json' && parsed.transport.method === 'GET',
+      `自带目录源是 https-json + GET`);
+    ok(parsed.transport.endpoint.startsWith('https://')
+      && /\/v1\/plugins$/.test(parsed.transport.endpoint),
+      `端点必须是 HTTPS 且路径以 /v1/plugins 结尾（契约 pattern）：${parsed.transport.endpoint}`);
+    ok(parsed.query.supported.length === 0 && parsed.query.sorts.length === 0,
+      '服务端筛选能力如实声明为空（静态托管上没有服务端筛选，不做本地也实现不了的承诺）');
+    ok(parsed.query.defaultLimit <= parsed.query.maxLimit && parsed.query.maxLimit <= 200,
+      `分页上限自洽且不超契约上限：${parsed.query.defaultLimit} ≤ ${parsed.query.maxLimit} ≤ 200`);
+    ok(parsed.extensionsUrl
+      === new URL('xiaomo-extensions.json', parsed.transport.endpoint).href,
+      '旁挂安装信息地址由端点推导，来源作者不需要额外配置');
+
+    // ② 坏 manifest 的拒绝路径：每条都要抛带 code 的 MarketError
+    const badSrc = (mut) => {
+      const j = JSON.parse(JSON.stringify(src)); mut(j); return codeOf(() => M.parseSource(j));
+    };
+    ok(badSrc((j) => { j.transport.endpoint = 'http://example.com/market/v1/plugins'; }) === 'insecure-url',
+      '明文 http 端点被拒（只收 HTTPS，回环除外）');
+    ok(badSrc((j) => { j.transport.method = 'POST'; }) === 'bad-transport',
+      '非 GET 传输被拒（契约只允许 GET）');
+    ok(badSrc((j) => { j.transport.kind = 'command'; }) === 'bad-transport',
+      '非 https-json 的传输被拒（绝不允许目录携带可执行指令）');
+    ok(badSrc((j) => { j.transport.endpoint = 'https://example.com/market/plugins.json'; }) === 'bad-endpoint',
+      '端点路径不合 pattern 被拒');
+    ok(badSrc((j) => { j.query.defaultLimit = 200; j.query.maxLimit = 50; }) === 'bad-value',
+      'defaultLimit > maxLimit 被拒（schema 管不了这种字段间关系，得自己查）');
+    ok(badSrc((j) => { j.query.supported = ['sql']; }) === 'bad-value',
+      '契约未定义的能力被拒（不许自称支持不存在的东西）');
+    ok(badSrc((j) => { j.manifestVersion = '9.9.9'; }) === 'bad-version',
+      '不支持的 manifestVersion 被拒');
+    ok(codeOf(() => M.parseSource({ manifestVersion: '1.0.0' })) !== '(没有抛错)',
+      '缺必填字段被拒');
+
+    // ③ 自带目录页：过关，且内联代码被整页拒绝
+    const page = readJson('../market/v1/plugins');
+    const pp = M.parsePage(page);
+    ok(pp.items.length === page.items.length && pp.items.length >= 1,
+      `自带目录页校验通过：${pp.items.length} 条条目`);
+    {
+      const j = JSON.parse(JSON.stringify(page));
+      j.items = j.items.map((it, i) => (i === 0 ? { ...it, xiaomo: { code: 'alert(1)' } } : it));
+      ok(codeOf(() => M.parsePage(j)) === 'code-not-allowed',
+        '目录里内联代码被整页拒绝（契约硬规则：不许携带 JS/命令/凭据）');
+    }
+
+    // ④ 旁挂扩展文档 + 哈希一致性
+    const ext = M.parseExtensions(readJson('../market/v1/xiaomo-extensions.json'));
+    const ids = Object.keys(ext.items || {});
+    ok(ids.length >= 2, `旁挂文档声明了 ${ids.length} 个可安装条目`);
+    for (const id of ids) {
+      const e = ext.items[id];
+      const file = at('../market/v1/' + e.entry);
+      if (!existsSync(file)) { ok(false, `${id} 的 entry 指向不存在的文件：${e.entry}`); continue; }
+      ok(true, `${id} 的 entry 指向真实文件：${e.entry}`);
+      const bytes = readFileSync(file);
+      const digest = createHash('sha256').update(bytes).digest('hex');
+      ok(digest === e.sha256,
+        `${id} 声明的 sha256 == 磁盘字节（${digest.slice(0, 12)}…）`);
+      ok(bytes.length === e.bytes, `${id} 声明的字节数 == 实际 ${bytes.length} B`);
+      const text = bytes.toString('utf8');
+      ok(!/^[ \t]*import[ \t]/m.test(text) && !/\brequire[ \t]*\(/.test(text),
+        `${id} 是单文件零依赖 ESM（blob URL 里解析不了相对 import，这是硬边界）`);
+      ok(!/\r/.test(text), `${id} 是 LF 换行（CRLF 会让声明哈希与实际字节不符）`);
+    }
+  } catch (e) {
+    ok(false, '市场契约检查自身抛错：' + (e && e.message));
   }
 }
 

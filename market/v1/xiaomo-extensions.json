@@ -1,0 +1,24 @@
+{
+  "format": "xiaomo.market.extensions",
+  "version": 1,
+  "items": {
+    "lab-timer": {
+      "entry": "../plugins/lab-timer.js",
+      "sha256": "45c214c2f7f42bdcd8a522b1b0a7d315e418ff71bbe6edde93eb817f3056f3cc",
+      "kind": "ui",
+      "pluginId": "xiaomo.community.lab-timer",
+      "minHost": "2.0.0",
+      "bytes": 6207,
+      "notes": "单文件零依赖 ESM；只用 topbar.right 插槽与 toast/log，自建浮层由 onDispose 拆掉"
+    },
+    "equipment-booster": {
+      "entry": "../plugins/equipment-booster.js",
+      "sha256": "e55f5b26fe439971f0c49a2626b84b019973cf0759c367e482981d10b2b54aaa",
+      "kind": "equipment",
+      "pluginId": "xiaomo.community.equipment-booster",
+      "minHost": "2.0.0",
+      "bytes": 3987,
+      "notes": "单文件零依赖 ESM；复用宿主 app.services.packs 装一份纯数据器材包，卸载时一并卸掉"
+    }
+  }
+}
