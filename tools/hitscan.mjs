@@ -32,8 +32,12 @@
  *              blockers    四条边外一格是谁：定位「被谁接走了」用
  *              offscreen   元素不在视口里（此时 realHit 无意义，只有 rect）
  *
- * 覆盖元素：.fx-orb / .theme-dot / .tool-btn / .tb-check / #btnPalette
+ * 覆盖元素：.fx-orb / .theme-dot / .tool-btn / #btnPalette
  *          / .tb-btn / .tb-select / .drawer-x（task-34 追加的后三个）
+ *   ⓘ 原文清单里还有 `.tb-check`（task-64 摘除）：该控件已被顶栏「速度档」下拉取代、
+ *     页面上没有宿主节点，留着它每次只会多打一条 `"tbCheck":"missing"` 的噪音读数。
+ *     文件头那条 `.tb-check 盒子 79×32 → 实测 79×33` 的历史记录**保留**：它记的是本工具第一次跑
+ *     就把「算术达标、实测不达标」量出来的那件事，与控件今天是否还在无关。
  *   顶栏在窄屏是横向可滑动的，右侧控件初始在视口外 —— 本工具会**逐个**把元素
  *   滚到视口中央再量，量完还原顶栏滚动位置（不能统一滑到底再逐个量：
  *   滑动是全局状态，量后面那个时前面那个已经被推出视口了）。
@@ -179,7 +183,7 @@ const EXPR = `(() => {
     };
   };
   for (const [key, sel] of [['fxOrb', '.fx-orb'], ['themeDot', '.theme-dot'],
-                            ['toolBtn', '.tool-btn'], ['tbCheck', '.tb-check'],
+                            ['toolBtn', '.tool-btn'],
                             ['dockPal', '#btnPalette'], ['tbBtn', '.tb-btn'],
                             ['tbSelect', '.tb-select']]) {
     const el = q(sel);

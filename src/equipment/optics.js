@@ -599,6 +599,8 @@ const lightDef = {
     { k: 'power', label: '光功率', type: 'range', min: 0.1, max: 50, step: 0.1, unit: 'mW' },
     { k: 'size', label: '发光体高度', type: 'range', min: 2, max: 30, step: 1, unit: 'mm' },
   ],
+  // ── B4 第 3 步 · 光学：1 行 ──
+  stats: [{ label: '波长', unit: 'nm', read: (e) => e.state.lambda }],
   create: (x, y) => new LightSource(lightDef, x, y),
 };
 DEFS.push(() => define(lightDef));
@@ -904,6 +906,15 @@ const mirrorDef = {
   state: { solved: false },
   tags: ['平面镜', '反射', '成像'],
   fields: [{ k: 'angle', label: '镜面倾角', type: 'range', min: 0, max: 90, step: 1, unit: '°' }],
+  // ── B4 第 3 步 · 光学：4 行 ──
+  //    ⚠ `hitX`/`hitY` 在 `STATE_LABELS.光学` 里**没有**条目（表里只有 5 键）⇒ 兜底落 `通用`，
+  //      `通用` 里也没有 ⇒ **以原始键名上屏、无单位**。照抄即可，不要另起中文名。
+  stats: [
+    { label: '入射角', unit: '°', read: (e) => e.state.thetaI },
+    { label: '反射角', unit: '°', read: (e) => e.state.thetaR },
+    { label: 'hitX', read: (e) => e.state.hitX },
+    { label: 'hitY', read: (e) => e.state.hitY },
+  ],
   create: (x, y) => new PlaneMirror(mirrorDef, x, y),
 };
 DEFS.push(() => define(mirrorDef));
@@ -995,6 +1006,15 @@ const tankDef = {
       options: [['air2water', '空气 → 液体'], ['water2air', '液体 → 空气（会全反射）']],
     },
   ],
+  // ── B4 第 3 步 · 光学：4 行 ──
+  //    ⚠「折射率 n₂」的标签**不来自域表**（光学表里没有 `n2`），而是本器材 `fields` 给的
+  //      （`inspector.js:461` 的 `fd.label` 优先于域表）；`n1` 则连 `fields` 都没有 ⇒ 原始键名。
+  stats: [
+    { label: '入射角', unit: '°', read: (e) => e.state.thetaI },
+    { label: '折射角', unit: '°', read: (e) => e.state.thetaT },
+    { label: '折射率 n₂', read: (e) => e.state.n2 },
+    { label: 'n1', read: (e) => e.state.n1 },
+  ],
   create: (x, y) => new WaterTank(tankDef, x, y),
 };
 DEFS.push(() => define(tankDef));
@@ -1058,6 +1078,11 @@ const prismDef = {
     },
     { k: 'apex', label: '顶角 A', type: 'range', min: 20, max: 90, step: 1, unit: '°' },
     { k: 'theta1', label: '入射角 θ₁', type: 'range', min: 5, max: 85, step: 0.1, unit: '°' },
+  ],
+  // ── B4 第 3 步 · 光学：2 行（`valid` 无域表条目 ⇒ 原始键名）──
+  stats: [
+    { label: '谱宽', unit: '°', read: (e) => e.state.spread },
+    { label: 'valid', read: (e) => e.state.valid },
   ],
   create: (x, y) => new Prism(prismDef, x, y),
 };

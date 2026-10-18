@@ -85,6 +85,19 @@ const electrodeDef = {
       ['Fe', '铁片'], ['Mg', '镁条'], ['Al', '铝片'], ['Ag', '银片'],
     ],
   }],
+  // ── B4 第 2 步：面板那处 `if (e.type === 'electrode')` 已搬到这里（plans/11 §6.3）──
+  //    逐字等价：
+  //      `m === 'graphite' ? '石墨（惰性）' : m` ⇒ 字符串三态原样上屏；
+  //      `E0` 那一行带**符号前缀**（正数前加 '+'），`digits`/`unit` 表达不了
+  //        ⇒ 整行由 read 返回**字符串**，格式与迁移前逐字一致（含 '+'、' V'、以及无 E0 时的文案）。
+  stats: [
+    { label: '电极材料', read: (e) => (e.props.metal === 'graphite' ? '石墨（惰性）' : e.props.metal) },
+    { label: '标准电极电势', read: (e) => {
+      const p = e.probe;
+      if (!p || p.E0 === null || p.E0 === undefined) return '不参与原电池';
+      return (p.E0 > 0 ? '+' : '') + p.E0.toFixed(2) + ' V';
+    } },
+  ],
   create: (x, y) => new Electrode(electrodeDef, x, y),
 };
 DEFS.push(() => define(electrodeDef));
@@ -131,6 +144,12 @@ const thermoDef = {
   state: { temp: 25 },
   tags: ['温度计', '测量', '耦合'],
   fields: [],
+  // ── B4 第 2 步：面板那处 `if (e.type === 'thermometer')` 已搬到这里（plans/11 §6.3）──
+  //    逐字等价核对：迁移前是 `(st.temp ?? 25).toFixed(2) + ' ℃'`；现在是 `digits: 2` + `unit: '℃'`，
+  //    渲染端 `fmtBy(2, v) + ' ℃'` 走的是**同一个 toFixed(2)** ⇒ 文本逐字相同 ✓
+  stats: [
+    { label: '测得温度', unit: '℃', digits: 2, read: (e) => e.state.temp ?? 25 },
+  ],
   create: (x, y) => new Thermometer(thermoDef, x, y),
 };
 DEFS.push(() => define(thermoDef));
@@ -165,6 +184,11 @@ const phDef = {
   state: { pH: 7 },
   tags: ['pH', '测量', '酸碱'],
   fields: [],
+  // ── B4 第 2 步：面板那处 `if (e.type === 'phmeter')` 已搬到这里（plans/11 §6.3）──
+  //    逐字等价：迁移前是 `(st.pH ?? 7).toFixed(2)`，且**没有单位** ⇒ 现在是 digits:2 + 不写 unit。
+  stats: [
+    { label: '测得 pH', digits: 2, read: (e) => e.state.pH ?? 7 },
+  ],
   create: (x, y) => new PHMeter(phDef, x, y),
 };
 DEFS.push(() => define(phDef));
@@ -233,6 +257,14 @@ const balanceDef = {
   state: { mass: 0 },
   tags: ['天平', '质量', '测量', '守恒'],
   fields: [],
+  // ── B4 第 2 步：面板那处 `if (e.type === 'balance')` 已搬到这里（plans/11 §6.3）──
+  //    逐字等价：`(st.mass || 0).toFixed(2) + ' g'` ⇒ digits:2 + unit:'g'。
+  //    「称量对象」原本是 `if (st.onPlate)` 的**条件行**；这里用 `|| undefined` 保住「falsy ⇒ 整行不出现」，
+  //    否则空字符串会落进三态的字符串分支、上屏一个空文本行（迁移前不会）。
+  stats: [
+    { label: '秤上质量', unit: 'g', digits: 2, read: (e) => e.state.mass || 0 },
+    { label: '称量对象', read: (e) => e.state.onPlate || undefined },
+  ],
   create: (x, y) => new Balance(balanceDef, x, y),
 };
 DEFS.push(() => define(balanceDef));
@@ -264,6 +296,14 @@ const paperDef = {
   state: {},
   tags: ['pH试纸', '酸碱', '测量'],
   fields: [],
+  // ── B4 第 2 步：面板那处 `if (e.type === 'phpaper')` 已搬到这里（plans/11 §6.3）──
+  //    逐字等价：`st.pH === undefined ? '未浸取' : st.pH.toFixed(1)` ⇒ 未浸取走**字符串三态**、
+  //    已浸取走 digits:1。
+  //    ⚠ 这里**不能**写成 `?? 7`：试纸的「未浸取」是**文案**，pH 计那边是**数值缺省**。
+  //      两者在面板上同名「测得 pH」，语义却不同 —— 迁移时必须分开写，别图省事合成一条。
+  stats: [
+    { label: '测得 pH', digits: 1, read: (e) => (e.state.pH === undefined ? '未浸取' : e.state.pH) },
+  ],
   create: (x, y) => new PHPaper(paperDef, x, y),
 };
 DEFS.push(() => define(paperDef));
@@ -365,6 +405,14 @@ export function feedInto(ent, vessel) {
   const name = (ent.def && ent.def.name) || id;
   if (solid) vessel.addSolid(id, dose);
   else vessel.addLiquid(id, dose);
+  // 喂料点自己记一笔：这件器材**累计放出了多少**（单位 = dose 的单位 = **体积 mL**；滴瓶 0.05、滴定管 0.4 同口径）。
+  // 为什么必须记在这里：feedInto 是本仓库唯一的加料入口，返回值只被 main.js 用来 toast/log
+  //   ⇒ 器材**收不到**「我被用了一次」的通知；而"读目标里我的试剂还剩多少"也不成立 ——
+  //     中和反应会把它当场消耗掉（naoh-hcl k=0.30）⇒ 读数会恒 0。所以这一行只能由喂料点写。
+  // 为什么固/液两条分支都记：dose 是**共用字段**（判固/液的是 cat，不是 dose）⇒ 只在液体分支记，
+  //   会让"以后新增的固体取用器材"读数静默恒 0 ✗；口径只写一处，才不会两处漂移。
+  // ⚠ 只累加、不提供补记/清零接口 —— 清零靠器材重建（state 不进 undo 栈 ✓）。
+  if (ent.state) ent.state.dosed = (ent.state.dosed || 0) + dose;
   return { id, dose, solid, name };
 }
 

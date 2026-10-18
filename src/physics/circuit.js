@@ -54,8 +54,19 @@ function emptyResult(reason) {
   return {
     ok: false, closed: false, shorted: false, reason: reason || 'unknown',
     branches: new Map(), nodeV: new Map(),
-    totalI: 0, maxI: 0, iterations: 0,
+    totalI: 0, maxI: 0, iterations: 0, warnings: [],
   };
+}
+
+/**
+ * 一次性告警：**同一种器材只喊一次**。
+ * solveCircuit 每帧都跑（1/120 s），逐帧 console 会把控制台变成噪音 —— 而噪音等于没有告警。
+ */
+const warnedOnce = new Set();
+function warnOnce(key, msg) {
+  if (warnedOnce.has(key)) return;
+  warnedOnce.add(key);
+  console.warn('[circuit] ⚠ ' + msg);
 }
 
 /**
@@ -68,19 +79,80 @@ export function solveCircuit(world, extra = []) {
 
   // ── 1. 收集支路 ────────────────────────────────────────
   const list = [];
+  const warnings = [];   // 显式记账：被忽略的东西不许无声无息地消失
   for (const e of world.entities) {
     if (typeof e.circuitBranch !== 'function') continue;
     // 损坏的器材从电路里彻底消失 —— 烧断的灯丝、烧毁的表头都是开路
     if (e.state && e.state.broken) continue;
-    if (!e.circuitBranch()) continue;
     const wp = [];
     for (let i = 0; i < e.ports.length; i++) if (e.ports[i].kind === 'wire') wp.push(i);
     if (wp.length < 2) continue;
-    list.push({
-      kind: 'real', ent: e,
-      ka: e.id + ':' + wp[0], kb: e.id + ':' + wp[1],
-      getBr: () => e.circuitBranch(),
-    });
+    const wired = (i) => world.wires.some((w) => w.kind === 'wire'
+      && ((w.a.e === e.id && w.a.p === i) || (w.b.e === e.id && w.b.p === i)));
+
+    // ── 一器材多支路：契约 circuitBranches(world) ──────────────
+    // 器材可以声明 N 条支路，每条自带端口对 { a, b }（e.ports 的下标，必须指向 kind:'wire' 口）；
+    // 省略 a/b 时：第 1 条用前两个 wire 口（= 旧的单支路行为），第 k 条用 wp[k]/wp[k+1]。
+    // 返回 null / [] / 非数组 ⇒ 回落到 circuitBranch()，既有器材一行都不用改。
+    //
+    // ⚠ 一趟 solve 里只取一次（下面的 arr 常驻），于是 emf/r **结构上**就是常量：
+    //   Motor 那条注释（"同一次 solve 里 emf 必须是常量，否则源电压与源电流互为因果，
+    //   定点迭代会去追一个不存在的解"）从注释变成了保证。多支路共享一个器材状态时，
+    //   跨支路耦合只能读**上一帧**写下的 state，不能读本次迭代的中间量 ——
+    //   那会造出迭代内代数环，收敛性没有定义（三极管/运放那道门槛就卡在这里）。
+    let defs = null;
+    if (typeof e.circuitBranches === 'function') {
+      const arr = e.circuitBranches(world);
+      if (Array.isArray(arr) && arr.length) defs = arr;
+    }
+    if (!defs) defs = [e.circuitBranch()];
+    if (!defs[0]) continue;                    // 冷态/断路器材照旧整件跳过
+
+    const used = new Set();                    // 被任何一条已声明支路用到的 wire 口
+    const resolved = [];
+    for (let k = 0; k < defs.length; k++) {
+      const br = defs[k];
+      if (!br) continue;
+      let ia = Number.isInteger(br.a) ? br.a : null;
+      let ib = Number.isInteger(br.b) ? br.b : null;
+      if (ia === null || ib === null) {
+        if (k === 0) { ia = wp[0]; ib = wp[1]; }
+        else if (wp.length > k + 1) { ia = wp[k]; ib = wp[k + 1]; }
+      }
+      const okPort = (i) => Number.isInteger(i) && i >= 0 && i < e.ports.length && e.ports[i].kind === 'wire';
+      if (!okPort(ia) || !okPort(ib)) {
+        warnings.push({
+          code: 'branch-port-bad', entId: e.id, type: e.type, ports: [ia, ib],
+          msg: `${e.type}：第 ${k + 1} 条支路的端口对 ${ia}/${ib} 不是合法的 wire 口 —— 该支路被跳过`,
+        });
+        continue;
+      }
+      used.add(ia); used.add(ib);
+      resolved.push({ br, ia, ib, k });
+    }
+    if (!resolved.length) continue;
+
+    // ⚠ 仍然会被忽略的端口：**真的接了线**、却不属于任何一条已声明支路。
+    //   三端器件当两端用（电位器当变阻器）是合法用法 ⇒ 判据是"接线了没有"，不是"声明了几个口"；
+    //   声明了多条支路的三端件只要把那根线接进某条支路，就自然不再告警。
+    const orphan = wp.filter((i) => wired(i) && !used.has(i));
+    if (orphan.length) {
+      const labels = orphan.map((i) => e.ports[i].label || ('#' + (i + 1))).join('/');
+      const w0 = {
+        code: 'port-ignored', entId: e.id, type: e.type, ports: orphan,
+        msg: `${e.type}：接线柱 ${labels} 接了线却被忽略 —— 它不属于该器材声明的任何一条支路`,
+      };
+      warnings.push(w0);
+      warnOnce(e.type, w0.msg);
+    }
+
+    for (const r of resolved) {
+      list.push({
+        kind: 'real', ent: e, bi: r.k, br: r.br,
+        ka: e.id + ':' + r.ia, kb: e.id + ':' + r.ib,
+        getBr: () => r.br,
+      });
+    }
   }
   for (const x of extra) {
     if (!x || !x.a || !x.b) continue;
@@ -155,6 +227,17 @@ export function solveCircuit(world, extra = []) {
     return br.r;
   };
 
+  // 支路电阻的**唯一**守卫口径：非正 / 非有限一律视为断路（1e9 Ω），再夹进 [1e-4, 1e9]。
+  // 两个调用点 —— ①盖章进矩阵（本函数下方）②算出电流后**上报**（本函数更下方）—— **必须**同源，
+  // 差一处就会让上报值与解出的物理量差 13 个数量级：实测 R=0 时上报 15000 A，
+  // 而同一回路的真实电流是 1.5e-9 A（回归护栏 `tools/circuit-rle0-probe.mjs`）。
+  // ⚠ 只处理「非正 / 非有限」这一档：**正的**小值（如 5e-9）本来就夹到 1e-4，
+  //   那一档的数值**不许变** —— 它是 `circuit-rle0-probe.mjs` §3 的护栏。
+  const clampBranchR = (R) => {
+    if (!(R > 0) || !isFinite(R)) R = 1e9;
+    return Math.max(1e-4, Math.min(R, 1e9));
+  };
+
   let x = null, iterations = 0;
   for (let iter = 0; iter < 26; iter++) {
     iterations = iter + 1;
@@ -165,9 +248,8 @@ export function solveCircuit(world, extra = []) {
     for (const b of list) {
       const br = b.getBr();
       if (!br || br.type === 'V' || br.type === 'open') continue;
-      let R = resOf(b, prevU.get(b.ka + b.kb) ?? 0);
-      if (!(R > 0) || !isFinite(R)) R = 1e9;
-      R = Math.max(1e-4, Math.min(R, 1e9));
+      // 与上报路径共用同一条守卫（见 `clampBranchR`）。
+      const R = clampBranchR(resOf(b, prevU.get(b.ka + b.kb) ?? 0));
       const G = 1 / R;
       const ia = rowOf.get(dsu.find(b.ka)), ib = rowOf.get(dsu.find(b.kb));
       if (ia >= 0) A[ia][ia] += G;
@@ -228,22 +310,27 @@ export function solveCircuit(world, extra = []) {
     } else if (br.type === 'open') {
       I = 0; R = Infinity;
     } else {
-      R = resOf(b, U);
-      // 与盖章路径同一条守卫（:169-170）：非正 / 非有限一律视为断路 1e9，再夹进 [1e-4, 1e9]。
-      // 不补这条守卫，上报值会与解出来的物理量差 13 个数量级 —— 实测 R=0 时报出 15000 A，
+      // 与盖章路径共用同一条守卫（见 `clampBranchR`）。
+      // 不共用时，上报值会与解出来的物理量差 13 个数量级 —— 实测 R=0 时报出 15000 A，
       // 而同一回路的真实电流是 1.5e-9 A（详见 tools/circuit-rle0-probe.mjs）。
       // ⚠ 只动「非正 / 非有限」这一档：**正的**小值（如 5e-9）两条路径本来就一致（都夹到 1e-4），
       // 那一档不许变 —— 探针 §3 是它的回归护栏。
-      if (!(R > 0) || !isFinite(R)) R = 1e9;
-      R = Math.max(1e-4, Math.min(R, 1e9));
+      R = clampBranchR(resOf(b, U));
       I = U / R;
     }
     const P = Math.abs(U * I);
     const rec = { I, U, P, R, virtual: b.kind === 'virtual' };
 
     if (b.kind === 'real') {
-      branches.set(b.ent.id, rec);
-      Object.assign(b.ent.state, { I, U, P, R });
+      // 主边（bi 缺省 = 0）独占实体级键与实体级状态：branches.get(entId)、state.I/U/P/R、
+      // 以及导线高亮（下面按实体 id 取记录）都靠它 —— 多支路器材不许把这三样弄丢。
+      const primary = !b.bi;
+      branches.set(primary ? b.ent.id : b.ent.id + '#' + b.bi, rec);
+      if (primary) Object.assign(b.ent.state, { I, U, P, R });
+      // 非主边：器材可以在支路对象上挂一个 state 盒子（{ type:'V', r, state: this.state.sec }），
+      // 求解器把 {I,U,P,R} 写进去 —— 器材由此拿到自己第二条支路的解，
+      // 而求解器**不发明新的 state 键**（键名归器材自己）。
+      if (b.br && b.br.state && typeof b.br.state === 'object') Object.assign(b.br.state, { I, U, P, R });
     } else {
       branches.set(b.key, rec);
       Object.assign(b.state, { I, U, P, R });
@@ -262,7 +349,7 @@ export function solveCircuit(world, extra = []) {
     w.state.live = closed;
   }
 
-  return { ok: true, closed, shorted: false, branches, nodeV, totalI, maxI, iterations };
+  return { ok: true, closed, shorted: false, branches, nodeV, totalI, maxI, iterations, warnings };
 }
 
 // ── 显示格式化 ─────────────────────────────────────────────

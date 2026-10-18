@@ -1,5 +1,7 @@
 // ══════════════════════════════════════════════════════════
-// 无头验证：电学增量 6 件（电容 / 电感 / 交流电源 / 示波器 / 变压器 / 二极管）
+// 无头验证：电学增量 7 件（电容 / 电感 / 交流电源 / 示波器 / 变压器 / 二极管 / 光敏电阻）
+//   ⚠ 本文件的 MINE 白名单仍只覆盖其中 6 件：光敏电阻由 tools/photoresistor-probe.mjs 覆盖（38 项）。
+//     本次只改叙述文字，断言一条未动（116 项）。
 //
 //   node tools/equipment-electronics.mjs
 //
@@ -107,15 +109,15 @@ function build(sc) {
 }
 
 // ══════════════════════════════════════════════════════════
-head('§0 注册、形状、与既有 electrical.js 的 10 件零重叠');
+head('§0 注册、形状、与既有 electrical.js 的件名零重叠（EXIST 冻结 10 个名字；electrical.js 现为 11 件）');
 // ══════════════════════════════════════════════════════════
 const MINE = ['resistorcap', 'inductorcoil', 'acsource', 'oscilloscope', 'transformer', 'diode'];
 const EXIST = ['battery', 'switch', 'lamp', 'resistor', 'rheostat', 'ammeter', 'voltmeter', 'thermistor', 'heater', 'motor'];
 const DEFS = host.registry('equipment').list();
 const byType = new Map(DEFS.map(d => [d.type, d]));
-ok(MINE.every(t => byType.has(t)), `6 件全部注册：${MINE.join(' / ')}`);
-ok(EXIST.every(t => byType.has(t)), '既有 electrical.js 的 10 件仍在注册表里（没有被顶掉）');
-ok(MINE.every(t => !EXIST.includes(t)), '类型名零重叠：新增 6 件 ∩ 既有 10 件 = ∅');
+ok(MINE.every(t => byType.has(t)), `MINE 白名单 6 件全部注册：${MINE.join(' / ')}`);
+ok(EXIST.every(t => byType.has(t)), 'EXIST 里冻结的 10 个名字仍在注册表里（没有被顶掉；electrical.js 现为 11 件，多出的 multimeter 不在本名单里）');
+ok(MINE.every(t => !EXIST.includes(t)), '类型名零重叠：MINE 6 件 ∩ EXIST 10 个名字 = ∅');
 
 for (const t of MINE) {
   const d = byType.get(t);
@@ -418,7 +420,7 @@ ok(near(xf.state.I1, xf.state.I2 / 4, 1e-9),
   `I₁ = ${xf.state.I1.toExponential(4)} A = I₂/4 = ${(xf.state.I2 / 4).toExponential(4)} A（升压降流）`);
 
 S1.render(); S2.render(); S2b.render(); fwdDC.diode.render(CTX);
-ok(true, '6 件器材的 render() 在无头 Canvas 替身上全部跑通（无异常）');
+ok(true, 'MINE 6 件器材的 render() 在无头 Canvas 替身上全部跑通（无异常）');
 
 // ══════════════════════════════════════════════════════════
 head('§8 耦合链：整流后的直流分量 → 真化学电解（CuSO₄ 溶液，量真实沉积的 Cu）');
@@ -682,7 +684,7 @@ info('结论：可逆金属沉积按**电荷符号**累积（∝ ∫I dt），�
   + '判据是反应规则表自带的 deposit 字段，不是新造的约定。');
 
 // ══════════════════════════════════════════════════════════
-head('§10 可单独启停：关掉本插件 → 6 件从注册表归零，再打开 → 6 件回来');
+head('§10 可单独启停：关掉本插件 → MINE 6 件从注册表归零，再打开 → 6 件回来');
 // ══════════════════════════════════════════════════════════
 const mineCount = () => host.registry('equipment').list().filter(d => MINE.includes(d.type)).length;
 ok(mineCount() === 6, `初始：注册表里本插件 ${mineCount()} 件`);
@@ -694,6 +696,60 @@ ok(host.enable('xiaomo.equipment.electronics') === true && mineCount() === 6,
   `重新启用后：本插件器材回到 ${mineCount()} 件（不翻倍、不残留）`);
 const after = host.registry('equipment').list();
 ok(new Set(after.map(d => d.type)).size === after.length, '启用后注册表里没有重复 type（拆除干净，不是叠加）');
+
+// ══════════════════════════════════════════════════════════
+head('§11 电流真源：AcSource 的逐拍电流缓冲 + rmsI（T-03a，供面板「有效电流 I_rms」消费）');
+// ══════════════════════════════════════════════════════════
+// 为什么单开一节：电压半边（rmsMeas）在 §6 已断，而电流半边**此前全库没有真源**
+//   （AcSource 只滚动电压缓冲）⇒ 面板侧造不出「有效电流」。本件把电流半边补齐，
+//   与电压缓冲**逐字同构**：同一窗口长度 n、同样的 push/shift 推移、同一个 rmsOf 口径。
+// 为什么允许同构（不必另定符号约定）：rmsOf 取 √⟨i²⟩，**对符号免疫** —— 交流换向、
+//   以及 V 支路朝向带来的整体符号翻转，都不会污染有效值。
+// 纯电阻回路（不留二极管）：I(t) = Up·sin/(R+r) ⇒ Irms = Up/(√2·(R+r))，可与电压半边逐字对照。
+const SI = build({
+  entities: [
+    { type: 'acsource', x: 100, y: 100, props: { Up: 6, f: 1, r: 0.05 } },
+    { type: 'resistor', x: 300, y: 100, props: { resistance: 10 } },
+  ],
+  wires: [[0, 0, 1, 0], [1, 1, 0, 1]],
+});
+SI.run(3);
+const acI0 = SI.get(0);
+const IrmsWant = 6 / (Math.SQRT2 * (10 + 0.05));
+ok(typeof acI0.state.rmsI === 'number' && isFinite(acI0.state.rmsI),
+  `AcSource 自报 rmsI 是有限数：${acI0.state.rmsI.toFixed(6)} A（此前全库无此键）`);
+ok(near(acI0.state.rmsI, IrmsWant, 0.02),
+  `实测有效电流 ${acI0.state.rmsI.toFixed(6)} A ↔ Up/(√2·(R+r)) = ${IrmsWant.toFixed(6)} A（偏差 ${pct(acI0.state.rmsI, IrmsWant)}）`);
+// 与电压半边逐字同构的最硬证据：任何时刻两个缓冲长度都相等
+ok(acI0.state.ibuf.length === acI0.state.buf.length,
+  `电流缓冲与电压缓冲长度逐拍相等：ibuf=${acI0.state.ibuf.length} / buf=${acI0.state.buf.length}（同一窗口 n = ⌈T/dt⌉+1）`);
+ok(near(acI0.state.ibuf[acI0.state.ibuf.length - 1], acI0.state.I, 1e-12),
+  `缓冲末端就是本拍的 state.I：${acI0.state.ibuf[acI0.state.ibuf.length - 1]} ↔ ${acI0.state.I}（同一次 solve 注入，无半拍偏移）`);
+ok(acI0.state.ibufT.length === acI0.state.ibuf.length,
+  `时间戳缓冲同构：ibufT=${acI0.state.ibufT.length}（与 ibuf 同步推移，与 bufT 同形）`);
+
+// 未接线：求解器不注入 I ⇒ 记 0（与「没有电流」一致），不是 NaN / undefined
+const S0 = build({ entities: [{ type: 'acsource', x: 100, y: 100, props: { Up: 6, f: 1 } }] });
+S0.run(1);
+// ⚠ 实测口径订正：未接线时**不是精确 0** —— 孤立 V 支路仍会被 MNA 装配，解出的是
+//   浮点残差级电流（~1e-12）。所以判据只能是「实质为零」，不能是「恒等于 0」：
+//   后者会把求解器的残差当成回归，也就是把断言写死到浮点噪声上。
+//   （顺带这也证明缓冲是**忠实**的：连残差都如实记进 ibuf，没有做平滑或截断。）
+ok(isFinite(S0.get(0).state.rmsI) && Math.abs(S0.get(0).state.rmsI) < 1e-9,
+  `未接线时 rmsI = ${S0.get(0).state.rmsI}（实质为零；孤立 V 支路的 MNA 浮点残差，不是 NaN，也不是"缺失值"）`);
+
+// 能红（**对着真源做**，不是复述一遍逻辑）：人为塞入陈旧样本，再跑一拍 ——
+//   推移必须立刻把它压回窗口长度。若把 while (cbuf.length > n) 那句删掉，
+//   长度会停在 401 ≠ 电压缓冲长度 ⇒ 上面那条「长度逐拍相等」必红。
+const acMut = SI.get(0);
+acMut.state.ibuf = new Array(400).fill(3);
+acMut.state.ibufT = new Array(400).fill(0);
+acMut.state.rmsI = 0;
+SI.tick(DT);
+ok(acMut.state.ibuf.length === acMut.state.buf.length,
+  `能红（对真源）：人为塞入 400 个陈旧样本后跑一拍，被推移压回 ${acMut.state.ibuf.length} = 电压缓冲长度（删掉推移 ⇒ 401 ≠ ${acMut.state.buf.length}）`);
+info(`窗口长度 = ⌈T/dt⌉+1 = ⌈1/1 ÷ (1/120)⌉+1 = ${acMut.state.buf.length}：电流与电压用的是同一个 n`
+  + ' —— 这就是「逐字同构」的可执行定义。');
 
 // ══════════════════════════════════════════════════════════
 console.log(`\n\x1b[1m全部通过：${pass} 项\x1b[0m` + (fail ? `  \x1b[31m失败 ${fail} 项\x1b[0m` : ''));

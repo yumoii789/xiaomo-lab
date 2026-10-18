@@ -30,6 +30,12 @@ export const OP_KINDS = Object.freeze({
   remove: { reversible: true, why: '删除器材（会连带断线 ⇒ 逆动作必须把线接回去）' },
   wire: { reversible: true, why: '接线 `world.connect()`' },
   unwire: { reversible: true, why: '断线 `world.disconnect()`' },
+  // ⚠ 2026-10-17 新增（交互改造 ④-6）。此前器材**拖动**不入栈：
+  //   它走 `interact.js` 直接改 `ent.x/y` ⇒ 绕过了 `setProp()`，
+  //   而 `main.js` 的 `onEntityMoved()` 原是个**空函数**。
+  //   结果是「栈在跑、用户够不着」—— 拖错了只能手动拖回去，撤销按钮对它无效。
+  //   起止坐标由交互层给出（它才是唯一知道"按下时在哪"的一方），这里只负责记录与回放。
+  move: { reversible: true, why: '拖动器材改变位置（起止坐标由交互层给出；不经 setProp）' },
   load: { reversible: false, why: '存档载入 / 预设：不是用户单步动作' },
   reset: { reversible: false, why: '重置全部状态：历史基线被整体换掉' },
   solver: { reversible: false, why: '求解器注入的 I/U/P/R 与派生量：每帧都在变' },

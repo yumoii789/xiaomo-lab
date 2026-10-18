@@ -34,21 +34,27 @@
      · 每条规则后面注明它覆盖 main.css 的哪一行，便于日后对照。
 
    与 styles/touch.css 的共存（它也是别人的写域）：
-     · touch.css 把命中热区钉在 ≥44px：@media (any-pointer:coarse) 里 `.tool-btn, .tb-check
+     · touch.css 把命中热区钉在 ≥44px：@media (any-pointer:coarse) 里 `.tool-btn
        { min-height: 44px }`；@media (pointer:coarse) 里 .theme-dot/.fx-orb/.drawer-x/
        .dock-btn 直接给 44px。（它自己记着那段历史：::after 扩边必须带 pointer-events:none，
        而带了这个属性对命中测试是透明的，实测一个像素都量不到。）
+       ⓘ 原文这里还并列着 `.tb-check`（同一条 min-height:44px）。task-64 已把它摘掉：
+       该控件不存在了（详见下方「实测反例」的结尾）。
      · **跨层共享控件的「最小尺寸」只能有一个属主，属主是 touch.css**（它是热区需求方）。
        理由是一条实测出来的 CSS 事实：`height` 与 `min-height` 相遇是安全的
        （used = max(两者)，所以 32+6 不会压掉 44）；但 **`min-height` 与 `min-height`
        相遇由特异性定胜负** —— 特异度高的一方**直接替换**对方，能把 44px 压成 38px。
-     · 实测反例：**同一处犯过两代，本文件两次都在肇事者位置上。**
-       一代（task-25 之前）：.tb-check 用 `height:38px` 盖掉 touch.css 的 44px
+     · 实测反例：**同一处犯过两代，本文件两次都在肇事者位置上。**（肇事控件 `.tb-check`
+       现已不存在，但这两代教训**照旧适用**于任何「touch.css 给地板、本表想给可读性」的对子。）
+       一代（task-25 之前）：用 `height:38px` 盖掉 touch.css 的 44px
          → 视觉 44→38、真实命中 45→39，探针 ⑥ 抓到；
        二代（task-26 修成 min-height 之后）：touch.css 那版把 44px 改成了 `min-height`，
          于是变成同属性对抗，本表 (0,2,1) > (0,2,0) → **命中 45→39、视觉 44→38，
          4 个受测列（1920/390 × 桌面/触控形态）全红**，由 task-26 的跨层热区矩阵抓到。
-       结论：本表现在**完全不声明 .tb-check 的盒高**，可读性由字号承担，盒子交回触控层。
+       结尾：该控件后来被顶栏「速度档」下拉取代（`#chkSlow` → `#selSpeed`），
+         本表那两条 `.tb-check` 声明随之成为死规则，由 task-64 删除。
+         本表对**在役**控件的方针不变：**不为跨层共享控件声明盒高**，可读性由字号承担，
+         盒子交回触控层；上面的 `.tb-select` 那条因此写的是 min-height（见第 80 行注）。
      · 剩下的两处盒高声明都要能被未来触碰：`.tb-btn` 用 min-height（touch.css 目前对它
        用 height:36px → max 安全 ✓；**若哪天 touch.css 改成 min-height，同一坑会重现**，
        由 tools/display-probe.html 的 ⑨「开 ≥ 关」断言当场报警）；`.tb-select` 同理。
@@ -78,11 +84,17 @@ html.big-read .tb-btn {                                                     /* �
    保留它只为「纯精细指针」环境（any-pointer:coarse 为假，那时它才生效，也正是它的设计意图）。
    属性由 height 改成 min-height：今后 touch.css 若给 .tb-select 也加地板，max 语义保证我不压回去。 */
 html.big-read .tb-select { min-height: calc(32px + var(--br-ctl)); font-size: calc(12.5px + var(--br-fs)) } /* :134-138 */
-/* .tb-check 的盒高**故意不在这里声明**：属主是 touch.css 的 min-height:44px（见文件头）。
-   本表一旦声明同属性，就会因特异性更高把 44 压成 38 —— 实测命中 45→39、视觉 44→38，4 列全红。
-   大屏模式对它的可读性贡献只剩字号（12.5+3 → 15.5px）。 */
-html.big-read .tb-check  { font-size: calc(12.5px + var(--br-fs)) }        /* :144-146，盒高交给 touch.css */
-html.big-read .tb-check input { width: 16px; height: 16px }                 /* :150（13px 的勾选框太小） */
+/* ⚠ 此处原有 `html.big-read .tb-check{font-size…}` 与 `.tb-check input{width/height}` 两条
+   （task-64 删除）：`.tb-check` 控件已不存在（全仓零节点、零创建代码），宿主没了，字号与
+   勾选框尺寸都无从谈起。它被 `.tb-select`（#selPreset / #selSpeed）取代。
+   上面第 80 行那条 `html.big-read .tb-select{min-height…}` 就是接替它的可读性声明
+   —— 注意它写的是 **min-height**，正是为了守住本文件头那句「只抬高、不压低」：
+   今后 touch.css 若给 .tb-select 也加地板，max 语义保证本表不会把它压回去。
+   历史教训（保留，因为它解释了本文件为什么对盒高这么小心）：
+     曾有一版 `html.big-read .tb-check{min-height:38px}`，同属性、特异性更高，
+     把 touch.css 修好的 44px 压成 38（实测命中 45→39、视觉 44→38，4 列全红）。
+     `height` 与 `min-height` 相遇是安全的（used = max）；`min-height` 与 `min-height`
+     相遇才危险 —— 后者赢在特异性上。 */
 
 /* ── 2. 器材栏行：名称、描述、图标盒 ───────────────────── */
 html.big-read .pitem .pi-txt b {                                            /* 覆盖 main.css:229-232 */

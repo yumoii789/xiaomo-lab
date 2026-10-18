@@ -73,6 +73,9 @@ export function derive(entry, pack) {
     h: entry.h ?? base.h,
     ports: entry.ports ? entry.ports.map(p => ({ ...p })) : (base.ports || []).map(p => ({ ...p })),
     fields: entry.fields || base.fields,
+    // 自报统计量（B4 / plans/11 §6.4）：**必须**在这份白名单里，否则器材包既无法声明统计量、
+    // 也无法改它的标签与单位 —— 它是接口的一部分，不是可选优化。
+    stats: entry.stats || base.stats,
     defaults: { ...base.defaults, ...(entry.defaults || {}) },
     state: { ...base.state, ...(entry.state || {}) },
     pack: pack ? pack.id : entry.pack,

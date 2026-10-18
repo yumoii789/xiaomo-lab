@@ -172,6 +172,8 @@ for (const f of ['src/core/entity.js', 'src/core/world.js', 'src/main.js']) deps
 info(`deps: undo.js ${deps['src/core/undo.js'].slice(0, 12)}… entity ${deps['src/core/entity.js'].slice(0, 12)}… world ${deps['src/core/world.js'].slice(0, 12)}… main ${deps['src/main.js'].slice(0, 12)}…`);
 
 const srcEntity = readCode('src/core/entity.js'), srcWorld = readCode('src/core/world.js');
+// move 类断言用（④-6）：交互层是否把起止坐标交出去
+const srcInteract = readCode('src/ui/interact.js');
 let srcMain = readCode('src/main.js');
 if (MAIN_MUT) {
   try { srcMain = MUT_MAIN[RED].apply(srcMain); }
@@ -226,6 +228,43 @@ ok('接线 · 重置清空历史', /this\.undo\.clear\(\);/.test(srcMain));
     rHandler.status === 2 && /HANDLER_RAN/.test(rHandler.stdout || ''));
 }
 ok('登记表 · 三种不可逆种类齐备', ['load', 'reset', 'solver'].every((k) => OP_KINDS[k] && OP_KINDS[k].reversible === false));
+
+// ── move 类：拖动器材入栈（2026-10-17 新增，交互改造 ④-6）──────────────────
+//    本探针此前**61 条里没有一条覆盖 move** —— 而拖动原本根本不入栈
+//    （位置由 interact.js 直接写 ent.x/y、绕过 setProp，且 main.js 的 onEntityMoved 是空函数）。
+{
+  ok('登记表 · move 已登记且可逆', !!(OP_KINDS.move && OP_KINDS.move.reversible === true),
+    `OP_KINDS.move=${JSON.stringify(OP_KINDS.move)}`);
+
+  // 接线①：交互层必须把**起止坐标**交出去 —— 拿不到 from/to 就什么都记不了
+  ok('接线 · interact.js 调 onEntityMoved 时传了起止坐标',
+    /onEntityMoved\?\.\(\s*ent\s*,\s*\{\s*x:\s*ox/.test(srcInteract),
+    'interact.js 里应有 onEntityMoved?.(ent, { x: ox, … }, { x: q.x, … })');
+  // 接线②：main.js 必须真的入栈（原来是空函数）
+  ok('接线 · main.js onEntityMoved 真的 push 一条 move',
+    /kind:\s*'move'/.test(srcMain) && /onEntityMoved\s*\(\s*ent\s*,\s*from\s*,\s*to\s*\)/.test(srcMain),
+    'main.js 里应有 onEntityMoved(ent, from, to) 且其中 kind: \'move\'');
+  // 反面对照：空函数形态必须已经不存在（防"改了注释没改实现"）
+  ok('接线 · main.js 的那个空函数形态已消失',
+    !/onEntityMoved\s*\(\s*\)\s*\{\s*\/\*/.test(srcMain),
+    '不应再有 onEntityMoved() { /* 位置变化由耦合总线… */ } 这种空实现');
+
+  // 机制：一条 move 的逆/重做能把位置原样搬回去
+  {
+    const st = new UndoStack({ limit: 10 });
+    const e = R.create('resistor', 100, 100);
+    const place = (p) => { e.x = p.x; e.y = p.y; };
+    const from = { x: 100, y: 100 }, to = { x: 240, y: 160 };
+    place(to);
+    st.push({ kind: 'move', label: '移动器材', ent: e, undo: () => place(from), redo: () => place(to) });
+    st.undo();
+    ok('机制 · undo 把位置搬回起点', e.x === 100 && e.y === 100, `(${e.x},${e.y})`);
+    st.redo();
+    ok('机制 · redo 把位置搬到终点', e.x === 240 && e.y === 160, `(${e.x},${e.y})`);
+    st.undo();
+    ok('机制 · 再撤销仍能回到起点（可反复）', e.x === 100 && e.y === 100, `(${e.x},${e.y})`);
+  }
+}
 
 // ══ §1 属性改动：撤销/重做（值序列可复现）══
 head('§1 属性改动可撤销 / 可重做');

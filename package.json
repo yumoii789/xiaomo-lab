@@ -19,6 +19,8 @@
     "desktop/main.js",
     "desktop/preload.js",
     "desktop/cli.mjs",
+    "desktop/package.json",
+    "desktop/launch.mjs",
     "server.mjs",
     "README.md",
     "LICENSE"

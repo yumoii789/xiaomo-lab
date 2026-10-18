@@ -38,7 +38,7 @@ body { overscroll-behavior: none; }
 /* 可点元素：告诉浏览器这个元素不做双击缩放，click 就不必等 300ms 判定。
    user-select/-webkit-touch-callout 只加在**控件**上 ——
    正文必须保持可选中（用户要复制读数、报错信息）。 */
-button, a, [role="button"], label.tb-check {
+button, a, [role="button"] {
   touch-action: manipulation;
   user-select: none;
   -webkit-user-select: none;
@@ -160,21 +160,28 @@ button, a, [role="button"], label.tb-check {
      那多出来的 4px 是从邻居身上抢的，不是净收益，所以不做。
      结论：纵向 44px 是结构上真正做得到的（顶栏有 48px 空间），横向 32px 保持不动。
      最后用等量负上下外边距把多出来的 12px 从排版占位里收回去，视觉间距不变。 */
-  .tool-btn, .tb-check { position: relative; }
-  .tool-btn, .tb-check {
+  /* ⓘ 原文这两条是 `.tool-btn, .tb-check`（task-64 精确摘掉 `.tb-check` 那半边）。
+     ⚠ 这一条 `.tool-btn` 的 44px 盒高**不能整条删**：它是 H4「顶栏原生控件命中区
+     高度 ≥44px」那条断言的门槛所系，也是 display.css 文件头那段「只抬高、不压低」
+     跨层契约的当事方之一。摘 `.tb-check` 是精确删除，不是删规则。 */
+  .tool-btn { position: relative; }
+  .tool-btn {
     min-height: 44px;
     margin-top: -6px;
     margin-bottom: -6px;
   }
 
   /* 窄屏顶栏里被 flex 压扁的标签型控件：
-     .tb-check（慢动作）是 inline-flex，主尺寸由里面 13px 的复选框决定（约 16px），
-     默认 flex-shrink:1 会让它在挤的时候被压到 16px 宽 —— 文字「慢动作」仍然画出来，
-     但**命中盒只有 16px 宽**，手指根本按不到，是一处真实的可用性缺陷（实测 16×32）。
+     ⓘ 这条原文是 `.tb-check, .tb-select`（task-64 精确摘掉 `.tb-check` 那半边）。
+       `.tb-check`（慢动作）当年是 inline-flex，主尺寸由里面 13px 的复选框决定（约 16px），
+       默认 flex-shrink:1 会让它在挤的时候被压到 16px 宽 —— 文字「慢动作」仍然画出来，
+       但**命中盒只有 16px 宽**，手指根本按不到，是一处真实的可用性缺陷（实测 16×32）。
+       它后来被顶栏「速度档」下拉取代（#chkSlow → #selSpeed），今天页面上没有这个节点；
+       摘掉半边是精确删除，不是把这条规则删掉。
      .tb-select（预置实验 / 器材搜索）同理，它们的 max-width:190px 在窄屏会跟着缩。
      这里只禁掉「变窄」这一个自由度：不撑大视觉尺寸，改由 #topbar 的横向滑动去承接
      放不下的宽度（那是第 6 节已经选定的窄屏策略，不是把控件藏起来）。 */
-  .tb-check, .tb-select { flex-shrink: 0; }
+  .tb-select { flex-shrink: 0; }
 }
 
 /* ══════════ 5c. 触摸设备的命中地板：四个 <44px 控件（task-34） ══════════
@@ -384,11 +391,12 @@ button, a, [role="button"], label.tb-check {
   .brand-tag, .tb-sep { display: none; }
   #selPreset { max-width: 96px; }
 
-  /* 慢动作这条在窄屏原本没有任何可见文字，靠去猜。窄屏 + 可触摸时把
-     文字与复选框还给它 —— 属可见改动，故与本节其它窄屏观感同门控；
-     顶栏横向滑动承接多出来的宽度，不做截断。 */
-  .tb-check span, #chkSlow { display: revert; }
-  .tb-check { gap: 5px; }
+  /* ⓘ 此处原有两条（task-64 整条删除）：
+       `.tb-check span, #chkSlow { display: revert; }` 与 `.tb-check { gap: 5px; }`，
+     作用是「窄屏 + 可触摸时把『慢动作』复选框的文字还给它」。两个选择器今天都已不存在：
+     `.tb-check` 没有宿主节点；`#chkSlow` 在 k1-kernel 把它换成速度档 select（#selSpeed）
+     之后也从 byId 里消失（溯源见 main.css 与 tools/guard-plugins.mjs 的注释）。
+     留着只会让下一个人以为这两个控件仍在窄屏上被还原显示 —— 属「注释/规则与实现不符」。 */
 }
 
 /* 桌面端（宽 + 细指针）：浮层入口完全不出现，布局与 main.css 一致 */

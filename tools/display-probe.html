@@ -102,7 +102,11 @@ const CASES = [
 const TOUCH_TARGETS = [
   { sel: '.theme-dot', name: '主题圆点', drawer: false },
   { sel: '#topbar .tb-btn', name: '顶栏按钮', drawer: false },
-  { sel: '#topbar .tb-check', name: '顶栏复选', drawer: false },
+  // ⓘ 原文这条是 `#topbar .tb-check`（name「顶栏复选」，task-64 换成 .tb-select）：
+  //   `.tb-check` 已被顶栏「速度档」下拉取代、页面上没有宿主节点，本表只会给它报
+  //   `missing`（实测 n=0）。换成 `.tb-select` 是不丢覆盖 —— 它同样是顶栏里受跨层
+  //   盒高影响的原生控件，在粗指针下由 touch.css 的 `#app select.tb-select{min-height:44px}` 抬到 44。
+  { sel: '#topbar .tb-select', name: '顶栏下拉', drawer: false },
   { sel: '.fx-orb', name: '浮动圆钮', drawer: false },
   { sel: '.dock-btn', name: '抽屉按钮', drawer: false },
   { sel: '.drawer-x', name: '抽屉关闭钮', drawer: true },
@@ -360,9 +364,20 @@ const HM_ROWS = [
   { key: 'btnSettings', sel: '#btnSettings', name: '设置入口按钮' },
   { key: 'tbBtn', sel: '#topbar .tb-btn', name: '顶栏按钮 .tb-btn' },
   { key: 'toolBtn', sel: '#topbar .tool-btn', name: '顶栏工具按钮 .tool-btn' },
-  { key: 'tbCheck', sel: '#topbar .tb-check', name: '顶栏复选 .tb-check' },
+  // ⓘ 原文这里还有一行 `{ key: 'tbCheck', sel: '#topbar .tb-check', … }`（task-64 删除）：
+  //   `.tb-check` 已被顶栏速度档下拉取代，这一行实测 n=0（`hmScan` 走「未渲染」分支、
+  //   连 hitRects 字段都没有），留着只会让行数虚增、并让读 hitRects 的跑手当场崩。
+  //   接替者 `.tb-select` 就在下一行，覆盖没丢。
   { key: 'tbSelect', sel: '#topbar .tb-select', name: '顶栏下拉 .tb-select' },
-  { key: 'checkInput', sel: '#topbar .tb-check input', name: '复选内部 input（仪器标定：故意 <44，矩阵必须报得出来）' },
+  // ⓘ 原文这里还有一行「仪器标定」：`{ key: 'checkInput', sel: '#topbar .tb-check input',
+  //   name: '复选内部 input（仪器标定：故意 <44，矩阵必须报得出来）' }`（task-64 删除）。
+  //   它原本验证的是【这张表报得出**故意小于 44px 的真实元素**，不会把一切读成 ≥44】——
+  //   也是「这张表不是恒绿表」那条元断言的活证据。宿主 `.tb-check input`（13px 复选框）
+  //   今天不存在（实测 n=0、字段不全），标定物没了，这条断言就只剩一句无法产生差别的话。
+  //   该角色现由**同一份矩阵里的其它真实 <44 读数**承担（无需另立标定物）：
+  //   `.theme-dot` 16~18px、`.tool-btn` 33px、`.fx-orb` 38px —— 都 <44 且被如实报出。
+  //   ⚠ 前提：一旦这些读数全部 ≥44（说明触控/跨层地板已铺满），本表就失去「能报出小热区」
+  //   的活证据，那时必须重新补一个标定物。把前提写在这里，供下一个人检查。
   { key: 'themeDot', sel: '.theme-dot', name: '主题圆点 .theme-dot' },
   { key: 'fxOrb', sel: '.fx-orb', name: '浮动圆钮 .fx-orb' },
   { key: 'dockBtn', sel: '.dock-btn', name: '窄屏抽屉入口 .dock-btn' },
@@ -399,7 +414,14 @@ const hmScan = async (rows) => {
   const out = [];
   for (const row of rows) {
     const els = [...D.querySelectorAll(row.sel)];
-    if (!els.length) { out.push({ key: row.key, sel: row.sel, name: row.name, n: 0, minHitH: 0, verdict: '未渲染' }); continue; }
+    // ⚠ 零元素行必须给出与其它行**同构**的字段：跑手会读 hitRects/visualH/maxHitH，
+    //   缺字段会让它在 `.join()` 处当场崩（task-64 之前 `.tb-check` 那行就是这样崩掉整轮的）。
+    //   值取 0 / 空数组：既表达「这里没有东西可量」，也不冒充任何尺寸。
+    if (!els.length) {
+      out.push({ key: row.key, sel: row.sel, name: row.name, n: 0, scrolled: false,
+        minHitH: 0, maxHitH: 0, visualH: 0, hitRects: [], dens: [], offScreen: false, verdict: '未渲染' });
+      continue;
+    }
     let scrolled = false;
     const r0 = els[0].getBoundingClientRect();
     if (r0.width > 0 && (r0.left < 0 || r0.right > W.innerWidth)) {
@@ -435,7 +457,22 @@ window.__probeHitMatrix = async (w, h, form, sabotage) => {
   res.sabotage = null;
   if (sabotage) {
     injected = D.createElement('style');
-    injected.textContent = 'html.big-read .tb-check{min-height:38px}';
+    // ⓘ 注入物在 task-64 换过（对象 + 特异性），完整交代：
+    //   历史原物 `html.big-read .tb-check{min-height:38px}` 那时能制造差别，是因为
+    //   touch.css 给 `.tb-check` 的命中地板是 `min-height:44px`（(0,1,0)），
+    //   这条 (0,2,1) 同属性声明跟在本层之后 ⇒ 赢 ⇒ 44 被压回 38（实测命中 45 → 39）。
+    //   今天两个前提都变了：
+    //     ① `.tb-check` 已无宿主节点 ⇒ 原物对**任何被扫元素都不生效**。task-64 实测：
+    //        注入后与撤除后的九个读数**逐字相同** ⇒「这张表不是恒绿表」已失去证据；
+    //     ② 接替者 `.tb-select` 的地板被 touch.css 用 `#app` 前缀抬到 (1,1,1)
+    //        （`#app select.tb-select{min-height:44px}`）—— 那正是当年这次回归之后补上的
+    //        **结构性防护**。所以复刻「同属性压低」必须把特异性也抬到压得过它，
+    //        否则注入永远量不出差别（又成了一条恒不发生差别的假自证）。
+    //   现物 `html.big-read #app select.tb-select{min-height:38px}`（(1,2,2)）：
+    //   同属性 min-height、同值 38px、跟在本层之后，压得过 (1,1,1) 的地板。
+    //   ⚠ 它能量出差别的前提是**关态确实有 44px 地板**（`any-pointer: coarse` 为真）；
+    //   实测媒体值每次照打在 res.media 里，别当成恒真。
+    injected.textContent = 'html.big-read #app select.tb-select{min-height:38px}';
     D.head.appendChild(injected);
     res.sabotage = injected.textContent;
   }
@@ -636,8 +673,18 @@ window.__probeHitMatrix = async (w, h, form, sabotage) => {
       '⑧ 对照有效性：原文里那段脚本恰好 1 处、对照 HTML 里 0 处（只差这一段）', { inRaw: hits(raw), inCut: hits(cut) });
     chk(!!B && B.f0.indexOf('big-read') < 0,
       '⑧ 无内联脚本（对照）：第 1 帧确实没有 .big-read —— 这就是被那段脚本消掉的那一次闪烁', B && { f0: B.f0 });
-    chk(!!B && B.firstOn >= 1,
-      '⑧ 无内联脚本（对照）：class 是开跑之后才出现的（挂载期仍应用一次，没有回归）', B && { firstOn: B.firstOn, frames: B.frames, alive: B.alive });
+    // ⚠ 2026-10-17 口径修正（原判据 `B.firstOn >= 1`，见下）：
+    //   原判据要「class 出现在第 N 帧（N≥1）」，即靠 rAF **帧序列**定位挂载时机。
+    //   但挂载本身是 module 加载 + 插件初始化，**晚于多少帧是不确定的**：
+    //     实测本次 frames=1（headless 下 srcdoc iframe 的 rAF 几乎没跑），
+    //     task-64 那次 frames=24 —— 两次 firstOn 都是 -1，而 alive 都是 true。
+    //   ⇒ firstOn 测的是「帧跑得够不够多」，不是「挂载期有没有应用」。
+    //   ⇒ 真正要证的是这一对：**首帧确实没有**（上一条断言，B.f0 不含 big-read）
+    //     ＋ **挂载期确实应用了一次**（本条的 alive）。这两条合起来就是完整证明，
+    //     不需要、也不该依赖帧计数。撤掉过渡、不再应用一次时 alive 会变 false ⇒ 照样能红。
+    chk(!!B && B.alive === true,
+      '⑧ 无内联脚本（对照）：挂载期仍应用一次 .big-read（alive=true，没有回归）',
+      B && { alive: B.alive, firstOn: B.firstOn, frames: B.frames });
     chk(!!C && C.mode0 === 'light' && C.m0 === 'light',
       '⑧ 主题脚本零回归：预设浅色 → 解析期与首帧都是 light', C && { mode0: C.mode0, m0: C.m0 });
     chk(!!Dt && Dt.mode0 === 'dark' && Dt.m0 === 'dark',

@@ -172,7 +172,16 @@ const fourKeyRetired = (e, o, n) => typeof e.circuitBranch !== 'function'
   && n.every(([k]) => !(k in BLIND))
   && o.every(([k]) => {
     const t = (STATE_LABELS[(e.def && e.def.cat) || ''] || {})[BLIND[k]];
-    return !!t && t[0] !== k;
+    // 条件④：该键在本域被定义成**别的物理量**。两条**等价**证据任取其一 ——
+    //   a) 域表里有这个键、且标签不是域盲标签（**退役前**的情形）；
+    //   b) 该器材**已声明 `stats`**（**退役后**该分类域表可能整张撤掉，如声学）——
+    //      此时「这些键在这件器材上不是电学量」由器材自己的声明承载，而条件③
+    //      （新行里一个域盲标签都不剩）继续钉住「误标确实退场了」这件事。
+    // ⚠ 不可只留 b)：`lever`（力学）**没有** stats，它的豁免只能靠 a) ——
+    //    `inspector-stats-probe.mjs` §⑧ 的 `mut-table-def` 变异体正是撤掉力学表的 `I`
+    //    定义使 a) 失效，那条路必须保持能动（本改动后它仍指向 `lever`，故不受影响）。
+    return (!!t && t[0] !== k)
+      || (Array.isArray(e.def && e.def.stats) && e.def.stats.length > 0);
   });
 
 /** 真正跑 Inspector.updateLive()，再把「实时读数」里的 k/v 对读回来 */

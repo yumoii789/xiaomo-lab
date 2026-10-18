@@ -124,6 +124,21 @@ const alcoholDef = {
     { k: 'lit', label: '点燃', type: 'checkbox', text: '正在燃烧' },
     { k: 'power', label: '热功率', type: 'range', min: 40, max: 600, step: 10, unit: 'W' },
   ],
+  // ── B4 第 2 步（最后一处）：面板那处 `if (e.type === 'alcohollamp')` 已搬到这里（plans/11 §6.3）──
+  //    逐字等价：
+  //      `e.props.lit ? '燃烧中' : '未点燃'` ⇒ 字符串三态；
+  //      `st.target ? [world.get(st.target)?.def.name || '-'] : 无行` ⇒ 用 **ctx 视野**（plans/11 §6.6）。
+  //    ⚠ 这里**不**把对象名缓存进 state：`state.target` 已是真源，再存一份名字就成了第二个真源（D44）。
+  //      「取不到名字」时给 '-'、**没有对象**时整行不出现 —— 与迁移前两种情形分别对应。
+  stats: [
+    { label: '状态', read: (e) => (e.props.lit ? '燃烧中' : '未点燃') },
+    { label: '加热对象', read: (e, ctx) => {
+      const t = e.state.target;
+      if (!t) return undefined;                      // 没有对象 ⇒ 整行不出现（原 `if (st.target)`）
+      const o = ctx && ctx.world ? ctx.world.get(t) : null;
+      return (o && o.def && o.def.name) || '-';      // 原 `?.def.name || '-'`
+    } },
+  ],
   create: (x, y) => new AlcoholLamp(alcoholDef, x, y),
 };
 DEFS.push(() => define(alcoholDef));

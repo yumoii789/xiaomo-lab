@@ -324,6 +324,19 @@ const forkDef = {
     { k: 'f', label: '频率', type: 'range', min: 200, max: 1000, step: 1, unit: 'Hz' },
     { k: 'amp', label: '振幅', type: 'range', min: 0.2, max: 2, step: 0.1, unit: 'a.u.' },
   ],
+  // ── B4 第 3 步「替换」· 声学首个试点（plans/11 §6.3 第 3 步）──
+  //    ⚠ 声明必须按**跑过 step 之后的运行时 state 键**来写，**不是** `def.state` 的初值：
+  //      初值只有 `fbeat/Tbeat/raster/windowS`，而运行时还有 `dist`（与配对音叉距离）与
+  //      `df`（频率相对差）—— 这两把尺子**只在 step 里生成**。照初值写会**丢两行**，
+  //      而丢行在面板上就是「量没了」，属最严重的一类回归（本探针 §⑥ 的 `dropped` 就是专门抓它的）。
+  //    标签/单位一律照抄 `STATE_LABELS.声学`；**不写 digits** ⇒ 落回 fmtLive，与兜底同一条口径。
+  //    （`Tbeat` 运行时为 Infinity、`raster` 是对象 ⇒ 兜底本来就不收这两键，此处同样不声明。）
+  stats: [
+    { label: '拍频', unit: 'Hz', read: (e) => e.state.fbeat },
+    { label: '观测窗长', unit: 's', read: (e) => e.state.windowS },
+    { label: '与配对音叉距离', unit: 'm', read: (e) => e.state.dist },
+    { label: '频率相对差（比值）', read: (e) => e.state.df },
+  ],
   create: (x, y) => new TuningFork(forkDef, x, y),
 };
 DEFS.push(() => define(forkDef));
@@ -412,6 +425,20 @@ const tubeDef = {
     { k: 'Q', label: '品质因数 Q', type: 'range', min: 5, max: 200, step: 5, unit: '' },
     { k: 'temp', label: '气温', type: 'range', min: 0, max: 40, step: 1, unit: '℃' },
   ],
+  // ── B4 第 3 步 · 声学试点（**8 行**，按运行时 state 序；初值只有前 5 个键）──
+  //    逐字取自 `STATE_LABELS.声学`。⚠ 声学表**恰好 8 项** ⇒ 与兜底 `LIVE_FALLBACK_MAX = 8` 边界重合，
+  //    所以这一件新旧行数相同、也是本分类里**唯一**能真正做到「逐字相同」的一件之一。
+  //    ⚠ fields 里另有 `n:谐次 n`，但那一行的真源是 `state.nUsed`（「参与谐次 n」来自域表）⇒ 不冲突。
+  stats: [
+    { label: '波长', unit: 'm', read: (e) => e.state.lambda },
+    { label: '基频', unit: 'Hz', read: (e) => e.state.f0 },
+    { label: '声速', unit: 'm/s', read: (e) => e.state.v },
+    { label: '响应幅度', read: (e) => e.state.amp },
+    { label: '参与谐次 n', read: (e) => e.state.nUsed },
+    { label: '周期', unit: 's', read: (e) => e.state.T },
+    { label: '反推声速', unit: 'm/s', read: (e) => e.state.vBack },
+    { label: '峰位相对偏差（比值）', read: (e) => e.state.dPeak },
+  ],
   create: (x, y) => new ResonanceTube(tubeDef, x, y),
 };
 DEFS.push(() => define(tubeDef));
@@ -483,6 +510,26 @@ const dbDef = {
   fields: [
     { k: 'Lw', label: '声源声功率级 Lw', type: 'range', min: 40, max: 130, step: 1, unit: 'dB' },
     { k: 'r', label: '测量距离', type: 'range', min: 0.1, max: 50, step: 0.1, unit: 'm' },
+  ],
+  // ── B4 第 3 步 · 声学试点（**11 行**，运行时 state 序）──
+  //    ⚠ 这一件是本分类里**唯一会改变行数**的：运行时 11 个数值键 > `LIVE_FALLBACK_MAX = 8`，
+  //      旧路径（兜底）只出 8 行 + 一行 `… 还有 N 项读数` 占位；而 stats 路径**不受该上限约束**
+  //      （`inspector.js:466` 的截断在兜底分支内），于是 11 行全部上屏 ——
+  //      **信息更完整**，是有意的行为变化，已在 `plans/11 §6.3` 与探针 §㉓/§⑥ 登记。
+  //    ⚠ 「声源声功率级 Lw」的标签带后缀、单位 dB 来自**器材自己的 fields**（`inspector.js:461` 处
+  //      fields 优先于域表），不是 `STATE_LABELS.声学.Lw` 的 `['声源声功率级','dB']` ⇒ 照 fields 写。
+  stats: [
+    { label: '声强', unit: 'W/m²', read: (e) => e.state.I },
+    { label: '声压级', unit: 'dB', read: (e) => e.state.L },
+    { label: '解析声压级', unit: 'dB', read: (e) => e.state.LAnalytic },
+    { label: '声源声功率级 Lw', unit: 'dB', read: (e) => e.state.Lw },
+    { label: '声源功率', unit: 'W', read: (e) => e.state.P },
+    { label: '表针位置（0–1）', read: (e) => e.state.needle },
+    { label: '距离加倍衰减', unit: 'dB', read: (e) => e.state.drop },
+    { label: '理论衰减', unit: 'dB', read: (e) => e.state.theory },
+    { label: '两路声压级差', unit: 'dB', read: (e) => e.state.dL },
+    { label: '两倍距离处声压级', unit: 'dB', read: (e) => e.state.L2 },
+    { label: '阈值距离', unit: 'm', read: (e) => e.state.rThresh },
   ],
   create: (x, y) => new SoundLevel(dbDef, x, y),
 };
@@ -588,6 +635,22 @@ const waveDef = {
     { k: 'a3', label: '振幅 A₃', type: 'range', min: 0, max: 2, step: 0.1, unit: 'a.u.' },
     { k: 'mode', label: '显示', type: 'select', options: [['sum', '合成'], ['beat', '拍'], ['standing', '驻波']] },
     { k: 'windowMs', label: '窗口', type: 'range', min: 5, max: 500, step: 5, unit: 'ms' },
+  ],
+  // ── B4 第 3 步 · 声学试点（**10 行**，运行时 state 序；初值只有 `raster/fMeas/fAuto/fIn/pp`）──
+  //    ⚠ 与 `soundlevel` 同类：运行时 10 个数值键 > `LIVE_FALLBACK_MAX = 8`，旧路径只出 8 行 + 占位行；
+  //      stats 路径不受上限约束 ⇒ 10 行全出（有意放开截断，见 `plans/11 §6.3`）。
+  //    ⚠ `windowS` 在这里与 `tuningfork` 同名同义（声学表的「观测窗长」）—— 两件器材共用同一张域表。
+  stats: [
+    { label: '实测频率', unit: 'Hz', read: (e) => e.state.fMeas },
+    { label: '自相关频率', unit: 'Hz', read: (e) => e.state.fAuto },
+    { label: '输入频率', unit: 'Hz', read: (e) => e.state.fIn },
+    { label: '峰峰值', read: (e) => e.state.pp },
+    { label: '观测窗长', unit: 's', read: (e) => e.state.windowS },
+    { label: '分量数', read: (e) => e.state.n },
+    { label: '载波频率', unit: 'Hz', read: (e) => e.state.fCarrier },
+    { label: '分量差（拍频）', unit: 'Hz', read: (e) => e.state.beat },
+    { label: '拍周期', unit: 's', read: (e) => e.state.Tbeat },
+    { label: '过零测频偏差（比值）', read: (e) => e.state.dZc },
   ],
   create: (x, y) => new Waveform(waveDef, x, y),
 };

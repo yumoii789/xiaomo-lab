@@ -223,33 +223,48 @@ export class Inspector {
       rows.push(['状态', '已烧毁']);
       if (typeof st.brokenReason === 'string' && st.brokenReason) rows.push(['烧毁原因', st.brokenReason]);
     }
-    if (e.type === 'thermistor') {
-      rows.push(['感知温度', (st.temp ?? 25).toFixed(1) + ' ℃']);
-      rows.push(['温度来源', st.source || '室温']);
-      const R = e.resistanceNow ? e.resistanceNow() : st.R;
-      rows.push(['当前阻值', fmtR(R)]);
+
+    // ── B4 器材自报统计量（plans/11 §6.3 / §6.5）──────────────────────────────
+    //    ⚠ 位置**必须在四键与烧毁 filter 之后、所有 type 专属分支之前**。
+    //       这不是风格问题，是**行顺序契约**：迁移前每条器材的读数行就写在各自 type 分支所在的位置上，
+    //       而 `inspector-probe.mjs` 的「旧行必须是新行的前缀（只许尾部追加）」判据会**逐件核对顺序**。
+    //       本循环若留在文件后段（它最初被写下的位置），已迁器材的行就会跑到 B5「实时/瞬时」、
+    //       电表、交流源等分支**之后** ⇒ 旧行不再是前缀 ⇒ 逐件对照立刻红。
+    //       2026-10-17 实际发生过一次，而且是 `inspector-probe` 抓到的：本探针当时只按**标签取值**、
+    //       **不看顺序**，所以整批迁移都「绿着」通过了，盲区直到 thermistor 那批才被外部判据暴露。
+    //       放在这里（烧毁 filter 之后）之后：对已迁器材，stats 行与它们各自原分支的位置**等价**；
+    //       对未声明 stats 的器材，本循环一行都不加 ⇒ 零影响。
+    //    `read(e)` **每次现取**（与 data.js 的取值闭包、updatePosition 的 read 同一条口径，§6.2 约束 1）。
+    //    ⚠ 本步仍**不碰** `picks` / `pickFor`：把 slug 交给器材声明是第 2 步之后的收尾。
+    //    `read` 的第二个参数是**视野** `ctx = {app, world}`（plans/11 §6.6）：供需要看别的器材的读数用
+    //    （如 alcohollamp 的「加热对象」要 world.get(target).def.name）。只声明 (e) 的旧声明完全不受影响。
+    const ctx = { app: this.app, world: this.app && this.app.world };
+    for (const s of (e.def && e.def.stats) || []) {
+      const v = s.read(e, ctx);
+      if (typeof v === 'string') { rows.push([s.label, v]); continue; }
+      // ⚠ `fmt` 必须在**有限性检查之前**：它正是用来表达「取不到也有话说」的那一支
+      //    （`fmtR(NaN)` ⇒ '∞'）。若先按 !Number.isFinite 跳过，'∞' 就永远上不了屏 ——
+      //    而迁移前它是上屏的（`fmtR(R)` 直接拼进 rows）。
+      if (s.fmt) { rows.push([s.label, s.fmt(v)]); continue; }
+      if (!Number.isFinite(v)) continue;
+      rows.push([s.label, fmtBy(s.digits, v) + (s.unit ? ' ' + s.unit : '')]);
     }
-    if (e.type === 'motor') {
-      rows.push(['运转状态', st.on ? '转动中' : '停止']);
-      rows.push(['转速', Math.round(st.omega || 0) + ' rad/s']);
-    }
-    if (e.type === 'balance') {
-      rows.push(['秤上质量', (st.mass || 0).toFixed(2) + ' g']);
-      if (st.onPlate) rows.push(['称量对象', st.onPlate]);
-    }
-    if (e.type === 'phmeter') rows.push(['测得 pH', (st.pH ?? 7).toFixed(2)]);
-    if (e.type === 'phpaper') rows.push(['测得 pH', st.pH === undefined ? '未浸取' : st.pH.toFixed(1)]);
-    if (e.type === 'thermometer') rows.push(['测得温度', (st.temp ?? 25).toFixed(2) + ' ℃']);
-    if (e.type === 'alcohollamp') {
-      rows.push(['状态', e.props.lit ? '燃烧中' : '未点燃']);
-      if (st.target) rows.push(['加热对象', this.app.world.get(st.target)?.def.name || '-']);
-    }
-    if (e.type === 'electrode') {
-      const m = e.props.metal;
-      rows.push(['电极材料', m === 'graphite' ? '石墨（惰性）' : m]);
-      rows.push(['标准电极电势', e.probe && e.probe.E0 !== null && e.probe.E0 !== undefined
-        ? (e.probe.E0 > 0 ? '+' : '') + e.probe.E0.toFixed(2) + ' V' : '不参与原电池']);
-    }
+
+    // `thermistor` 的三行已迁到**器材自报**（`electrical.js` 的 thermistorDef.stats）—— plans/11 §6.3 第 2 步。
+    // 它是电路支路 ⇒ 四键先出、stats 行紧随其后，顺序与迁移前一致。
+    // 「当前阻值」走新接口字段 `fmt: fmtR`（自适应单位 Ω/kΩ/MΩ），接口缺口三已关闭，见 plans/11 §6.5。
+    // `motor` 的「运转状态」「转速」已迁到**器材自报**（`electrical.js` 的 motorDef.stats）
+    // —— plans/11 §6.3 第 2 步。它是电路支路 ⇒ 求解器四键先出、stats 行紧随其后，顺序与迁移前一致。
+    // `balance` / `phmeter` / `phpaper` 的读数行已迁到**器材自报**
+    // （`lab.js` 的 balanceDef / phDef / paperDef）—— plans/11 §6.3 第 2 步。
+    // 三处的 stats 行都在**兜底之前**，所以行数与顺序与迁移前一致。
+    // `thermometer` 的「测得温度」已迁到**器材自报**（`lab.js` 的 `thermoDef.stats`）—— plans/11 §6.3 第 2 步。
+    // 这里刻意**不留**空行占位：删掉分支后，行数与顺序由 stats 行在**兜底之前**顶住（⑬ 组已证明该机制）。
+    // `alcohollamp` 的两行已迁到**器材自报**（`heating.js` 的 alcoholDef.stats）—— plans/11 §6.3 第 2 步。
+    // 这一处带出了第 4 个接口缺口：「加热对象」要报**另一件器材**的名字 ⇒ `read` 增第二参数 `ctx`
+    // （视野 {app, world}），见 plans/11 §6.6。**至此八处类型分支全部迁完。**
+    // `electrode` 的两行已迁到**器材自报**（`lab.js` 的 electrodeDef.stats）—— plans/11 §6.3 第 2 步。
+    // 「标准电极电势」带 `+` 符号前缀，digits/unit 表达不了 ⇒ 由 read 直接返回**字符串**。
 
     // ── 电子 / 信号器材的读数行（新增） ──
     //    为什么必须逐个显式写：这批器材都是**电路支路**，求解器每帧注入 I/U/P/R ⇒ 上面的四键
@@ -396,6 +411,14 @@ export class Inspector {
     if (e.type === 'acsource') {
       const wired = wiredPortsOf(this.app, e).size >= 2;
       rows.push(['瞬时电压 u(t)', wired && typeof st.U === 'number' ? fmtV(st.U) : SIGNED_NA]);
+      // B2 的**电流**半边（T-03）：真源由 T-03a 补在器材侧（AcSource 的逐拍电流缓冲 + state.rmsI），
+      //   面板只**消费**、不重推（plans/11 §4.12 的口径：器材自报，面板不另算一份）。
+      //   与上面那行同路走**追加行**：四行现在是 u(t) / i(t) / U_rms / I_rms，**禁止合并**。
+      //   ⚠ 未接线判据必须用**接线真源**（wiredPortsOf ≥ 2），不能拿 rmsI === 0 当"没接线"：
+      //     实测未接线时 rmsI 是 MNA 的浮点残差（~1e-12，不是精确 0）⇒ 用零值判定会把"没接线"
+      //     误判成"有读数"，于是上屏一个 4e-12 A 的幻影零。
+      rows.push(['瞬时电流 i(t)', wired && typeof st.I === 'number' ? fmtA(st.I) : SIGNED_NA]);
+      rows.push(['有效电流 I_rms', wired && typeof st.rmsI === 'number' ? fmtA(st.rmsI) : SIGNED_NA]);
     }
     // ── 测量仪表（C1：名义量程 + 示数）──
     //    为什么必须显式写：三件电表都是**电路支路**（circuitBranch()）⇒ 上面四键永远先凑出行 ⇒ 底下兜底
@@ -422,6 +445,8 @@ export class Inspector {
     //    触发条件**只用 rows.length === 0**：现有器材要么走通用四键（I/U/P/R）、要么走
     //    type 专属、要么是容器（整块容器面板），都进不到这里，所以回归面收敛到零；
     //    而 T/E/MA/eta 这类键（力学/热学/光学）正好靠它第一次露出来。
+    //    ⚠ 自 B4 起「器材自报的 stats 行」也算**渲染出行** ⇒ 声明了 stats 的器材不再落到兜底 ——
+    //      这正是第 2 步能逐条搬走类型分支却保持逐字相同的原因（见上方 B4 块的位置说明）。
     if (!rows.length) {
       const fields = (e.def && e.def.fields) || [];
       const cat = (e.def && e.def.cat) || '';
@@ -690,65 +715,103 @@ export const POS_NA = '—（未定位）';
  * 显示原始键名且不给单位 —— 宁可少写，不可写错。
  */
 export const STATE_LABELS = {
-  力学: {
-    t: ['时间', 's'], v: ['速度', 'm/s'], s: ['位移', 'm'], a: ['加速度', 'm/s²'], x: ['位置', 'm'],
-    h: ['高度', 'm'], T: ['周期', 's'], E: ['机械能', 'J'], E0: ['初始机械能', 'J'], drift: ['能量漂移', '%'],
-    p: ['动量', 'kg·m/s'], th: ['摆角', 'rad'], theta: ['转角', 'rad'], w: ['角速度', 'rad/s'],
-    alpha: ['角加速度', 'rad/s²'], tau1: ['左力矩', 'N·m'], tau2: ['右力矩', 'N·m'], net: ['合力矩', 'N·m'],
-    I: ['转动惯量', 'kg·m²'], N: ['正压力', 'N'], f: ['摩擦力', 'N'], fsMax: ['最大静摩擦', 'N'],
-    weight: ['重量', 'N'], W: ['重物重量', 'N'], rope: ['放出绳长', 'm'], maxv: ['最大速度', 'm/s'],
-    n: ['承重绳段数', ''], need: ['所需拉力', 'N'], eta: ['效率', ''], MA: ['机械利益', ''],
-    collided: ['碰撞次数', ''], lifts: ['提升次数', ''],
-  },
-  热学: {
-    t: ['加热时长', 's'], Q: ['吸放热', 'J'], surf: ['表面温度', '℃'], heatOut: ['散热功率', 'W'],
-    Tf: ['末温', '℃'], T1: ['高温源', '℃'], T2: ['低温源', '℃'], flux: ['热流', 'W'],
-    fluxBar: ['棒内热流', 'W'], mid: ['中点温度', '℃'], mIce: ['冰质量', 'g'], melted: ['已熔化', 'g'],
-    Qlatent: ['熔化潜热', 'J'], waterT: ['水温', '℃'], steam: ['已汽化', 'g'], bp: ['沸点', '℃'],
-    d: ['球径', 'mm'], dL: ['伸长量', 'mm'], Tc: ['当前温度', '℃'],
-  },
-  光学: {
-    lambda: ['波长', 'nm'], thetaI: ['入射角', '°'], thetaR: ['反射角', '°'], thetaT: ['折射角', '°'],
-    spread: ['谱宽', '°'],   // 器材自己在画布上写的就是「谱宽 xx°」，面板沿用它的词
-  },
-  电磁: {
-    // 条形磁铁（两极几何；画布上写的单位就是 px）
-    half: ['磁极半距', 'px'], poleGap: ['两极间距', 'px'],
-    // 指南针（磁针指向；deflection 是磁针相对本体刻度的偏转）
-    needleDeg: ['磁针指向', '°'], srcCount: ['场源数', '个'],
-    deflection: ['相对本体偏转', '°'], srcDist: ['最近磁体距离', 'px'],
-    // 正负电荷
-    sign: ['带电符号', ''], qAbs: ['电量大小 |q|', 'µC'], lineCount: ['方向箭头支数', '支'],
-    // 检验电荷（受力只有方向，没有大小 —— 见 electromagnets.js 文件头的口径说明）
-    nRegions: ['所在场区数', '个'], nCharges: ['附近电荷数', '个'], forceDeg: ['受力方向', '°'],
-    // 匀强电场（fieldDeg 是场向的世界角）
-    fieldDeg: ['场向角', '°'],
-    // 只收兜底口径真读得到的键：inspector.js:373 只收有限数字，所以对象型的 axis / poleN / poleS /
-    // dir / force、布尔与文案型的 ambient / inField / fieldDefined / symbol / outOfPage 都到不了这张表；
-    // charge 的 q 由器材自己的 fields 供标签（:377 先于本表），不在此重复。
-    // 匀强磁场两个 state 键都不是数字，面板显示「状态 · 无读数」—— 它确实没有读数可给。
-  },
-  声学: {
-    // 音叉（拍频）
-    f1: ['频率 f₁', 'Hz'], f2: ['频率 f₂', 'Hz'], fbeat: ['拍频', 'Hz'], Tbeat: ['拍周期', 's'],
-    df: ['频率相对差（比值）', ''], dist: ['与配对音叉距离', 'm'], mateId: ['配对音叉', ''],
-    windowS: ['观测窗长', 's'], envPeriodMeas: ['实测包络周期', 's'], raster: ['波形栅格', ''],
-    // 共鸣管（共振）
-    f0: ['基频', 'Hz'], nUsed: ['参与谐次 n', ''], rejected: ['谐次被取整', ''],
-    v: ['声速', 'm/s'], lambda: ['波长', 'm'], T: ['周期', 's'], vBack: ['反推声速', 'm/s'],
-    amp: ['响应幅度', ''], peak: ['共振峰', ''], dPeak: ['峰位相对偏差（比值）', ''],
-    atResonance: ['是否共振', ''],
-    // 分贝计（声压级）
-    Lw: ['声源声功率级', 'dB'], P: ['声源功率', 'W'], I: ['声强', 'W/m²'], L: ['声压级', 'dB'],
-    LAnalytic: ['解析声压级', 'dB'], dL: ['两路声压级差', 'dB'], L2: ['两倍距离处声压级', 'dB'],
-    drop: ['距离加倍衰减', 'dB'], theory: ['理论衰减', 'dB'], rThresh: ['阈值距离', 'm'],
-    needle: ['表针位置（0–1）', ''],
-    // 波形显示（合成与测频）
-    n: ['分量数', ''], fMeas: ['实测频率', 'Hz'], fAuto: ['自相关频率', 'Hz'],
-    fCarrier: ['载波频率', 'Hz'], beat: ['分量差（拍频）', 'Hz'], fAutoUsable: ['自相关可用', ''],
-    fIn: ['输入频率', 'Hz'], dZc: ['过零测频偏差（比值）', ''], dAc: ['自相关测频偏差（比值）', ''],
-    pp: ['峰峰值', ''], envX: ['驻波包络', ''],
-  },
+  // ══ `力学` 表已退役（B4 第 3 步第 2 例，2026-10-17）═════════════════════════════════
+  // 力学 8 件（小车 / 自由落体管 / 摩擦块 / 斜面 / 弹簧振子 / 单摆 / 滑轮组 / 杠杆）的读数
+  // 现在全部由 `def.stats` **自报**。判据仍是**逐字相同**（`inspector-stats-probe` §⑥ 在跑过
+  // step 的实体上证明未丢量 / 未改写 / 未变序；报告 §二十 / §二十一）。
+  //
+  // 与声学退役（§19.6）同一条纪律：**先解耦，再撤表**。此处解耦的条件④ b) 分支已经就位，
+  // 唯二需要点名的两件事：
+  //   ① `lever` 的 `I` 在本域是**转动惯量**（kg·m²），不是电流 —— 它是豁免条件④里**唯一**
+  //      曾靠域表（分支 a）成立的那件器材。本表撤掉后 a) 对力学永久消失，`lever` 改由 b)
+  //      （已声明 stats）承接；`§⑧` 的变异体也相应从「改本表 I 的定义」改造成「掐掉 stats 消费」，
+  //      否则那条变异体会**失去靶点而悄悄失效**。
+  //   ② 两处**有意的**行为变化：`pulley` 运行时 11 个数值键 > `LIVE_FALLBACK_MAX = 8`，
+  //      旧路径截成 8 行 + `… 还有 3 项读数` 占位；`stats` 路径不受该上限约束 ⇒ 11 行全出
+  //      （放出「效率 / 机械利益 / 提升次数」）。另 `springbob.tPrev` 被 `STATE_HIDDEN` 隐藏，
+  //      两路径都不显示，口径未变。
+  //
+  // 原表备查（如需回滚，整段粘回 `力学:` 键即可）：
+  //   t/v/s/a/x/h/T/E/E0/drift/p/th/theta/w/alpha/tau1/tau2/net/I/N/f/fsMax/
+  //   weight/W/rope/maxv/n/need/eta/MA/collided/lifts
+  // 「通用」表**必须保留**：各分类认不出的键都落到那里（见上方注释）。
+  // ══ `热学` 表已退役（B4 第 3 步第 3 例，2026-10-17）═════════════════════════════════
+  // 热学**真正读域表**的 4 件（加热板 / 热传导棒 / 沸腾装置 / 热膨胀球环）已由 `def.stats` 自报，
+  // 判据仍是**逐字相同**（`inspector-stats-probe` §⑥ 在跑过 step 的实体上证明；报告 §二十五）。
+  //
+  // ⚠ 本分类**另有 2 件不在此列**：`calorimeter`（量热器）与 `icebath`（冰水浴）。
+  //   它们走的是**器皿面板**（下方 `if (e.vessel)` 一带），那条路径在兜底之前就已 `rows.push`
+  //   ⇒ `if (!rows.length)` 永不成立 ⇒ **从不读 `STATE_LABELS`**。
+  //   实测证据：`calorimeter.state` 只有 `{Tf,T1,T2}`，面板却出「液体体积 / 温度 / pH」。
+  //   **⇒ 给它们写 `stats` 是有害的**：`stats` 行在四键之后产生、器皿行更在后面，
+  //     加了反而会让面板顺序变成「stats 在前、器皿在后」。故本表退役时**不动**这两件。
+  //   （这正是「退役的充分条件是**用域表的件都自报了**」而非「分类里每件都自报了」的实例。）
+  //
+  // 原表备查（回滚时整段粘回 `热学:` 键即可）：
+  //   t/Q/surf/heatOut/Tf/T1/T2/flux/fluxBar/mid/mIce/melted/Qlatent/waterT/steam/bp/d/dL/Tc
+  //   ⚠ 其中 `Tf/T1/T2/mIce/melted/Qlatent` 只服务于上面那两件器皿（它们不读表），
+  //     故这些条目本就没有消费者，退役无影响。
+  // 「通用」表**必须保留**。
+  // ══ `光学` 表已退役（B4 第 3 步第 4 例，2026-10-17）═════════════════════════════════
+  // 光学**真正读域表**的 4 件（光源 / 平面镜 / 水槽 / 三棱镜）已由 `def.stats` 自报，
+  // 逐字等价由 `inspector-stats-probe` §⑥ 在跑过 step 的实体上证明（报告 §二十六）。
+  //
+  // ⚠ 本分类**另有 2 件不在此列**：`convexlens`（凸透镜）与 `screen`（光屏）。
+  //   它们早已由 `stats` 供行（另见其 `stats` 声明），从不落到兜底 ⇒ 退役本表对它们无影响。
+  //   ⇒ 再次印证：退役的充分条件是「**用域表的件都自报了**」，不是「分类里每件都自报了」。
+  //
+  // 原表备查（回滚时整段粘回 `光学:` 键即可）：
+  //   lambda:['波长','nm'] thetaI:['入射角','°'] thetaR:['反射角','°'] thetaT:['折射角','°']
+  //   spread:['谱宽','°']   // 器材自己在画布上写的就是「谱宽 xx°」，面板沿用它的词
+  //   ⚠ `hitX/hitY/n1/n2/valid` 从来就**不在**本表里（落 `通用` → 再落原始键名），
+  //     其中 `n2` 的中文名「折射率 n₂」由器材 `fields` 提供。退役无影响。
+  // 「通用」表**必须保留**。
+  // ══ `电磁` 表已退役（B4 第 3 步**收官**，2026-10-17）══════════════════════════════
+  // 电磁**真正读域表**的 5 件（条形磁铁 / 指南针 / 正负电荷 / 检验电荷 / 匀强电场）已由
+  // `def.stats` 自报，逐字等价由 `inspector-stats-probe` §⑥ 在跑过 step 的实体上证明（报告 §二十七）。
+  //
+  // ⚠ 本分类**另有 1 件不在此列**：`bfield`（匀强磁场）。它两个 state 键都不是数字
+  //   （`symbol` 是字符串、`outOfPage` 是布尔）⇒ 兜底一行也不产 ⇒ 面板显示「状态 · 无读数」，
+  //   **从不读域表**，退役无影响。
+  //
+  // 原表备查（回滚时整段粘回 `电磁:` 键即可）：
+  //   half:['磁极半距','px'] poleGap:['两极间距','px']
+  //   needleDeg:['磁针指向','°'] srcCount:['场源数','个']
+  //   deflection:['相对本体偏转','°'] srcDist:['最近磁体距离','px']
+  //   sign:['带电符号',''] qAbs:['电量大小 |q|','µC'] lineCount:['方向箭头支数','支']
+  //   nRegions:['所在场区数','个'] nCharges:['附近电荷数','个'] forceDeg:['受力方向','°']
+  //   fieldDeg:['场向角','°']
+  //   ⚠ `q`（电量）从来**不在**本表里 —— 它的中文名「电量 q」由 charge 的 `fields` 提供。
+  //   ⚠ 只收兜底口径真读得到的键：对象型的 axis / poleN / poleS / dir / force、布尔与文案型的
+  //     ambient / inField / fieldDefined / symbol / outOfPage 都到不了这张表。
+  // 「通用」表**必须保留** —— 它是兜底链的第二级，任何分类表退役它都不动。
+  //
+  // ★★ 至此 `def.cat` 的**全部**分类表已退役，第 3 步完成：声学 4 + 力学 8 + 热学 4 + 光学 4 + 电磁 5
+  //    = **25 件**由 `def.stats` 自报。
+  // ══ `声学` 表已退役（B4 第 3 步首例，2026-10-17）═════════════════════════════════
+  // 声学 4 件（音叉 / 共鸣管 / 分贝计 / 波形显示）的读数现在全部由 `def.stats` **自报**。
+  // 退役判据不是「差不多」，而是**逐字相同**：`tools/inspector-stats-probe.mjs` §⑥ 在
+  // **跑过 step 的实体**上（运行时真值）证明这些行未丢量、未改写、未变序（报告 §十九）。
+  //
+  // 撤这张表一度弄坏了两套探针 —— 不是它们写错了，而是本表当时**还被别处当作证据源**：
+  // 「域盲四键退场」豁免的条件④拿本表**现查**「这个键在本域是否有别的物理义」
+  // （`soundlevel` 的 `I`/`P` 在此是声强/声源功率，不是电流/功率）。所以退役是**分两步**做的：
+  //   ① 先把那份证据迁到 `stats` 侧（豁免条件④增加分支 b)「该器材已声明 stats」）；
+  //   ② 再撤本表。
+  // ⚠ 次序不能颠倒 —— 详情与实测序列见报告 §19.5；`plans/11 §6.3` 也补记了这个额外前置。
+  //
+  // 两处**有意的**行为变化（不是回归）：
+  //   ① `stats` 路径**不受** `LIVE_FALLBACK_MAX` 约束（下面兜底里的截断只管兜底）⇒
+  //      读数超过 8 项的器材（分贝计 11 项、波形显示 10 项）现在显示**全部**读数，
+  //      而不再被截成 8 行 + 一行 `… 还有 N 项读数` 占位；
+  //   ② 因此退役**减少了**信息丢失 —— 原来被截掉的是真读数。
+  //
+  // 原表备查（如需回滚，整段粘回 `声学:` 键即可）：
+  //   f1/f2/fbeat/Tbeat/df/dist/mateId/windowS/envPeriodMeas/raster ·
+  //   f0/nUsed/rejected/v/lambda/T/vBack/amp/peak/dPeak/atResonance ·
+  //   Lw/P/I/L/LAnalytic/dL/L2/drop/theory/rThresh/needle ·
+  //   n/fMeas/fAuto/fCarrier/beat/fAutoUsable/fIn/dZc/dAc/pp/envX
+  // 「通用」表**必须保留**：各分类认不出的键都落到那里（见上方注释）。
   // 通用只留「跨到哪个域都只有一个意思」的键。t / v / a / s / T / E 这类单字母键的含义随域而变
   // （光学里 v 是像距 mm：凸透镜的 -30.34 配上 u=22、f=80 正好满足 1/v = 1/f − 1/u），
   // 一律交给域表或原始键名 —— 宁可显示 v，不可写成「速度 m/s」。
@@ -762,8 +825,24 @@ export const STATE_LABELS = {
  */
 const STATE_HIDDEN = { 力学: ['tPrev'] };
 
+/**
+ * 自报统计量的取值格式化：`digits` 是**器材声明**的定点位数（plans/11 §6.2 的 `fmtBy(s.digits, …)`）。
+ *
+ * 为什么需要它：八处既有类型分支里有 `toFixed(1)` / `toFixed(2)` / `Math.round` 这类**定精度**行，
+ * 而 `fmtLive` 按量级自动选精度 —— 直接迁到 stats 会改变文本，违反第 2 步「与迁移前逐字相同」的判据。
+ * `digits` 缺省（非有限数）⇒ 落回 `fmtLive`，第 1 步的既有口径因此**不变**。
+ * ⚠ 与 `Math.round` 的**唯一**边界差异：`(-0.5).toFixed(0)` 是 `'-1'`，而 `Math.round(-0.5)` 是 `-0`（`'0'`）。
+ */
+export function fmtBy(digits, v) {
+  if (!Number.isFinite(digits)) return fmtLive(v);
+  // digits === 0 走 `Math.round` 而不是 `toFixed(0)`：两者只在**负 .5** 边界不同
+  // （`(-0.5).toFixed(0)` 是 '-1'，而 `Math.round(-0.5)` 是 -0 ⇒ `String(-0)` 得 '0'），
+  // 而迁移来源（`motor` 转速那一行）用的正是 `Math.round(...)` —— 依它才能逐字相同。
+  return digits === 0 ? String(Math.round(v)) : v.toFixed(digits);
+}
+
 /** 兜底读数按量级选精度：不出现 0.30000000000000004 这种尾巴 */
-function fmtLive(v) {
+export function fmtLive(v) {
   const a = Math.abs(v);
   if (a >= 100) return v.toFixed(1);
   if (a >= 1) return v.toFixed(2);

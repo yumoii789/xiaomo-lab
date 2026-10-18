@@ -8,6 +8,9 @@ const DEFS = [];
 
 import { Entity, gfx, dmg, grad1 } from '../core/entity.js';
 import { define } from './registry.js';
+// 只为 thermistor 自报「当前阻值」用：那是**自适应单位**格式（Ω/kΩ/MΩ），见 plans/11 §6.5。
+// 依赖方向是「器材包 → 核心」，与既有准则一致；circuit.js 自己不 import 任何东西，无环。
+import { fmtR } from '../physics/circuit.js';
 
 const PH = 'physics';
 const PANEL = '#242c34', EDGE = '#39434d', LEAD = '#5a6672';
@@ -337,6 +340,30 @@ class Rheostat extends Entity {
     const r = Math.max(0.05, this.props.rMax * Math.min(1, Math.max(0, this.props.pos)));
     return { type: 'R', r };
   }
+  /**
+   * 三端电位器：**滑片口真的接了线**才分成两段（A↔滑片、滑片↔B）；没接就还是整只变阻器。
+   * ⚠ 判据是"滑片接了线"，不是"声明了三个口" —— 两线用法（当变阻器）是最常见的合法接法，
+   *   按声明报三端会把它变成假警报，而假警报多了人就把告警全关掉。
+   * ⚠ 返回 null 表示回落到 circuitBranch()：两线时解与旧版本**逐位相同**。
+   * ⚠ 只读 world 的接线，不写任何状态、不发明全局量。
+   */
+  circuitBranches(world) {
+    const iw = this.ports.findIndex((p) => p.kind === 'wire' && p.label === '滑片');
+    if (iw < 0) return null;
+    const attached = world && world.wires.some((w) => w.kind === 'wire'
+      && ((w.a.e === this.id && w.a.p === iw) || (w.b.e === this.id && w.b.p === iw)));
+    if (!attached) return null;
+    const pos = Math.min(1, Math.max(0, this.props.pos));
+    const rMax = this.props.rMax;
+    const ends = [];
+    for (let i = 0; i < this.ports.length; i++) if (this.ports[i].kind === 'wire' && i !== iw) ends.push(i);
+    if (ends.length < 2) return null;
+    // 滑片把电阻丝分成两段：A↔滑片 = rMax·pos，滑片↔B = rMax·(1−pos)（与两端用法同一个下限 0.05 Ω）
+    return [
+      { type: 'R', r: Math.max(0.05, rMax * pos), a: ends[0], b: iw },
+      { type: 'R', r: Math.max(0.05, rMax * (1 - pos)), a: iw, b: ends[1] },
+    ];
+  }
   render(g) {
     const { w, h } = this;
     leads(g, this);
@@ -361,7 +388,8 @@ class Rheostat extends Entity {
 const rheostatDef = {
   type: 'rheostat', name: '滑动变阻器', domain: PH, cat: '电阻', icon: '🎚',
   desc: '连续改变接入电路的阻值', w: 106, h: 50,
-  ports: [{ x: -58, y: 0, kind: 'wire' }, { x: 58, y: 0, kind: 'wire' }],
+  ports: [{ x: -58, y: 0, kind: 'wire' }, { x: 58, y: 0, kind: 'wire' },
+    { x: 0, y: -30, kind: 'wire', label: '滑片' }],
   defaults: { rMax: 50, pos: 0.5 },
   tags: ['变阻器', '电阻'],
   fields: [
@@ -587,6 +615,19 @@ const thermistorDef = {
     { k: 'r25', label: '25°C 阻值', type: 'range', min: 10, max: 1000, step: 10, unit: 'Ω' },
     { k: 'B', label: 'B 值', type: 'range', min: 1000, max: 5000, step: 100, unit: 'K' },
   ],
+  // ── B4 第 2 步：面板那处 `if (e.type === 'thermistor')` 已搬到这里（plans/11 §6.3）──
+  //    逐字等价：
+  //      `(st.temp ?? 25).toFixed(1) + ' ℃'` ⇒ digits:1 + unit:'℃'；
+  //      `st.source || '室温'`                 ⇒ 字符串三态（无条件、无映射）；
+  //      `fmtR(R)`                             ⇒ **自适应单位**（Ω/kΩ/MΩ），digits/unit 表达不了
+  //        ⇒ 用第 3 个接口字段 `fmt`（plans/11 §6.5），把既有函数原样接上。
+  //    另注：`R` 的取法原样保留 —— 优先 `resistanceNow()`（NTC 按 B 值算出的实时阻值），
+  //    取不到才落回 `state.R`。两者都不在时 fmtR 会给出 '∞'，与迁移前一致。
+  stats: [
+    { label: '感知温度', unit: '℃', digits: 1, read: (e) => e.state.temp ?? 25 },
+    { label: '温度来源', read: (e) => e.state.source || '室温' },
+    { label: '当前阻值', fmt: fmtR, read: (e) => (e.resistanceNow ? e.resistanceNow() : e.state.R) },
+  ],
   create: (x, y) => new Thermistor(thermistorDef, x, y),
 };
 DEFS.push(() => define(thermistorDef));
@@ -743,6 +784,14 @@ const motorDef = {
     // ⚠ 已知边界：机械侧是退化映射（ω = 40·I，无惯量无负载），所以回路里 ke·40
     //   接近总电阻时 tick 间反馈会振荡；那是机械侧缺真源的性质，不是电气侧新增缺陷。
     { k: 'ke', label: '反电动势系数', type: 'range', min: 0, max: 1, step: 0.05, unit: 'V·s/rad' },
+  ],
+  // ── B4 第 2 步：面板那处 `if (e.type === 'motor')` 已搬到这里（plans/11 §6.3）──
+  //    逐字等价：`st.on ? '转动中' : '停止'` ⇒ 字符串三态原样上屏；
+  //             `Math.round(st.omega || 0) + ' rad/s'` ⇒ digits:0 + unit:'rad/s'，
+  //             而 fmtBy 的 digits:0 走的正是 `Math.round`（见 inspector.js 里的说明）⇒ 逐字相同。
+  stats: [
+    { label: '运转状态', read: (e) => (e.state.on ? '转动中' : '停止') },
+    { label: '转速', unit: 'rad/s', digits: 0, read: (e) => e.state.omega || 0 },
   ],
   create: (x, y) => new Motor(motorDef, x, y),
 };

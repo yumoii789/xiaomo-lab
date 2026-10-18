@@ -200,7 +200,11 @@ try {
       const m0 = String(s).match(/^(?:rgba?|color)\\(([^)]*)\\)/);
       if (!m0) return null;
       const body = m0[1];
-      // 现代 color() 写法：`srgb r g b / a`
+      // 现代 color() 写法：srgb r g b / a
+      // ⚠ 上面这行不能给 srgb… 加反引号：本段整体在 ev(...) 的模板字符串里，注释里出现
+      //   反引号会提前终止模板，文件立刻变成语法错误（motion-probe 起不来）。HEAD 版本
+      //   正是这样坏掉的，task-64 把它修回来（迁移说明曾判为「越界改动、应回滚」，实测
+      //   回滚后 node --check 直接报 missing ) after argument list，故不采纳该判断）。
       if (String(s).startsWith('color(')) {
         const sl = body.split('/');
         return sl.length > 1 ? parseFloat(sl[1]) : 1;
@@ -209,11 +213,18 @@ try {
       return p.length >= 4 ? p[3] : 1;
     };
     const before = read();
-    // 与主表里那条降级**同一声明**：两层 background，不透明底色垫底
+    // 与主表里那条降级**同一声明**（2026-10-17 同步修正后的版本）：
+    //   ⚠ 旧版注入的是 background: var(--bg) var(--glass)（两个纯颜色）—— 那**语法非法**，
+    //     浏览器整条判无效、回退成 transparent，于是 .drawer 实测 α 从 0.74 掉到 **0**，
+    //     而 #topbar / #statusbar / .fx-orb 仍是 0.74（:where() 的 0,0,0 压不过 ID 规则 1,0,0）。
+    //     即**探针注入的写法本身也是错的**，它测的不是产品真会应用的那条规则。
+    //   ⇒ 现在按 styles/main.css 里修正后的写法注入：不透明 --bg 落到载体 + !important
+    //     （!important 是唯一能赢主题内联 :root 变量的写法）。
+    //   ⚠ 本段在 ev() 的模板字符串**内部**，注释里**绝不能出现反引号**（会提前终止模板）。
     const st = document.createElement('style');
     st.id = 'glass-probe-force-unsupported';
-    st.textContent = '.drawer,#topbar,#statusbar,.fx-orb'
-                    + '{background:var(--bg) var(--glass)}';
+    st.textContent = '#topbar,#statusbar,.drawer,.toast,.fx-orb,.expel-mask,.about-mask'
+                    + '{background:var(--bg) !important;transition:none !important}';
     document.head.appendChild(st);
     const forced = read();
     st.remove();

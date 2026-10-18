@@ -1,6 +1,6 @@
 const DEFS = [];
 // ══════════════════════════════════════════════════════════
-// 物理域 · 电学增量器材（6 件）
+// 物理域 · 电学增量器材（7 件）
 //
 // 与既有的 src/equipment/electrical.js（10 件：干电池 / 开关 / 小灯泡 /
 // 定值电阻 / 滑动变阻器 / 电流表 / 电压表 / 热敏电阻 / 电热丝 / 电动机）
@@ -12,6 +12,7 @@ const DEFS = [];
 //   oscilloscope 示波器   —— 波形显示与测量（既有电流表/电压表只显示标量）
 //   transformer  变压器   —— 互感变比（既有没有磁路元件）
 //   diode        二极管   —— 单向导电 / 半波整流（既有没有非线性元件）
+//   photoresistor 光敏电阻 —— 照度→电阻（**连续**非线性，与二极管的开关型相对；相对照度口径）
 //
 // 三条工程约定写在这里，全文件遵守：
 //
@@ -25,6 +26,9 @@ const DEFS = [];
 //      ⚠ 求解器会把 state.I / state.U / state.P / state.R 写回实体
 //      （circuit.js:215），所以本文件的暂态量一律另起名字（iL / Uc / emf…），
 //      绝不占用那四个键。
+//      ⚠ **连续非线性 ≠ 开关非线性**：光敏电阻的 R 是照度的单值函数、没有开关判决，
+//      所以它走 `resistanceAt()` 电阻钩子是稳态自洽的；只有二极管的 ON/OFF 才必须绕开它
+//      （判据会自我否定，见上）。两件都是非线性，但**只有一件能走电阻钩子**。
 //
 //   ② **时间由引擎给**：定步长 1/120 s，只实现 `step(dt, world)`，
 //      不起自己的 rAF / setInterval。交流相位取自 `world.time`。
@@ -444,7 +448,7 @@ class AcSource extends Entity {
 
   circuitBranch() { return { type: 'V', emf: this.emfNow(), r: Math.max(0.001, this.props.r) }; }
 
-  onProp() { this.state.t = 0; this.state.buf = []; this.state.bufT = []; }
+  onProp() { this.state.t = 0; this.state.buf = []; this.state.bufT = []; this.state.ibuf = []; this.state.ibufT = []; }
 
   step(dt, world) {
     this.state.t = world.time;
@@ -459,6 +463,18 @@ class AcSource extends Entity {
     while (buf.length > n) { buf.shift(); bt.shift(); }
     this.state.rmsMeas = rmsOf(buf);
     this.state.pp = peakToPeak(buf);
+    // 电流半边：与上面**逐字同构**的逐拍缓冲（同一窗口长度 n、同样的推移方式、同一个 rmsOf 口径）。
+    //   ⚠ 为什么允许同构：rmsOf 取的是 √⟨i²⟩，**对符号免疫** —— 交流换向、
+    //     以及 V 支路与器材端口朝向不一致带来的整体符号翻转，都不会污染有效值，
+    //     所以不需要为电流另定一套口径（这正是本件不必"停下来报"的理由）。
+    //   ⚠ 为什么推的是 state.I：它是求解器在**同一次 solve 里**注入的
+    //     （与 state.emf 同拍、无半拍偏移），所以这里记的就是"这一拍的电流"。
+    //   ⚠ 未接线时求解器不注入 I ⇒ 读到 undefined ⇒ 记 0（与"没有电流"一致，不是缺失值）。
+    const cbuf = this.state.ibuf || (this.state.ibuf = []);
+    const cbt = this.state.ibufT || (this.state.ibufT = []);
+    cbuf.push(this.state.I || 0); cbt.push(this.state.t);
+    while (cbuf.length > n) { cbuf.shift(); cbt.shift(); }
+    this.state.rmsI = rmsOf(cbuf);
     this.state.tLast = this.state.t;
   }
 
@@ -491,7 +507,7 @@ const acDef = {
   w: 84, h: 84,
   ports: [{ x: -42, y: 0, kind: 'wire', label: 'L' }, { x: 42, y: 0, kind: 'wire', label: 'N' }],
   defaults: { Up: 6, f: 1, phi: 0, r: 0.05 },
-  state: { t: 0, emf: 0, Urms: 0, rmsMeas: 0, pp: 0, T: 1, buf: [], bufT: [] },
+  state: { t: 0, emf: 0, Urms: 0, rmsMeas: 0, pp: 0, T: 1, buf: [], bufT: [], rmsI: 0, ibuf: [], ibufT: [] },
   tags: ['交流', '正弦', '有效值', '电源'],
   fields: [
     { k: 'Up', label: '峰值电压 Up', type: 'range', min: 1, max: 24, step: 0.5, unit: 'V' },
@@ -597,6 +613,54 @@ class Transformer extends Entity {
   /** 一次侧就是一只电阻（理想变压器的一次侧铜损），求解器给出真实 U₁ */
   circuitBranch() { return { type: 'R', r: Math.max(1, this.props.R1) }; }
 
+  /** 二次侧端子（wire 口的后两个）是否接了线 —— circuitBranches 与 step 共用同一判据，避免两处漂移 */
+  secPorts() {
+    const wp = [];
+    for (let i = 0; i < this.ports.length; i++) if (this.ports[i].kind === 'wire') wp.push(i);
+    return wp.length < 4 ? null : wp;
+  }
+  secWired(world) {
+    const wp = this.secPorts();
+    if (!wp || !world) return false;
+    return [wp[2], wp[3]].some((i) => world.wires.some((w) => w.kind === 'wire'
+      && ((w.a.e === this.id && w.a.p === i) || (w.b.e === this.id && w.b.p === i))));
+  }
+
+  /**
+   * 一器材多支路（circuit.js 契约）：一次侧 = 主边、二次侧 = 次边（真端子，真进矩阵）。
+   *
+   * ⚠ 二次侧整边**没接线** ⇒ 返回 null ⇒ 回落到 circuitBranch()（= 改动前那条 r=R1）
+   *   ⇒ 两线用法与改动前**同一条支路**，零回归（判据见 tools/multibranch-probe.mjs §⑦）。
+   * ⚠ 不许造迭代内代数环（electrical.js:688 Motor 那条禁令）：两条支路的耦合量**全部取自
+   *   上一帧的 state**（二次 emf 用上一帧 U₁；一次侧折算负载用上一帧实测二次电流），
+   *   在本帧的 solve 里都是常量 —— 定点迭代不会去追一个不存在的解 ✓。
+   * ⚠ 只读 world 的接线；`state.sec` 是**本体自有**的缓存盒子（求解器往里写 {I,U,P,R}），
+   *   不是全局量。
+   */
+  circuitBranches(world) {
+    const wp = this.secPorts();
+    if (!wp) return null;
+    const [pa, pb, sa, sb] = wp;
+    if (!this.secWired(world)) return null;                 // 二次侧整边没接 ⇒ 旧路径
+    const n = this.props.N1 / Math.max(1, this.props.N2);
+    // ⚠ 二次 emf 不是 U₁/n，而是**一次铜阻背后**的电动势 E₁ = U₁ − I₁·R₁（上一帧量）✗↔✓
+    //   用 U₁/n 的错法实测 I₁/I₂ 差 18.5%（I₁=−0.027776 ⟷ I₂/n=−0.034089 ✗）；
+    //   改成 E₁ 后 I₂ = n·I₁、一次总阻 = R₁ + n²·(R₂+R_L) 都是教科书关系 ✓。
+    const R1 = Math.max(1, this.props.R1);
+    const E1 = (this.state.U || 0) - (this.state.I || 0) * R1;   // 上一帧 ⇒ 本帧常量
+    const U2 = E1 / n;
+    const sec = this.state.sec || (this.state.sec = {});    // 每台本体自有（不在 def.state 里共享 ✗）
+    const i2 = Math.abs(sec.I || 0);
+    // 二次回路总阻 (R₂+R_L) 实测 = |E₂/I₂| ⇒ 折算到一次 ×n²；还没有二次电流时用声明负载 RL 兜底
+    const refl = i2 > 1e-9 && Math.abs(U2) > 0
+      ? (n * n * Math.abs(U2)) / i2
+      : n * n * Math.max(0.01, this.props.RL);
+    return [
+      { type: 'R', r: R1 + refl, a: pa, b: pb },                                        // 主边：一次铜阻 + 折算负载
+      { type: 'V', emf: U2, r: Math.max(0.1, this.props.R2), a: sa, b: sb, state: sec }, // 次边：真端子
+    ];
+  }
+
   step(dt, world) {
     const src = nearestSignal(world, this);
     const U1 = Math.abs(this.state.U || 0) > 1e-6
@@ -605,8 +669,17 @@ class Transformer extends Entity {
     this.state.U1 = U1;
     this.state.srcId = src ? src.id : null;
     const t = transformer(U1, this.props.N1, this.props.N2, this.props.RL);
-    this.state.U2 = t.U2; this.state.I1 = t.I1; this.state.I2 = t.I2;
-    this.state.P1 = t.P1; this.state.P2 = t.P2; this.state.eta = t.eta;
+    // ⚠ 二次侧真接了线 ⇒ U₂/I₂/P 改报**求解器给的**值（解析值另存 theory 键备对照，不冒充实测）
+    const sec = this.state.sec || {};
+    const live = this.secWired(world) && typeof sec.U === 'number';
+    this.state.U2theory = t.U2; this.state.I2theory = t.I2;
+    this.state.U2src = live ? 'solver' : 'analytic';
+    this.state.U2 = live ? sec.U : t.U2;
+    this.state.I2 = live ? sec.I : t.I2;
+    this.state.I1 = live ? Math.abs(this.state.I || 0) : t.I1;
+    this.state.P1 = live ? Math.abs(U1 * this.state.I1) : t.P1;
+    this.state.P2 = live ? Math.abs(this.state.U2 * this.state.I2) : t.P2;
+    this.state.eta = this.state.P1 > 0 ? this.state.P2 / this.state.P1 : 0;
     this.state.ratio = t.k;
     this.state.nRatio = this.props.N1 / this.props.N2;
   }
@@ -634,6 +707,9 @@ class Transformer extends Entity {
     coil(-8, 10, -1);
     coil(8, 6, 1);
     dot(g, -w / 2 + 3, 0); dot(g, w / 2 - 3, 0);
+    // 二次侧端子（真接线柱）：画出来，否则用户看不见那两个口在哪儿
+    dot(g, -w / 2 + 3, 36); dot(g, w / 2 - 3, 36);
+    gfx.text(g, '二次', 0, 44, { color: OK, size: 8.5 });
     gfx.text(g, `N₁=${this.props.N1} : N₂=${this.props.N2}`, 0, h / 2 - 32, { color: TXT, size: 9.5 });
     gfx.text(g, `U₁=${(this.state.U1 || 0).toFixed(3)}V → U₂=${(this.state.U2 || 0).toFixed(3)}V`,
       0, h / 2 - 22, { color: HOT, size: 9 });
@@ -643,17 +719,22 @@ class Transformer extends Entity {
 }
 const xfmrDef = {
   type: 'transformer', name: '变压器', domain: PH, cat: CAT, icon: '🔄',
-  desc: '理想变压器：U₁/U₂ = N₁/N₂、I₁/I₂ = N₂/N₁、P₁ = P₂（一次侧接进真电路读真实 U₁）',
+  desc: '理想变压器：U₁/U₂ = N₁/N₂、I₁/I₂ = N₂/N₁、P₁ = P₂（一次侧接进真电路读真实 U₁；二次侧端子接线后 U₂/I₂ 也由求解器给）',
   w: 140, h: 104,
-  ports: [{ x: -70, y: 0, kind: 'wire', label: '一次+' }, { x: 70, y: 0, kind: 'wire', label: '一次−' }],
-  defaults: { N1: 400, N2: 100, RL: 10, R1: 40, U1: 6 },
-  state: { U1: 0, U2: 0, I1: 0, I2: 0, P1: 0, P2: 0, eta: 0, ratio: 0, nRatio: 4 },
+  ports: [{ x: -70, y: 0, kind: 'wire', label: '一次+' }, { x: 70, y: 0, kind: 'wire', label: '一次−' },
+    { x: -70, y: 36, kind: 'wire', label: '二次+' }, { x: 70, y: 36, kind: 'wire', label: '二次−' }],
+  defaults: { N1: 400, N2: 100, RL: 10, R1: 40, R2: 1, U1: 6 },
+  // ⚠ `sec` 只能是**原始值**：entity.js:35 是 Object.assign({}, def.state) 浅拷贝，
+  //   在 def.state 里放对象会被多台变压器**共享同一个盒子** ✗ ⇒ 盒子在 circuitBranches 里惰性建。
+  state: { U1: 0, U2: 0, I1: 0, I2: 0, P1: 0, P2: 0, eta: 0, ratio: 0, nRatio: 4,
+    sec: null, U2theory: 0, I2theory: 0, U2src: 'analytic' },
   tags: ['变压器', '互感', '变比', '交流'],
   fields: [
     { k: 'N1', label: '一次匝数 N₁', type: 'range', min: 50, max: 2000, step: 50, unit: '匝' },
     { k: 'N2', label: '二次匝数 N₂', type: 'range', min: 20, max: 1000, step: 10, unit: '匝' },
     { k: 'RL', label: '负载电阻', type: 'range', min: 1, max: 200, step: 1, unit: 'Ω' },
     { k: 'R1', label: '一次铜阻', type: 'range', min: 1, max: 200, step: 1, unit: 'Ω' },
+    { k: 'R2', label: '二次铜阻', type: 'range', min: 0.1, max: 20, step: 0.1, unit: 'Ω' },
     { k: 'U1', label: '一次电压（未接线时）', type: 'range', min: 1, max: 36, step: 0.5, unit: 'V' },
   ],
   create: (x, y) => new Transformer(xfmrDef, x, y),
@@ -766,6 +847,197 @@ const diodeDef = {
 DEFS.push(() => define(diodeDef));
 
 // ══════════════════════════════════════════════════════════
+// 八、器材 7：光敏电阻（照度 → 电阻）
+// ══════════════════════════════════════════════════════════
+/**
+ * 找最近的「发光体」——**结构判据，不是类型白名单**：认 `props.wavelength > 0`。
+ * ⚠ 为什么不能按 `props.power > 0` 找：**热源也有 `power`** —— thermal.js 的酒精灯
+ *   `{lit:false, power:600}`、heating.js 的加热器 `{power:200}`（单位 **W**），而发光体
+ *   optics.js 的光源 `{power:5}` 是 **mW**。按 power 找会把酒精灯当灯照，且量纲也串了。
+ *   `wavelength` 是发光体独有、且**本来就存在**的字段（D44：不新造字段）。
+ */
+export function nearestLuminous(world, self, maxDist = 1e9) {
+  let best = null, bd = maxDist;
+  for (const e of world.entities) {
+    if (e === self) continue;
+    if (!(e.props && e.props.wavelength > 0)) continue;
+    const d = Math.hypot(e.x - self.x, e.y - self.y);
+    if (d < bd) { bd = d; best = e; }
+  }
+  return best;
+}
+
+/**
+ * 相对照度 0–100（**不是 lx**）：点光源按 1/r² 衰减，标称 5 mW @ 100 px 记 100。
+ * ⚠ 本仓**没有照度真源**（`src/**` 里 `照度|illuminance|lux` 零命中，亲测），
+ *   按 plans/11 §7 / D44「无真源不造字段」⇒ 只报**相对值**与**距离**，
+ *   标签与单位一律不写 lx/lm，避免把相对量冒充计量量。
+ */
+export function relIlluminance(powerMW, distPx, refPowerMW = 5, refDistPx = 100) {
+  const d = Math.max(10, distPx);                 // 近场不除到无穷：10 px 内取解析上限
+  return clamp(100 * (powerMW / refPowerMW) * Math.pow(refDistPx / d, 2), 0, 100);
+}
+
+class PhotoResistor extends Entity {
+  /**
+   * R = rDark · (rLight/rDark)^(t^γ)，t = 相对照度/100 —— 照度的**单值连续**函数。
+   *
+   * ⚠ 它与二极管的区别（照抄错就废）：二极管是**开关**型 —— ON 态端电压只有 I·ron < Vf，
+   *   「U>Vf 才导通」这条纯电阻式判据**自我否定**，定点迭代抖成 ON/OFF（实测占空比 0%、
+   *   压降消失，见本文件文件头 ①）。光敏电阻没有开关判决：给定照度只有一个 R，
+   *   且 `circuitBranch()` 返回的 r 在迭代里是常量 ⇒ **电阻钩子在这里稳态自洽** ✓。
+   *   同一个求解器钩子，一件能用、一件不能用，分野就在这里。
+   */
+  resistanceNow() {
+    const t = clamp((this.state.relE || 0) / 100, 0, 1);
+    const g = Math.pow(t, Math.max(0.05, this.props.gamma || 0.8));
+    const r = this.props.rDark * Math.pow(this.props.rLight / this.props.rDark, g);
+    return clamp(r, Math.min(this.props.rLight, this.props.rDark), Math.max(this.props.rLight, this.props.rDark));
+  }
+  /** 求解器电阻钩子（circuit.js:150-151：实体优先）—— 照度的函数，不看电压 */
+  resistanceAt() { return this.resistanceNow(); }
+  circuitBranch() { return { type: 'R', r: Math.max(0.05, this.resistanceNow()) }; }
+
+  step(dt, world) {
+    const s = nearestLuminous(world, this);
+    this.state.srcId = s ? s.id : null;
+    this.state.srcDist = s ? Math.hypot(s.x - this.x, s.y - this.y) : NaN;
+    this.state.relE = s ? relIlluminance(s.props.power, this.state.srcDist) : 0;
+    this.state.rNow = this.resistanceNow();       // 自报缓存，面板可消费（不占 I/U/P/R）
+  }
+
+  render(g) {
+    const { w } = this;
+    shell(g, w, 56, '光敏电阻');
+    // 入射光：两条斜箭头（只在有照度时点亮）
+    const lit = (this.state.relE || 0) > 0;
+    g.strokeStyle = lit ? HOT : DIM; g.lineWidth = 1.4;
+    for (const dx of [-5, 5]) {
+      g.beginPath(); g.moveTo(dx - 8, -22); g.lineTo(dx + 1, -13); g.stroke();
+      g.beginPath(); g.moveTo(dx + 1, -13); g.lineTo(dx - 3, -14); g.stroke();
+    }
+    gfx.fillRR(g, -13, -7, 26, 14, 2, '#2b3440');
+    gfx.strokeRR(g, -13, -7, 26, 14, 2, EDGE, 1.2);
+    g.strokeStyle = WIRE; g.lineWidth = 1.6;
+    g.beginPath(); g.moveTo(-w / 2 + 4, 0); g.lineTo(-13, 0); g.stroke();
+    g.beginPath(); g.moveTo(13, 0); g.lineTo(w / 2 - 4, 0); g.stroke();
+    dot(g, -w / 2 + 3, 0); dot(g, w / 2 - 3, 0);
+    const R = this.state.rNow || 0;
+    gfx.text(g, `相对照度 ${(this.state.relE || 0).toFixed(0)}%`, 0, 15, { color: lit ? HOT : DIM, size: 9 });
+    gfx.text(g, `R=${R >= 1000 ? (R / 1000).toFixed(1) + ' kΩ' : R.toFixed(0) + ' Ω'}`,
+      0, 25, { color: DIM, size: 9 });
+  }
+}
+const photoDef = {
+  type: 'photoresistor', name: '光敏电阻', domain: PH, cat: CAT, icon: '🔆',
+  desc: '光照↑⇒电阻↓（幂律）：照度取自最近的发光体，R 走求解器电阻钩子接进真电路',
+  w: 84, h: 56,
+  ports: [{ x: -42, y: 0, kind: 'wire', label: 'A' }, { x: 42, y: 0, kind: 'wire', label: 'B' }],
+  defaults: { rDark: 100000, rLight: 500, gamma: 0.8 },
+  state: { srcId: null, srcDist: NaN, relE: 0, rNow: 100000 },
+  tags: ['光敏电阻', '光敏', '照度', '半导体', '非线性', '耦合'],
+  fields: [
+    { k: 'rDark', label: '暗电阻', type: 'range', min: 1000, max: 1000000, step: 1000, unit: 'Ω' },
+    { k: 'rLight', label: '亮电阻', type: 'range', min: 50, max: 20000, step: 50, unit: 'Ω' },
+    { k: 'gamma', label: '幂指数 γ', type: 'range', min: 0.2, max: 2, step: 0.05, unit: '' },
+  ],
+  create: (x, y) => new PhotoResistor(photoDef, x, y),
+};
+DEFS.push(() => define(photoDef));
+
+// ══════════════════════════════════════════════════════════
+// 九、器材 8：光敏二极管（照度 → 开关；与光敏电阻的**连续**非线性相对）
+// ══════════════════════════════════════════════════════════
+/**
+ * 光敏二极管 —— C4「光电元件」的另一半。
+ *
+ * ⚠ **它与光敏电阻不是同一件东西，照抄会废**：
+ * - 光敏电阻是**连续**非线性：给定照度只有一个 R，无开关判决 ⇒ 走 `resistanceAt()` 电阻钩子，
+ *   在定点迭代里自洽（见上面 `PhotoResistor` 的注释）。
+ * - 光敏二极管是**开关**型：它要么导通要么截止 —— 与 `Diode` 同类，**必须**走
+ *   `circuitBranch()` 的 **V 支路**，否则「U>Vf 才导通」在 ON 态自我否定（端电压只有 I·ron），
+ *   定点迭代会抖成 ON/OFF，实测表现为「占空比 0%、压降完全消失」。
+ *
+ * **判据设计（两个路径取或，这是它的物理）**：
+ * 1. **光控**：相对照度 ≥ `eth` ⇒ 光生载流子把器件导通 —— 这是"光控开关"的教学含义，
+ *    也是它与 `Diode`（只认电压、不认光）的**唯一区别**；
+ * 2. **正偏压**：`U·sgn() > vf` ⇒ 与普通二极管相同的正偏导通。
+ *
+ * 两个路径都汇到同一个 `state.on`，所以"没光时它仍是一只普通二极管"这件事是**自然成立**的，
+ * 不是特例分支。反接（`dir:'rev'`）时 `sgn()` 为负，光控仍能导通（光电二极管本就常工作在反偏），
+ * 但正偏路径会失效 —— 与真实器件的方向性一致。
+ */
+class PhotoDiode extends Entity {
+  sgn() { return this.props.dir === 'rev' ? -1 : 1; }
+  reset() { this.state.on = false; this.state.srcId = null; this.state.srcDist = NaN; this.state.relE = 0; }
+
+  /** 开关型支路（与 Diode 同构）：导通 = Vf 恒压降 + ron 斜率；截止 = roff·MΩ */
+  circuitBranch() {
+    const s = this.sgn();
+    return this.state.on
+      ? { type: 'V', emf: s * this.props.vf, r: Math.max(1e-4, this.props.ron) }
+      : { type: 'R', r: Math.max(1, this.props.roff * 1e6) };
+  }
+
+  step(dt, world) {
+    const src = nearestLuminous(world, this);
+    this.state.srcId = src ? src.id : null;
+    this.state.srcDist = src ? Math.hypot(src.x - this.x, src.y - this.y) : NaN;
+    this.state.relE = src ? relIlluminance(src.props.power, this.state.srcDist) : 0;
+    // 两个导通路径取或（见上）。开关判决用**上一帧**端电压 ⇒ 定步长实时的固有限制，
+    // 与 Diode 同（8.3 ms 一步）。
+    const lit = (this.state.relE || 0) >= (this.props.eth || 0);
+    const forward = (this.state.U || 0) * this.sgn() > this.props.vf;
+    this.state.on = lit || forward;
+    this.state.litOnly = lit && !forward;     // 自报：这一帧是"光导通"还是"电压导通"
+  }
+
+  render(g) {
+    const { w, h } = this;
+    shell(g, w, h, '光敏二极管');
+    const cy = -h / 2 + 20;
+    const lit = (this.state.relE || 0) > 0;
+    // 入射光箭头（有照度才点亮）—— 与光敏电阻同一种记号，便于并排辨认
+    g.strokeStyle = lit ? HOT : DIM; g.lineWidth = 1.4;
+    for (const dx of [-5, 5]) {
+      g.beginPath(); g.moveTo(dx - 8, cy - 22); g.lineTo(dx + 1, cy - 13); g.stroke();
+      g.beginPath(); g.moveTo(dx + 1, cy - 13); g.lineTo(dx - 3, cy - 14); g.stroke();
+    }
+    // 二极管符号（与 Diode 同形）
+    g.fillStyle = this.state.on ? OK : DIM;
+    g.beginPath(); g.moveTo(-8, cy - 8); g.lineTo(-8, cy + 8); g.lineTo(6, cy); g.closePath(); g.fill();
+    g.strokeStyle = this.state.on ? OK : DIM; g.lineWidth = 2.2;
+    g.beginPath(); g.moveTo(6, cy - 9); g.lineTo(6, cy + 9); g.stroke();
+    g.strokeStyle = WIRE; g.lineWidth = 1.6;
+    g.beginPath(); g.moveTo(-w / 2 + 4, cy); g.lineTo(-8, cy); g.stroke();
+    g.beginPath(); g.moveTo(6, cy); g.lineTo(w / 2 - 4, cy); g.stroke();
+    dot(g, -w / 2 + 3, 0); dot(g, w / 2 - 3, 0);
+    gfx.text(g, this.state.on ? '导通' : '截止', 0, 6, { color: this.state.on ? OK : BAD, size: 9.5 });
+    gfx.text(g, `相对照度 ${(this.state.relE || 0).toFixed(0)}%`, 0, 17, { color: lit ? HOT : DIM, size: 9 });
+    gfx.text(g, `U=${(this.state.U || 0).toFixed(3)}V  I=${((this.state.I || 0) * 1000).toFixed(2)}mA`,
+      0, 28, { color: DIM, size: 9 });
+  }
+}
+const photoDiodeDef = {
+  type: 'photodiode', name: '光敏二极管', domain: PH, cat: CAT, icon: '🔅',
+  desc: '开关型光电元件：照度≥阈值 ⇒ 光生载流子导通（光控开关）；无光时仍是一只普通二极管（U>Vf 正偏导通）',
+  w: 76, h: 56,
+  ports: [{ x: -38, y: 0, kind: 'wire', label: 'A' }, { x: 38, y: 0, kind: 'wire', label: 'K' }],
+  defaults: { vf: 0.6, ron: 0.5, roff: 1, dir: 'fwd', eth: 20 },
+  state: { on: false, srcId: null, srcDist: NaN, relE: 0, litOnly: false },
+  tags: ['光敏二极管', '光电', '照度', '开关', '半导体', '非线性', '耦合'],
+  fields: [
+    { k: 'eth', label: '导通照度阈', type: 'range', min: 0, max: 100, step: 1, unit: '%' },
+    { k: 'vf', label: '正向压降 Vf', type: 'range', min: 0, max: 2, step: 0.05, unit: 'V' },
+    { k: 'ron', label: '导通电阻', type: 'range', min: 0.1, max: 50, step: 0.1, unit: 'Ω' },
+    { k: 'roff', label: '反向电阻', type: 'range', min: 0.1, max: 50, step: 0.1, unit: 'MΩ' },
+    { k: 'dir', label: '接法', type: 'select', options: [['fwd', '正接'], ['rev', '反接']] },
+  ],
+  create: (x, y) => new PhotoDiode(photoDiodeDef, x, y),
+};
+DEFS.push(() => define(photoDiodeDef));
+
+// ══════════════════════════════════════════════════════════
 // 插件
 // ══════════════════════════════════════════════════════════
 export default {
@@ -775,7 +1047,7 @@ export default {
   kind: 'equipment',
   domain: PH,
   order: 32,
-  desc: '交流 / 暂态 / 半导体：电容、电感、交流电源、示波器、变压器、二极管（6 件，接进真电路）',
+  desc: '交流 / 暂态 / 半导体：电容、电感、交流电源、示波器、变压器、二极管、光敏电阻、光敏二极管（8 件，接进真电路）',
   author: '小墨实验室',
   builtin: true,
   tags: ['电学', '交流', '暂态', '器材'],

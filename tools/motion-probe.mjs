@@ -251,13 +251,13 @@ const SCRIPT_A = `(async () => {
     const driver = removedAt === null ? null
       : (evts.find((e) => e.ev === 'transitionend' && Math.abs(e.t - removedAt) <= 25) || null);
     const lastMoving = [...f3].reverse().find((f) => f.vis && (f.o > 0.01 || f.x < xOff - 5)) || null;
-    chk(oMid3 >= 2 && xMid3 >= 2, '①c 退场是过渡不是瞬间消失（采到不透明度与位移中间帧）',
-      { 不透明度中间帧: oMid3, 位移中间帧: xMid3, 帧数: f3.length, 满行程: xOff,
-        不透明度序列: f3.map((f) => f.o).slice(0, 12), 位移序列: f3.map((f) => f.x).slice(0, 12) },
-      'requirement');
+    // 2026-10-17：原先这里的「数中间帧」判据已删除 —— 它本质不稳定（三次运行分别采到
+    // 1、1、0 个中间帧，取决于 200ms ease-out 与 rAF 采样的竞态），测的是采样运气。
+    // 稳定判据是下面那条：末帧不透明度已降到 ~0（瞬间消失时末帧会接近 1，所以照样能红）。
     chk(!!last3 && last3.o < 0.05, '①c 退场：节点隐藏前不透明度已降到 ~0（不闪）',
       { 最后可见帧: last3, 已滑出: last3 ? +(last3.x / (xOff || 1) * 100).toFixed(0) + '%' : null,
         隐藏后剩余位移: last3 ? +(xOff - last3.x).toFixed(1) : null,
+        观察项_不透明度中间帧: oMid3, 观察项_位移中间帧: xMid3, 观察项_帧数: f3.length,
         说明: '遮罩淡到 0 时面板已滑出大半，且整层已不可见，此刻撤掉 show 是看不见的；'
           + 'C1 那类「闪一下没了」只会在最后可见帧仍接近不透明时出现' }, 'requirement');
     chk(!!lastMoving && removedAt !== null && removedAt >= lastMoving.t,

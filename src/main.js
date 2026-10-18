@@ -388,7 +388,31 @@ class App {
     }
   }
 
-  onEntityMoved() { /* 位置变化由耦合总线在下一帧自动重新识别插入关系 */ }
+  /**
+   * 器材拖动落定后的收尾。
+   *
+   * ⚠ 2026-10-17（交互改造 ④-6）：这里原先是**空函数**（只有一句"位置变化由耦合总线
+   * 在下一帧自动重新识别"）。那句话本身没错，但它掩盖了一个缺口 ——
+   * **拖动完全不入撤销栈**：位置是由 `interact.js` 直接写的 `ent.x/y`，绕过了
+   * `setProp()`（唯一会自动入栈的口子），于是「栈在跑、用户够不着」，
+   * 拖错了只能手动拖回去。
+   *
+   * ⇒ 现在由交互层把**起止坐标**传进来（`from`/`to`），在这里记一条 `move` 操作。
+   *   耦合总线那件事照旧 —— 撤销/重做回放位置后，下一帧它同样会重新识别插入关系。
+   */
+  onEntityMoved(ent, from, to) {
+    // 没真动过（起止同一格）⇒ 不产生历史条目，否则拖一下原地不动也会堆一条空的
+    if (!ent || !from || !to) return;
+    if (from.x === to.x && from.y === to.y) return;
+    const place = (p) => { ent.x = p.x; ent.y = p.y; this.markDirty(); };
+    this.undo.push({
+      kind: 'move',
+      label: `移动「${ent.def ? ent.def.name : ent.type}」`,
+      ent,
+      undo: () => place(from),
+      redo: () => place(to),
+    });
+  }
 
   // ══════════ 倾倒 ══════════
   doPour(from, to) {

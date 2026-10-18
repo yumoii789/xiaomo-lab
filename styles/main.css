@@ -59,11 +59,23 @@
      必然不透明 ✓，且两层都用**当前主题自己的变量** ⇒ 深/浅两套各自成立 ✓。 */
 @supports not (backdrop-filter: blur(1px)) {
   :root {
-    --glass: var(--bg) var(--glass);
-    --glass-2: var(--bg) var(--glass-2);
+    --glass: var(--bg);
+    --glass-2: var(--bg);
   }
-  :where(#topbar, .toast, .fx-orb, #statusbar, .drawer, .expel-mask, .about-mask) {
-    background: var(--bg) var(--glass);
+  /* ⚠ 2026-10-17 修复（由 glass-motion-probe 的 F2 抓到）。原写法是
+     :where(#topbar, .toast, .fx-orb, #statusbar, .drawer, .expel-mask, .about-mask)
+     { background: var(--bg) var(--glass); } —— 两层都错：
+
+     ① 语法非法：background 简写里非最后一层必须是 bg-image，而 var(--bg) 与 var(--glass)
+        都是纯颜色 ⇒ 整条声明被判无效 ⇒ 浏览器回退成 initial（transparent）
+        ⇒ 降级不但没生效，反而把背景从半透明变成全透明，比不写这条更糟。
+     ② 特异性不足：:where() 的特异性是 0,0,0，压不过 #topbar{…} 这类 ID 规则（1,0,0）；
+        且主题系统还会往 :root 写内联 --glass（F5 已复现），样式表改 --glass 同样改不动。
+
+     ⇒ 正解：把不透明的 --bg 直接落到载体上，并用 !important（唯一能赢内联的写法）。
+        这里不用 :where()，显式列出 ID/类选择器，与 !important 双重保险。 */
+  #topbar, #statusbar, .drawer, .toast, .fx-orb, .expel-mask, .about-mask {
+    background: var(--bg) !important;
   }
 }
 /* 支持 blur 但不支持 color-mix/两层语法的内核：退回本来就不透明的 --surface ✓ */
@@ -180,13 +192,13 @@ input[type=search]::-webkit-search-cancel-button{display:none}
 @media (hover:hover) and (pointer:fine){ .tb-select:hover{border-color:var(--border-2)} }
 .tb-select:focus{border-color:var(--accent-line)}
 
-.tb-check{
-  display:inline-flex; align-items:center; gap:5px; font-size:12.5px; color:var(--text-2);
-  padding:0 8px; height:32px; border-radius:var(--radius-sm); cursor:pointer;
-  transition:background-color var(--t-fast) var(--ease-out);
-}
-@media (hover:hover) and (pointer:fine){ .tb-check:hover{background:var(--surface-2)} }
-.tb-check input{accent-color:var(--accent); width:13px; height:13px; cursor:pointer}
+/* ⚠ 这里原有 `.tb-check{…}` / `.tb-check:hover` / `.tb-check input` 三条（task-64 删除）。
+   该控件已不存在：本文件与 index.html、src/** 全仓零节点、零创建代码。
+   它被顶栏的「速度档」下拉取代 —— 依据 tools/guard-plugins.mjs 的 provenance 注释：
+   「B1（k1-kernel）把『慢动作』复选框换成了速度档 select：#chkSlow → #selSpeed」。
+   现役替代者由 src/plugins/ui.toolbar.js 动态建进 topbar.right 槽：
+   `#selPreset` / `#selSpeed`，两者都带 class="tb-select"（本文件上方那三条即是它们的样式）。
+   删除原因：宿主不存在 ⇒ 这三条永远不可能命中，是死声明。 */
 
 /* 学分徽章 */
 .credit-badge{

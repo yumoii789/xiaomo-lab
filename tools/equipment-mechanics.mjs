@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════════
-// 无头验证：力学器材 8 件的解析解 + 跨域耦合（力学 → 化学天平）
+// 无头验证：力学器材 9 件的解析解 + 跨域耦合（力学 → 化学天平）
 //
 //   node tools/equipment-mechanics.mjs
 //
@@ -36,7 +36,7 @@ host.installAll();
 bindRegistry(host.registry('equipment'));
 
 const MID = 'xiaomo.equipment.mechanics';
-const MINE = ['inclinetrack', 'springbob', 'pendulum', 'cartrack', 'freefall', 'lever', 'pulley', 'frictionblock'];
+const MINE = ['inclinetrack', 'springbob', 'pendulum', 'cartrack', 'freefall', 'lever', 'pulley', 'frictionblock', 'accelerometer'];
 
 let pass = 0, fail = 0;
 const ok = (cond, msg) => {
@@ -122,18 +122,18 @@ function weigh(specs, sec = 0.12) {
 console.log('\x1b[1m小墨实验室 · 力学器材（W3a）无头验证\x1b[0m');
 
 // ══════════════════════════════════════════════════════════
-head('① 注册表与器材栏分组（8 件）');
+head('① 注册表与器材栏分组（9 件）');
 {
   const all = list();
   const mine = all.filter(d => MINE.includes(d.type));
-  ok(mine.length === 8, `力学器材注册 8 件（实际 ${mine.length}）：` + mine.map(d => d.name).join('、'));
+  ok(mine.length === 9, `力学器材注册 9 件（实际 ${mine.length}）：` + mine.map(d => d.name).join('、'));
   ok(mine.every(d => d.domain === 'physics'), 'domain 全部是 physics');
   ok(mine.every(d => d.cat === '力学'), 'cat 全部是 力学');
   ok(mine.every(d => typeof d.create === 'function'), '每件都有 create 工厂');
   ok(mine.every(d => d.fields && d.fields.length >= 4), '每件都有可调参数（fields ≥ 4）');
   ok(mine.every(d => (d.ports || []).length === 0), '力学器材不接电线/导管（ports 为空）');
   const g = groups({ domain: 'physics' }).find(x => x.cat === '力学');
-  ok(!!g && g.items.length === 8, `器材栏出现「物理 · 力学」分组，8 件（实际 ${g ? g.items.length : 0}）`);
+  ok(!!g && g.items.length === 9, `器材栏出现「物理 · 力学」分组，9 件（实际 ${g ? g.items.length : 0}）`);
   ok(mine.every(d => d.creator === undefined || true) && mine.every(d => d.desc && d.tags.length > 0),
     '每件都有说明与标签');
   console.log(`  · 插件 id ${mechanicsPlugin.id}｜name ${mechanicsPlugin.name}｜order ${mechanicsPlugin.order}`);
@@ -404,14 +404,14 @@ head('⑪ 称量归总线所有：容器零回归、非容器自报 mass、m>0 �
   ok(g0.bal.state.onPlate === '摩擦块',
     `m>0 守卫实测 onPlate = ${JSON.stringify(g0.bal.state.onPlate)}（不是 "摩擦块,摩擦块,单摆,杠杆"）`);
 
-  // 力学 8 件一律没有 vessel —— 伪造容器会炸 ui/data.js、system.credit.js、ui.inspector.js
+  // 力学 9 件一律没有 vessel —— 伪造容器会炸 ui/data.js、system.credit.js、ui.inspector.js
   const withVessel = MINE.filter((t) => { const e = create(t, 100, 100); return !!e && !!e.vessel; });
   ok(withVessel.length === 0,
-    `力学 8 件的 vessel 字段逐件检查：${withVessel.length === 0 ? '全部为空（0 件有 vessel）' : withVessel.join('、')}`);
+    `力学 9 件的 vessel 字段逐件检查：${withVessel.length === 0 ? '全部为空（0 件有 vessel）' : withVessel.join('、')}`);
 }
 
 // ══════════════════════════════════════════════════════════
-head('⑫ 渲染冒烟：8 件器材的 render() 全部可执行（含动态读数分支）');
+head('⑫ 渲染冒烟：9 件器材的 render() 全部可执行（含动态读数分支）');
 {
   for (const t of MINE) {
     const e = create(t, 400, 300);
@@ -429,13 +429,13 @@ head('⑫ 渲染冒烟：8 件器材的 render() 全部可执行（含动态读�
 }
 
 // ══════════════════════════════════════════════════════════
-head('⑬ 可单独启停：关掉插件 → 8 件从注册表与器材栏消失；打开 → 回来');
+head('⑬ 可单独启停：关掉插件 → 9 件从注册表与器材栏消失；打开 → 回来');
 {
   const before = list().length;
   host.disable(MID);
   const after = list().length;
   const gone = list().filter(d => MINE.includes(d.type)).length;
-  ok(after === before - 8, `停用后器材总数 ${before} → ${after}（少 8 件）`);
+  ok(after === before - 9, `停用后器材总数 ${before} → ${after}（少 9 件）`);
   ok(gone === 0, `停用后注册表里没有力学器材（剩 ${gone} 件）`);
   const g = groups({ domain: 'physics' }).find(x => x.cat === '力学');
   ok(!g || g.items.length === 0, `器材栏「物理 · 力学」分组随之消失（${g ? g.items.length : 0} 件）`);
@@ -444,12 +444,79 @@ head('⑬ 可单独启停：关掉插件 → 8 件从注册表与器材栏消失
   host.enable(MID);
   const back = list().length;
   ok(back === before, `重新启用后器材总数恢复 ${back} 件`);
-  ok(list().filter(d => MINE.includes(d.type)).length === 8, '8 件力学器材全部回到注册表');
+  ok(list().filter(d => MINE.includes(d.type)).length === 9, '9 件力学器材全部回到注册表');
   const e = create('pendulum', 100, 100);
   ok(!!e && e.type === 'pendulum', '重新启用后器材可正常实例化');
   const sim = build([{ type: 'pendulum', x: 100, y: 100, props: { L: 1, m: 200, theta0: 5, damp: 0, g: 9.8 } }]);
   run(sim, 12);
   near(sim.ents[0].state.T, 2 * Math.PI * Math.sqrt(1 / 9.8), 2e-2, '重新启用后单摆周期依旧正确', ' s');
+}
+
+head('⑭ 三轴加速度计（C8）：重力投影 + 「合量恒为 g」不变量');
+{
+  const G = 9.8;
+  const acc = (props) => {
+    const s = build([{ type: 'accelerometer', x: 200, y: 200, props }]);
+    run(s, 3);
+    return s.ents[0].state;
+  };
+
+  // ① 平放：重力全落在 Z
+  const flat = acc({ g: G, pitch: 0, roll: 0, tare: 0 });
+  near(flat.aX, 0, 1e-9, '平放：X 轴读数为 0', ' m/s²');
+  near(flat.aY, 0, 1e-9, '平放：Y 轴读数为 0', ' m/s²');
+  near(flat.aZ, G, 1e-9, '平放：重力全部落在 Z 轴', ' m/s²');
+
+  // ② 立起 90°：重力全落在 X
+  const up = acc({ g: G, pitch: 90, roll: 0, tare: 0 });
+  near(up.aX, G, 1e-9, '立起 90°：重力全部落在 X 轴', ' m/s²');
+  near(up.aZ, 0, 1e-9, '立起 90°：Z 轴读数回到 0', ' m/s²');
+
+  // ③ 不变量：任意姿态 + 任意安装偏差，合量恒为 g（这是本件的**独立**判据）
+  const CASES_A = [
+    { pitch: 30, roll: 0, tare: 0 },
+    { pitch: 0, roll: 45, tare: 0 },
+    { pitch: -60, roll: 25, tare: 0 },
+    { pitch: 30, roll: 15, tare: 17 },
+    { pitch: 0, roll: 0, tare: -30 },
+  ];
+  let worst = -1, worstAt = '';
+  for (const c of CASES_A) {
+    const st = acc({ g: G, ...c });
+    const d = Math.abs(st.total - G);
+    if (d > worst) { worst = d; worstAt = `pitch=${c.pitch} roll=${c.roll} tare=${c.tare}`; }
+  }
+  ok(worst < 1e-9,
+    `不变量「合量恒为 g」在 ${CASES_A.length} 组姿态（含安装偏差 ±30°）下成立（最大偏差 ${worst.toExponential(2)}，出现在 ${worstAt}）`);
+
+  // ④ 安装偏差必须**真的**在动读数 —— 否则它就是个永不生效的死字段
+  const t0 = acc({ g: G, pitch: 0, roll: 0, tare: 0 });
+  const t17 = acc({ g: G, pitch: 0, roll: 0, tare: 17 });
+  ok(Math.abs(t17.aX - t0.aX) > 1e-6 && Math.abs(t17.aZ - t0.aZ) > 1e-6,
+    `安装偏差 17° 真的改动了 X/Z 读数（ΔX=${(t17.aX - t0.aX).toFixed(4)}、ΔZ=${(t17.aZ - t0.aZ).toFixed(4)}）`);
+
+  // ⑤ 改 g 会等比缩放 ⇒ 读数不是写死的常数
+  const g20 = acc({ g: 20, pitch: 0, roll: 0, tare: 0 });
+  near(g20.aZ, 20, 1e-9, '改用 g=20 N/kg 后 Z 轴读数随之变成 20（不是写死 9.8）', ' m/s²');
+
+  // ⑥ 与自报 stats 闭环：4 行、按序、带单位
+  const def = list().find((d) => d.type === 'accelerometer');
+  const st4 = (def && def.stats) || [];
+  ok(st4.length === 4 && st4.every((s) => s.label && s.unit === 'm/s²' && typeof s.read === 'function'),
+    `自报 stats 4 行且都带 m/s²：${st4.map((s) => s.label).join(' / ')}`);
+  const ent = create('accelerometer', 200, 200);
+  const shown = st4.map((s) => s.read(ent));
+  ok(shown.every((v) => Number.isFinite(v)),
+    `4 行 read() 在真实体上全部给出有限值：${shown.map((v) => v.toFixed(3)).join(' / ')}`);
+  // ⚠ 上面那条**单靠自己永不红**（初值全是 0，而 0 是有限值）。真正的闭环断言在下面：
+  //   步进过的实体上，4 行 read() 必须等于 state 的 4 个键，且**至少 Z 轴非零**。
+  const s2 = build([{ type: 'accelerometer', x: 200, y: 200, props: { g: G, pitch: 30, roll: 0, tare: 0 } }]);
+  run(s2, 3);
+  const e2 = s2.ents[0];
+  const want = [e2.state.aX, e2.state.aY, e2.state.aZ, e2.state.total];
+  const got = st4.map((s) => s.read(e2));
+  ok(got.every((v, i) => Math.abs(v - want[i]) < 1e-12) && Math.abs(got[2]) > 1e-6,
+    `步进后 4 行 read() 与 state 逐键相符且 Z 轴非零：${got.map((v) => v.toFixed(4)).join(' / ')}`);
 }
 
 // ══════════════════════════════════════════════════════════

@@ -206,6 +206,13 @@ const hotplateDef = {
   ],
   defaults: { lit: false, power: 600, plateMass: 1200, lossK: 6 },
   state: { t: 0, Q: 0, surf: 25, heatOut: 0 },
+  // ── B4 第 3 步 · 热学：4 行，逐字基线取自**跑过 step 的实体**的当前兜底输出 ──
+  stats: [
+    { label: '加热时长', unit: 's', read: (e) => e.state.t },
+    { label: '吸放热', unit: 'J', read: (e) => e.state.Q },
+    { label: '表面温度', unit: '℃', read: (e) => e.state.surf },
+    { label: '散热功率', unit: 'W', read: (e) => e.state.heatOut },
+  ],
   create: (x, y) => new HotPlate(hotplateDef, x, y),
 };
 DEFS.push(() => define(hotplateDef));
@@ -415,6 +422,12 @@ const conductionbarDef = {
     k: 400, rhoC: 3.45e6, length: 30, area: 4, tHot: 200, tCold: 25, nodes: 13, speed: 60,
   },
   state: { flux: 0, fluxBar: 0, mid: 25 },
+  // ── B4 第 3 步 · 热学：3 行 ──
+  stats: [
+    { label: '热流', unit: 'W', read: (e) => e.state.flux },
+    { label: '棒内热流', unit: 'W', read: (e) => e.state.fluxBar },
+    { label: '中点温度', unit: '℃', read: (e) => e.state.mid },
+  ],
   create: (x, y) => new ConductionBar(conductionbarDef, x, y),
 };
 DEFS.push(() => define(conductionbarDef));
@@ -590,6 +603,14 @@ const boilerDef = {
   ],
   defaults: { lit: false, power: 800, pressure: 101.325, water: 400, lossK: 5 },
   state: { waterT: 25, steam: 0, bp: 100, boiling: false, heatOut: 0 },
+  // ── B4 第 3 步 · 热学：5 行 ──
+  stats: [
+    { label: '水温', unit: '℃', read: (e) => e.state.waterT },
+    { label: '已汽化', unit: 'g', read: (e) => e.state.steam },
+    { label: '沸点', unit: '℃', read: (e) => e.state.bp },
+    { label: '散热功率', unit: 'W', read: (e) => e.state.heatOut },
+    { label: '加热时长', unit: 's', read: (e) => e.state.t },
+  ],
   create: (x, y) => new Boiler(boilerDef, x, y),
 };
 DEFS.push(() => define(boilerDef));
@@ -651,6 +672,16 @@ const expansionballDef = {
   ],
   defaults: { T: 25, d0: 49.6, ringD: 50, alpha: 16.5 },
   state: { d: 49.6, dL: 0, Tc: 0, pass: true },
+  // ── B4 第 3 步 · 热学：4 行 ──
+  //    ⚠ 末行「球温度」在 `STATE_LABELS.热学` 里**没有**条目（表里只有 `Tc: 当前温度`），
+  //      它是由本器材的 `fields` 提供的（`fd.label` 优先于域表，见 `inspector.js:461`）
+  //      ⇒ 照兜底写「球温度」+ ℃，不可省略，否则退役热学表后这一行会变样。
+  stats: [
+    { label: '球径', unit: 'mm', read: (e) => e.state.d },
+    { label: '伸长量', unit: 'mm', read: (e) => e.state.dL },
+    { label: '当前温度', unit: '℃', read: (e) => e.state.Tc },
+    { label: '球温度', unit: '℃', read: (e) => e.state.T },
+  ],
   create: (x, y) => new ExpansionBall(expansionballDef, x, y),
 };
 DEFS.push(() => define(expansionballDef));

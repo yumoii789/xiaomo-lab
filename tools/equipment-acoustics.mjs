@@ -249,11 +249,19 @@ ok(true, '4 件器材的 render() 在无头 Canvas 替身上全部跑通（无�
 head('§7 可单独启停：关掉本插件 → 4 件从注册表归零，再打开 → 4 件回来');
 // ══════════════════════════════════════════════════════════
 const mineCount = () => host.registry('equipment').list().filter(d => MINE.includes(d.type)).length;
+// 停用前先记下"别人的器材"是哪几件 —— 后面用**相对量**验证"停用只影响本插件"
+const othersBefore = host.registry('equipment').list().filter(d => !MINE.includes(d.type)).map(d => d.type).sort();
 ok(mineCount() === 4, `初始：注册表里本插件 ${mineCount()} 件`);
 ok(host.disable('xiaomo.equipment.acoustics') === true, "disable('xiaomo.equipment.acoustics') 返回 true");
 ok(mineCount() === 0, `停用后：本插件器材 ${mineCount()} 件（器材栏里会一起消失）`);
-ok(host.registry('equipment').list().length === 10 && host.registry('equipment').has('battery') && host.registry('equipment').has('rheostat'),
-  `停用**只影响本插件**：同装的 electrical.js 10 件仍在注册表里（当前 ${host.registry('equipment').list().length} 件）`);
+// ⚠ 这里原本写死 `list().length === 10`（"同装的 electrical.js 10 件"）——但"别人有几件器材"**不是本套件要验证的性质**，
+//   写死件数只会随别人加器材而过期（electrical.js 加 multimeter 之后就是 11 件，这条随即变红 ⇒ 假红）。
+//   要验证的性质是**「停用只影响本插件」**，所以改成相对量：停用前后，非本插件器材的类型集合必须逐项相同。
+const othersAfter = host.registry('equipment').list().filter(d => !MINE.includes(d.type)).map(d => d.type).sort();
+ok(othersAfter.length > 0 && othersAfter.join('|') === othersBefore.join('|'),
+  `停用**只影响本插件**：非本插件器材 ${othersBefore.length} 件一件不少（停用后 ${othersAfter.length} 件：${othersAfter.join('/')}）`);
+ok(host.registry('equipment').has('battery') && host.registry('equipment').has('rheostat'),
+  '点名抽查：同装的 battery / rheostat 仍在注册表里（相对量之外的定点确认）');
 ok(host.enable('xiaomo.equipment.acoustics') === true && mineCount() === 4,
   `重新启用后：本插件器材回到 ${mineCount()} 件（不翻倍、不残留）`);
 const after = host.registry('equipment').list();

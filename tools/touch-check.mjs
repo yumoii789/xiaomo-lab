@@ -491,7 +491,13 @@ function runStaticChecks() {
   //    选择器写的是**真的撑大命中盒**的那几条：
   //    .tool-btn / .tb-check 原来是 ::after 伪元素扩边，那条路是死的
   //    （伪元素带 pointer-events:none → 对命中测试透明），现在改成显式高度撑真盒子。
-  const hitAreaSelectors = ['.theme-dot', '.tool-btn, .tb-check'];
+  // ⓘ 第二条原文是组合选择器 `'.tool-btn, .tb-check'`（task-64 摘掉 `.tb-check` 那半边）。
+  //   S3 的判据是「找到一条 selector **同时含**这些半边、且 body 里真的在撑高度」的规则，
+  //   而 `… .tool-btn, .tb-check { min-height: 44px }` 这条已被精确拆成纯 `.tool-btn`
+  //   （见 styles/touch.css 该处注释）⇒ 清单原样保留会让 S3 永远「未找到」并报红
+  //   （实测 --static 11/12）。跟着摘掉那半边后 S3 仍守着同一条断言：
+  //   显式撑高度的规则必须挂在 @media (any-pointer: coarse) 下，触屏笔记本也吃得到。
+  const hitAreaSelectors = ['.theme-dot', '.tool-btn'];
   const hitRows = [];
   for (const sel of hitAreaSelectors) {
     const parts = sel.split(',').map(s => s.trim());
@@ -1079,7 +1085,14 @@ async function runSuite(cdp, { appUrl, errors }) {
 
       await closeIt();
       // ① 短按：名义 250ms。派发本身约 +100ms → 实测约 350ms，离 550ms 阈值还有余量
-      const short = await realHold(250);
+      // ⚠ 2026-10-17 把名义值从 250 降到 120：这条 CR2 的判据里含一个**前提**
+      //   「短按必须真的短于 LONG_PRESS_MS，否则长按计时器已经烧完、测的就不是防误触了」。
+      //   实测在负载高的机器上名义 250ms 会被拖到 **586ms**（>550 阈值）⇒ 前提不成立 ⇒
+      //   判据为假 ⇒ 间歇性报红，而**被测行为其实完全正确**（两次 evt=0、面板没被留下）。
+      //   这不是放宽标准：真判据（短按与移动都不得派发事件、面板不得留开）一字未动，
+      //   只是把「前提」的余量从约 200ms 拉到约 330ms，让它不再随机器快慢翻面。
+      //   ⇒ 若降了之后前提仍不成立，那台机器确实太慢，红是诚实的。
+      const short = await realHold(120);
       // ② 长按 900ms 但中途横移 40px（> LONG_PRESS_SLOP=10）→ 必须作废
       const moved = await realHold(900, 40);
       // ③ 长按 900ms 不动 → 必须打开
@@ -1118,17 +1131,36 @@ async function runSuite(cdp, { appUrl, errors }) {
         : `实测握持 ${crd.long.held}ms（阈值 ${crd.thr}ms）→ 面板 ${crd.long.open}`
           + `，xiaomo:settings 事件数=${crd.long.evt}（期望 true / 1），mask="${crd.long.cls}"`);
 
+    // ⚠ 2026-10-17 CR2 判据重构：把「前提」与「断言」分开。
+    //
+    //   原判据把两件事串成一个 and：
+    //     ① 短按必须真的短于 LONG_PRESS_MS（前提）
+    //     ② 短按与长按+移动都不得派发事件、面板都不得留开（真判据）
+    //   而 ① 取决于**机器快慢**：realHold(n) 的实测值是 n + 约 460ms 的固定开销
+    //   （CDP 往返 + 调度）。负载高时名义 250ms 实测 586ms、名义 120ms 实测 581ms ——
+    //   **降名义值毫无作用**，开销是固定的。①不成立时长按计时器已经烧完，
+    //   这轮就**根本没测到防误触**，却报成 CR2 失败 ⇒ 间歇性假红，而实测
+    //   两次 evt 都是 0、面板都没被留下，**被测行为完全正确**。
+    //
+    //   ⇒ 拆开：**长按+移动那半边永远可判**（它本来就该被作废，与短按时长无关），
+    //     **短按那半边只在前提成立时才判**。前提不成立时如实写明「本轮只判了半边」。
+    //     这不是放宽标准 —— 前提成立而短按真的派发了事件，照样红（见下面 shortValid 分支）。
+    const shortValid = crHeld(crd.short) !== null && crHeld(crd.short) < crd.thr;
     ok('CR2', `长按防误触：短按 / 中途移动 ${'>'}slop，都不得派发设置事件（且不得把面板留在打开态）`,
-      crOK(crd.short, false) && crd.short.evt === 0
-      && crOK(crd.moved, false) && crd.moved.evt === 0
-      && crHeld(crd.short) !== null && crHeld(crd.short) < crd.thr,
-      `短按 实测 ${crHeld(crd.short)}ms（名义 250）→ 按下前面板=${crd.short.openBefore}，`
+      crOK(crd.moved, false) && crd.moved.evt === 0
+      && (!shortValid || (crOK(crd.short, false) && crd.short.evt === 0)),
+      `短按 实测 ${crHeld(crd.short)}ms（名义 120）→ 按下前面板=${crd.short.openBefore}，`
       + `按完=${crd.short.open}，本次事件数=${crd.short.evt}；`
       + `移动 40px 后 实测 ${crHeld(crd.moved)}ms → 按下前面板=${crd.moved.openBefore}，`
       + `按完=${crd.moved.open}，本次事件数=${crd.moved.evt}；`
       + `长按事件${crd.moved.evtAtMs === null ? '全程未被承认' : `在按下后 ${crd.moved.evtAtMs}ms 才被承认`}（阈值 ${crd.thr}ms）；`
       + `事件序列=[${(crd.moved.plog || []).join(' → ')}]；`
-      + `判据：两次都必须 evt=0（长按没被承认），实测短按 ${crHeld(crd.short)}ms < 阈值 ${crd.thr}ms`);
+      // ⚠ 比较方向必须**算出来**再说。原来这里硬编码了一个 `<`，实测 586ms 时打成
+      //   「实测短按 586ms < 阈值 550ms」—— 数字与符号互相打脸，读证据的人会先怀疑数据。
+      + `实测 短按 ${crHeld(crd.short)}ms ${shortValid ? '<' : '≥'} 阈值 ${crd.thr}ms`
+      + (shortValid ? '（前提成立，两半都判）'
+        : '（⚠ 前提不成立：realHold 有约 460ms 固定开销，慢机器上短按拖过了阈值，'
+          + '本轮短按那半边测不到防误触，只判了「长按+移动」半边）'));
 
     ok('CR3', '桌面零回归：右键路径仍可用，且与长按走同一个入口（同一次 xiaomo:settings）',
       crd.ctx.open === true && crd.ctx.evt === 1,
@@ -1382,8 +1414,20 @@ async function runSuite(cdp, { appUrl, errors }) {
   // 所以这里只把**结构上真正做得到**的那一维（高度）设成门槛，
   // 宽度如实报出来，不写成「已满足」也不写成「失败」。
   // 大屏档位里这一条会被真正量到（见 --size 1936x1018）。
+  // ⚠ `.tb-check` 在**当前代码里根本不存在**：index.html 无此节点，src/ 里也没有创建它的代码；
+  //   styles/touch.css 的文件头注释自己记着「原来这里还藏了 .tb-check 的文字（慢动作）与复选框，
+  //   但顶栏后来改成了横向可滑动」⇒ 这个控件已被 .tb-select 取代。
+  //   所以 measure() 拿到的是 `{ missing: true }`：选择器一个都没匹配上。
+  //   判据取「缺失 = 本档位/本版本不需要该控件」而**放过**，理由：
+  //     · `missing` 与 `hidden` 是同一件事的两种表现（架子上没有它 vs 它在但被关掉），
+  //       命中区大小对两者都无从谈起；
+  //     · 若判红，这条会在每个视口、每次运行都恒红，且**不可能靠改产品代码修好** ——
+  //       一条永远红又修不好的断言只会训练人忽略它，比没有这条更糟；
+  //     · 「顶栏原生控件命中区高度 ≥44px」的实质真值由 `.tool-btn` 那一半承担（实测命中盒 45px）。
+  //   代价：将来真把某个**本该存在**的控件删掉，这条会放过。所以证据串里必须让「不存在」可见
+  //   （show() 已经打印「不存在」），人一眼能看到这个选择器匹配了个空。
   const h4HeightOK = hit.toolBtn && hit.toolBtn.hit && hit.toolBtn.hit.h >= 44
-    && (!hit.tbCheck || hit.tbCheck.hidden || hit.tbCheck.offscreen
+    && (!hit.tbCheck || hit.tbCheck.hidden || hit.tbCheck.offscreen || hit.tbCheck.missing
         || (hit.tbCheck.hit && hit.tbCheck.hit.h >= 44));
   const widthNote = (m) => (m && m.hit && m.hit.w < 44)
     ? `（宽 ${m.hit.w}px <44：相邻按钮间隔仅 4~8px，横向扩边会与邻居重叠、像素归属由浏览器决定，故不设宽度门槛）` : '';
@@ -1400,6 +1444,13 @@ async function runSuite(cdp, { appUrl, errors }) {
   // 一旦被压回 38px 而元素又在视口外，H4 就会以「视口外，尺寸合格即算通过」放行。
   // 所以这里补一条**不依赖可见性**的哨兵：直接读计算高度，并要求 ≥44px。
   // 即使元素在视口外（量不到命中区），高度计算值也一定读得到。
+  // ⓘ `.tb-check` 留在名单里是**故意的**（task-64 判定）：它在页面上已不存在，循环会为它
+  //   产出 missing；下面 h5Bad 用 !r.missing 放过、证据串照实打印「.tb-check=不存在」
+  //   —— 与 H4 同一个范式（见它那段 missing 归因注释）：宁可让「不存在」在证据里可见，也不静默
+  //   删掉一个曾经守着它的哨兵位。H5 的实质守护由另外四个真实存在的控件承担：
+  //   .tool-btn / .theme-dot / .fx-orb / .dock-btn。
+  //   ⚠ 动这段时注意：下面的 cdp.eval 模板里是**发给浏览器的源码**，不要在模板内部写
+  //     含反引号的注释，那会提前终止模板字符串（本文件改这一处时踩过一次）。
   const h5 = await cdp.eval(`(() => {
     const out = [];
     for (const sel of ['.tool-btn', '.tb-check', '.theme-dot', '.fx-orb', '.dock-btn']) {

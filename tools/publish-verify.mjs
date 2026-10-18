@@ -59,7 +59,18 @@ const fail = (msg) => { console.error('✗ ' + msg); process.exit(2); };
  * 而本工具是只读的。复制成两份常量也不行（会漂移），所以解析同一份源码。
  */
 function readTarget() {
-  const src = readFileSync(path.join(ROOT, 'tools/publish-github.mjs'), 'utf8');
+  const raw = readFileSync(path.join(ROOT, 'tools/publish-github.mjs'), 'utf8');
+  // ⚠ **先剥注释再解析**（T-10）。`pick` 用的是 `^const NAME = '...'` 这种**行首锚定**的正则，
+  //    它分不清「真代码」与「注释里的同型文本」：只要有人把旧值注释掉留在旁边
+  //        // const OWNER = 'old-account';
+  //    正则就会**先**匹配到注释那一行，于是发布目标被静默换成错值 —— 而工具照常往下跑、不报错。
+  //    这正是 task-64 处理过的同型毛病（静默失去覆盖），所以在这里一次剥干净。
+  //    剥的顺序要紧：**先块注释、后行注释**。块注释里可能含 `//`，行注释里也可能含 `/*`，
+  //    反过来剥会把块注释的开头吃掉、留下一截残骸继续参与匹配。
+  const src = raw
+    .replace(/\/\*[\s\S]*?\*\//g, '')       // ① 块注释 /* … */
+    .replace(/^[ \t]*\/\/.*$/gm, '')        // ② 整行注释
+    .replace(/([^:])\/\/[^\n]*/g, '$1');    // ③ 行尾注释（前面不是 ':' ⇒ 不碰 'https://…'）
   const pick = (name) => {
     const m = new RegExp(`^const ${name} = '([^']+)'`, 'm').exec(src);
     return m ? m[1] : null;
@@ -67,6 +78,16 @@ function readTarget() {
   const owner = pick('OWNER'), repo = pick('REPO'), branch = pick('BRANCH');
   if (!owner || !repo || !branch) fail('tools/publish-github.mjs 里读不到 OWNER/REPO/BRANCH，地址解析失败。');
   return { owner, repo, branch };
+}
+
+// ── `--dump-target`：只解析并打印发布目标，然后退出（**不联网、不读远端**）──────────────
+//    为什么要这个入口：`readTarget()` 是从**源码文本**里正则解析的，属于「静默取错」高风险区
+//    （见上方的剥注释说明）。没有入口就没法把这段逻辑测起来 —— 而它一旦取错，
+//    工具会拿着**错的仓库**去做「发布后自检」，结论看着很正常却是对着别人家仓库说的。
+//    有了它，验证方式变得很直接：往 publish-github.mjs 里临时插一行同型注释，本命令应**不变**。
+if (process.argv.includes('--dump-target')) {
+  console.log(JSON.stringify(readTarget()));
+  process.exit(0);
 }
 
 // ── GitHub API（只读；node:https + 系统证书库，见文件头「证书坑」）──

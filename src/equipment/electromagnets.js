@@ -321,6 +321,11 @@ const barDef = {
     { k: 'flip', label: '磁极对调', type: 'checkbox', text: '对调 N / S（= 把磁铁掉个头）' },
     { k: 'showField', label: '方向采样', type: 'checkbox', text: '画一圈方向场箭头' },
   ],
+  // ── B4 第 3 步 · 电磁：2 行 ──
+  stats: [
+    { label: '磁极半距', unit: 'px', read: (e) => e.state.half },
+    { label: '两极间距', unit: 'px', read: (e) => e.state.poleGap },
+  ],
   create: (x, y) => new BarMagnet(barDef, x, y),
 };
 DEFS.push(() => define(barDef));
@@ -411,6 +416,13 @@ const compassDef = {
     { k: 'bodyAngle', label: '本体方位', type: 'range', min: 0, max: 360, step: 5, unit: '°' },
     { k: 'north', label: '环境场方向', type: 'range', min: 0, max: 360, step: 5, unit: '°' },
   ],
+  // ── B4 第 3 步 · 电磁：4 行 ──
+  stats: [
+    { label: '磁针指向', unit: '°', read: (e) => e.state.needleDeg },
+    { label: '场源数', unit: '个', read: (e) => e.state.srcCount },
+    { label: '相对本体偏转', unit: '°', read: (e) => e.state.deflection },
+    { label: '最近磁体距离', unit: 'px', read: (e) => e.state.srcDist },
+  ],
   create: (x, y) => new Compass(compassDef, x, y),
 };
 DEFS.push(() => define(compassDef));
@@ -469,6 +481,15 @@ const chargeDef = {
   fields: [
     { k: 'q', label: '电量 q', type: 'range', min: -5, max: 5, step: 0.1, unit: 'µC' },
     { k: 'showField', label: '方向采样', type: 'checkbox', text: '画一圈电场方向箭头' },
+  ],
+  // ── B4 第 3 步 · 电磁：4 行 ──
+  //    ⚠ 首行「电量 q」的标签**不来自域表**（电磁表里没有 `q`），由本器材 `fields` 提供；
+  //      「带电符号」的 unit 是**空串**（`sign: ['带电符号','']`）⇒ 只写 label、不写 unit。
+  stats: [
+    { label: '电量 q', unit: 'µC', read: (e) => e.state.q },
+    { label: '带电符号', read: (e) => e.state.sign },
+    { label: '电量大小 |q|', unit: 'µC', read: (e) => e.state.qAbs },
+    { label: '方向箭头支数', unit: '支', read: (e) => e.state.lineCount },
   ],
   create: (x, y) => new Charge(chargeDef, x, y),
 };
@@ -538,6 +559,12 @@ const testDef = {
   state: { force: null, forceDeg: null, nRegions: 0, nCharges: 0, inField: false, reason: '' },
   tags: ['检验电荷', '受力', '电场力', 'qE'],
   fields: [{ k: 'q', label: '电量 q', type: 'range', min: -5, max: 5, step: 0.1, unit: 'µC' }],
+  // ── B4 第 3 步 · 电磁：3 行 ──
+  stats: [
+    { label: '受力方向', unit: '°', read: (e) => e.state.forceDeg },
+    { label: '所在场区数', unit: '个', read: (e) => e.state.nRegions },
+    { label: '附近电荷数', unit: '个', read: (e) => e.state.nCharges },
+  ],
   create: (x, y) => new TestCharge(testDef, x, y),
 };
 DEFS.push(() => define(testDef));
@@ -588,6 +615,11 @@ const efieldDef = {
     { k: 'flip', label: '反向', type: 'checkbox', text: '场向反向 180°' },
     { k: 'showPlates', label: '极板', type: 'checkbox', text: '画两块极板' },
   ],
+  // ── B4 第 3 步 · 电磁：1 行 ──
+  //    ⚠ 同分类的 `bfield`（匀强磁场）**不在此列**：两个 state 键都不是数字
+  //      （`symbol` 是字符串、`outOfPage` 是布尔）⇒ 兜底一行也不产 ⇒ 面板显示「状态 · 无读数」，
+  //      它**从不读域表**，退役电磁表对它无影响（见 `inspector.js:774` 的说明）。
+  stats: [{ label: '场向角', unit: '°', read: (e) => e.state.fieldDeg }],
   create: (x, y) => new UniformEField(efieldDef, x, y),
 };
 DEFS.push(() => define(efieldDef));

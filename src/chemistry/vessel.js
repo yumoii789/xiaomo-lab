@@ -274,7 +274,11 @@ export class VesselModel {
   pourInto(other, fraction = 0.6) {
     const f = Math.max(0, Math.min(1, fraction));
     const vol = this.volume * f;
-    if (vol <= 0 && this.solid.size === 0) return 0;
+    // ⚠ 目标容器自报「我要接管气体」（collectGas）—— 集气瓶就是这一条能力。
+    //    只装气体的容器 volume=0 且无固体 ⇒ 下面**两处**守卫都要为它放行：
+    //    守卫①会因 volume=0 且无固体而劝退，即便放过去守卫②也会被 v=0 再拦一次。
+    const takeGas = !!other.collectGas && this.gas.size > 0;
+    if (vol <= 0 && this.solid.size === 0 && !takeGas) return 0;
 
     // ⚠ 目标容器可以自报「我只留液体」（retainSolids）—— 过滤就是这一条能力。
     //    · 缺省 undefined ⇒ false ⇒ 既有行为逐字不变；
@@ -283,7 +287,7 @@ export class VesselModel {
     const retain = !!other.retainSolids;
     const room = other.capacity - other.volume;
     const v = Math.min(vol, room);
-    if (v <= 0) return 0;
+    if (v <= 0 && !takeGas) return 0;   // 守卫②：只装气体时 v 必为 0，也必须放行
     const ratio = vol > 0 ? v / vol : 0;
 
     other.volume += v;
@@ -303,6 +307,17 @@ export class VesselModel {
         this.solid.set(id, g - move);
         if (this.solid.get(id) < 1e-9) this.solid.delete(id);
         other.solid.set(id, (other.solid.get(id) || 0) + move);
+      }
+    }
+    if (takeGas) {
+      // 气体按 f 走：与 solid 同口径 —— 气体不计入 volume，没有容量夹紧问题，不用液体的 ratio·f。
+      // 于是仓库里"转移比例"的口径仍然只有两条（液体 ratio·f / 固体·气体 f），本件不扩大那条约定的怪癖。
+      for (const [id, q] of [...this.gas]) {
+        const move = q * f;
+        if (move <= 0) continue;
+        this.gas.set(id, q - move);
+        if (this.gas.get(id) < 1e-12) this.gas.delete(id);
+        other.gas.set(id, (other.gas.get(id) || 0) + move);
       }
     }
     // 混合温度

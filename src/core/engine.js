@@ -51,6 +51,12 @@ export class Engine {
     this.world = world;
 
     this.w = 0; this.h = 0; this.dpr = 1;
+    /**
+     * 画布视口偏移（世界坐标 = 屏幕坐标 − pan）—— 「拖动实验室整体界面」的真源。
+     * ⚠ 它不是场景数据：**不进 world、不进存档、不参与撤销**，只是本实例的视角状态，
+     *   所以存盘/回放/账目都不该看见它（谓词见 tools/pan-probe.mjs §②）。
+     */
+    this.pan = { x: 0, y: 0 };
     /** 当前速度档（B1 的真源）；合法值**恒为** this.speeds 的元素（setSpeed 会吸附） */
     this.speed = 1;
     /** 档位表（B1）：UI 从这里取档，不再把 0.25/1 硬编码在工具栏里 */
@@ -113,6 +119,33 @@ export class Engine {
 
   /** B1/B5：把「画面需要重绘」交给引擎（UI 层改动场景或选中态时调用） */
   markDirty() { this._needsRender = true; }
+
+  /**
+   * 屏幕坐标（相对画布左上角）→ 世界坐标。**唯一的换算出口**。
+   *
+   * 为什么只留一个出口：命中检测、接线柱、放置、吸附全都吃世界坐标，任何一处
+   * 自己写 `p.x - pan.x` 就等于多一个「看得见但点不中」的机会。交互层只许从
+   * 这里取世界坐标（tools/pan-probe.mjs §③ 用一个只统计调用次数的探针把这条钉住）。
+   *
+   * ⚠ `window.__XM_PAN_OFF__` 是**变异体回退开关**，只为「判据能红」而存在：
+   *   置真时本函数故意返回原始屏幕坐标（即退回「视口偏移不存在」的旧行为），
+   *   让探针能同一份断言下看到命中失效。正常运行时它不存在，分支恒不成立。
+   */
+  screenToWorld(x, y) {
+    if (typeof window !== 'undefined' && window.__XM_PAN_OFF__) return { x, y };
+    return { x: x - this.pan.x, y: y - this.pan.y };
+  }
+
+  /**
+   * 复位视口（回到原点）。返回是否真的动过 —— 调用方靠它决定要不要补一帧，
+   * 不真动时连一次重绘都不惊动（平移量为 0 时零影响）。
+   */
+  resetPan() {
+    if (this.pan.x === 0 && this.pan.y === 0) return false;
+    this.pan.x = 0; this.pan.y = 0;
+    this.markDirty();
+    return true;
+  }
 
   resize() {
     const r = this.canvas.getBoundingClientRect();
@@ -210,7 +243,17 @@ export class Engine {
   render() {
     const g = this.g;
     g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    // ⚠ 清屏必须**紧贴 setTransform、早于平移**：clearRect 擦的是设备像素矩形，
+    //   带着平移去擦只会擦掉一块错位区域、屏幕其余部分留下上一帧残影。
+    //   顺序固定为 setTransform → clearRect → translate 还有一个好处：
+    //   平移量为 0 时这条指令流与「没有平移功能」时逐位相同（tools/pan-probe.mjs §②）。
     g.clearRect(0, 0, this.w, this.h);
+    // 视口偏移：屏幕像素 × dpr → 世界像素。此后画的一切（网格、导线、器材、
+    // 端口、选中框、叠层）自动共用同一个视口。
+    // ⚠ pan 为零时**不发这条指令**：矩阵上 translate(0,0) 是恒等，但记进绘制指令流
+    //   它就是一条真实差异。「平移量为 0 时逐位相同」是硬指标，靠这一句保住
+    //   （tools/pan-probe.mjs §② 直接拿改动前的 engine.js 对跑同一串指令）。
+    if (this.pan.x || this.pan.y) g.translate(this.pan.x, this.pan.y);
 
     this.drawBackdrop(g);
     this.drawGrid(g);
@@ -250,18 +293,24 @@ export class Engine {
 
   drawGrid(g) {
     const s = this.gridSize;
+    // 世界坐标下的可见区 = 屏幕区 − pan。这样网格线仍钉在世界格点上，
+    // 拖动画布时是「视角在动」而不是「网格跟着屏幕滑」。
+    // ⚠ 起手四舍五入到整格：省掉看不见的屏外线，也让端点落回世界格点，
+    //   使「平移为 0 时」的线段坐标与改动前逐位相同（0.5 的线宽偏移不漂）。
+    const x0 = Math.floor(this.pan.x / s) * s, x1 = x0 + this.w + s;
+    const y0 = Math.floor(this.pan.y / s) * s, y1 = y0 + this.h + s;
     g.lineWidth = 1;
     g.strokeStyle = C.grid;
     g.beginPath();
-    for (let x = 0; x <= this.w; x += s) { g.moveTo(x + .5, 0); g.lineTo(x + .5, this.h); }
-    for (let y = 0; y <= this.h; y += s) { g.moveTo(0, y + .5); g.lineTo(this.w, y + .5); }
+    for (let x = x0; x <= x1; x += s) { g.moveTo(x + .5, y0); g.lineTo(x + .5, y1); }
+    for (let y = y0; y <= y1; y += s) { g.moveTo(x0, y + .5); g.lineTo(x1, y + .5); }
     g.stroke();
 
     // 每 5 格一根稍亮的线
     g.strokeStyle = C.gridStrong;
     g.beginPath();
-    for (let x = 0; x <= this.w; x += s * 5) { g.moveTo(x + .5, 0); g.lineTo(x + .5, this.h); }
-    for (let y = 0; y <= this.h; y += s * 5) { g.moveTo(0, y + .5); g.lineTo(this.w, y + .5); }
+    for (let x = x0; x <= x1; x += s * 5) { g.moveTo(x + .5, y0); g.lineTo(x + .5, y1); }
+    for (let y = y0; y <= y1; y += s * 5) { g.moveTo(x0, y + .5); g.lineTo(x1, y + .5); }
     g.stroke();
   }
 

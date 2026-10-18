@@ -166,6 +166,14 @@ const inclinetrackDef = {
     { k: 'len', label: '斜面长度', type: 'range', min: 0.4, max: 3, step: 0.1, unit: 'm' },
     { k: 'g', label: '重力加速度', type: 'range', min: 1.6, max: 20, step: 0.1, unit: 'N/kg' },
   ],
+  // ── B4 第 3 步 · 力学第 1 批：5 行 ──
+  stats: [
+    { label: '时间', unit: 's', read: (e) => e.state.t },
+    { label: '速度', unit: 'm/s', read: (e) => e.state.v },
+    { label: '位移', unit: 'm', read: (e) => e.state.s },
+    { label: '加速度', unit: 'm/s²', read: (e) => e.state.a },
+    { label: '摩擦力', unit: 'N', read: (e) => e.state.f },
+  ],
   create: (x, y) => new Incline(inclinetrackDef, x, y),
 };
 DEFS.push(() => define(inclinetrackDef));
@@ -247,6 +255,20 @@ const springbobDef = {
     { k: 'A', label: '初始振幅', type: 'range', min: 1, max: 20, step: 0.5, unit: 'cm' },
     { k: 'damp', label: '阻尼', type: 'range', min: 0, max: 0.5, step: 0.01, unit: 'N·s/m' },
   ],
+  // ── B4 第 3 步 · 力学第 2 批：8 行 ──
+  //    ⚠ `state.tPrev` 被 `STATE_HIDDEN.力学` 隐藏（那是「上一帧位置」的中间量，不是读数）
+  //      ⇒ 兜底不收它，此处**同样不声明**。运行时 9 个数值键 − 1 隐藏 = 8 行。
+  //    ⚠ `peak` 无域表条目 ⇒ 照兜底写**原始键名**、无单位。
+  stats: [
+    { label: '时间', unit: 's', read: (e) => e.state.t },
+    { label: '位置', unit: 'm', read: (e) => e.state.x },
+    { label: '速度', unit: 'm/s', read: (e) => e.state.v },
+    { label: '加速度', unit: 'm/s²', read: (e) => e.state.a },
+    { label: '机械能', unit: 'J', read: (e) => e.state.E },
+    { label: '初始机械能', unit: 'J', read: (e) => e.state.E0 },
+    { label: '能量漂移', unit: '%', read: (e) => e.state.drift },
+    { label: 'peak', read: (e) => e.state.peak },
+  ],
   create: (x, y) => new SpringBob(springbobDef, x, y),
 };
 DEFS.push(() => define(springbobDef));
@@ -327,6 +349,16 @@ const pendulumDef = {
     { k: 'theta0', label: '初始摆角', type: 'range', min: 1, max: 20, step: 1, unit: '°' },
     { k: 'damp', label: '阻尼', type: 'range', min: 0, max: 0.5, step: 0.01 },
     { k: 'g', label: '重力加速度', type: 'range', min: 1.6, max: 20, step: 0.1, unit: 'N/kg' },
+  ],
+  // ── B4 第 3 步 · 力学第 2 批：6 行 ──
+  //    ⚠ 注意「同名不同义」：此处的 `a` 是**加速度 m/s²**（力学表），而单摆的角量另有 `w`。
+  stats: [
+    { label: '时间', unit: 's', read: (e) => e.state.t },
+    { label: '摆角', unit: 'rad', read: (e) => e.state.th },
+    { label: '角速度', unit: 'rad/s', read: (e) => e.state.w },
+    { label: '加速度', unit: 'm/s²', read: (e) => e.state.a },
+    { label: '初始机械能', unit: 'J', read: (e) => e.state.E0 },
+    { label: '能量漂移', unit: '%', read: (e) => e.state.drift },
   ],
   create: (x, y) => new Pendulum(pendulumDef, x, y),
 };
@@ -421,6 +453,18 @@ const cartrackDef = {
     { k: 'muK', label: '轨道摩擦', type: 'range', min: 0, max: 0.5, step: 0.01 },
     { k: 'g', label: '重力加速度', type: 'range', min: 1.6, max: 20, step: 0.1, unit: 'N/kg' },
   ],
+  // ── B4 第 3 步 · 力学第 1 批：7 行，逐字基线取自**跑过 step 的实体**的当前兜底输出 ──
+  //    ⚠ `cool` 在 `STATE_LABELS.力学` 里**没有**条目 ⇒ 兜底显示的是**原始键名**且无单位，
+  //      故此处也必须写 `label: 'cool'`、不写 unit，否则退役力学表后这一行会变样。
+  stats: [
+    { label: '时间', unit: 's', read: (e) => e.state.t },
+    { label: '速度', unit: 'm/s', read: (e) => e.state.v },
+    { label: '位移', unit: 'm', read: (e) => e.state.s },
+    { label: '加速度', unit: 'm/s²', read: (e) => e.state.a },
+    { label: '动量', unit: 'kg·m/s', read: (e) => e.state.p },
+    { label: '碰撞次数', read: (e) => e.state.collided },
+    { label: 'cool', read: (e) => e.state.cool },
+  ],
   create: (x, y) => new Cart(cartrackDef, x, y),
 };
 DEFS.push(() => define(cartrackDef));
@@ -503,6 +547,16 @@ const freefallDef = {
     { k: 'A', label: '迎风面积', type: 'range', min: 0.005, max: 0.1, step: 0.005, unit: 'm²' },
     { k: 'g', label: '重力加速度', type: 'range', min: 1.6, max: 20, step: 0.1, unit: 'N/kg' },
   ],
+  // ── B4 第 3 步 · 力学第 1 批：6 行 ──
+  //    ⚠ `hold` 无域表条目 ⇒ 照兜底写**原始键名**、无单位。
+  stats: [
+    { label: '时间', unit: 's', read: (e) => e.state.t },
+    { label: '高度', unit: 'm', read: (e) => e.state.h },
+    { label: '速度', unit: 'm/s', read: (e) => e.state.v },
+    { label: '加速度', unit: 'm/s²', read: (e) => e.state.a },
+    { label: '最大速度', unit: 'm/s', read: (e) => e.state.maxv },
+    { label: 'hold', read: (e) => e.state.hold },
+  ],
   create: (x, y) => new FreeFall(freefallDef, x, y),
 };
 DEFS.push(() => define(freefallDef));
@@ -584,6 +638,22 @@ const leverDef = {
     { k: 'damp', label: '轴承阻尼', type: 'range', min: 0, max: 2, step: 0.05 },
     { k: 'g', label: '重力加速度', type: 'range', min: 1.6, max: 20, step: 0.1, unit: 'N/kg' },
   ],
+  // ── B4 第 3 步 · 力学第 3 批：8 行（力学 8/8 收官）──
+  //    ⚠ 最后一行「转动惯量」← `state.I`。**注意 `I` 在本域是转动惯量，不是电流** ——
+  //      这正是「域盲四键退场」豁免（`blindRetired` / `fourKeyRetired`）里唯一靠**域表**
+  //      （分支 a）成立的那件器材。本件一旦声明 `stats`，该豁免就改由**分支 b**（已声明 stats）
+  //      承接 ⇒ 力学表退役后 a) 自然消失，`§⑧` 的 `mut-table-def` 变异体（原本靠改本表 `I`
+  //      的定义来打红）会**失去靶点**，故它已同步改造成「撤掉 `lever.stats`」以打 b)。
+  stats: [
+    { label: '时间', unit: 's', read: (e) => e.state.t },
+    { label: '转角', unit: 'rad', read: (e) => e.state.theta },
+    { label: '角速度', unit: 'rad/s', read: (e) => e.state.w },
+    { label: '角加速度', unit: 'rad/s²', read: (e) => e.state.alpha },
+    { label: '左力矩', unit: 'N·m', read: (e) => e.state.tau1 },
+    { label: '右力矩', unit: 'N·m', read: (e) => e.state.tau2 },
+    { label: '合力矩', unit: 'N·m', read: (e) => e.state.net },
+    { label: '转动惯量', unit: 'kg·m²', read: (e) => e.state.I },
+  ],
   create: (x, y) => new Lever(leverDef, x, y),
 };
 DEFS.push(() => define(leverDef));
@@ -664,6 +734,24 @@ const pulleyDef = {
     { k: 'F', label: '拉力', type: 'range', min: 0, max: 100, step: 0.1, unit: 'N' },
     { k: 'loss', label: '绳扣损失', type: 'range', min: 0, max: 30, step: 0.5, unit: 'N' },
     { k: 'g', label: '重力加速度', type: 'range', min: 1.6, max: 20, step: 0.1, unit: 'N/kg' },
+  ],
+  // ── B4 第 3 步 · 力学第 2 批：**11 行** ──
+  //    ⚠ 与声学的 `soundlevel`/`waveform` 同类：运行时 11 个数值键 > `LIVE_FALLBACK_MAX = 8`，
+  //      旧路径只出 8 行 + 一行 `… 还有 3 项读数` 占位；`stats` 路径**不受该上限约束**
+  //      ⇒ 11 行全出（`eta` 效率、`MA` 机械利益、`lifts` 提升次数 这三项原本被截掉）。
+  //      这是**有意的**行为变化：被截掉的是真读数，放开截断减少了信息丢失（见报告 §19.3）。
+  stats: [
+    { label: '时间', unit: 's', read: (e) => e.state.t },
+    { label: '高度', unit: 'm', read: (e) => e.state.h },
+    { label: '速度', unit: 'm/s', read: (e) => e.state.v },
+    { label: '加速度', unit: 'm/s²', read: (e) => e.state.a },
+    { label: '放出绳长', unit: 'm', read: (e) => e.state.rope },
+    { label: '重物重量', unit: 'N', read: (e) => e.state.W },
+    { label: '承重绳段数', read: (e) => e.state.n },
+    { label: '所需拉力', unit: 'N', read: (e) => e.state.need },
+    { label: '效率', read: (e) => e.state.eta },
+    { label: '机械利益', read: (e) => e.state.MA },
+    { label: '提升次数', read: (e) => e.state.lifts },
   ],
   create: (x, y) => new Pulley(pulleyDef, x, y),
 };
@@ -750,11 +838,102 @@ const frictionblockDef = {
     { k: 'F', label: '水平拉力', type: 'range', min: 0, max: 50, step: 0.1, unit: 'N' },
     { k: 'g', label: '重力加速度', type: 'range', min: 1.6, max: 20, step: 0.1, unit: 'N/kg' },
   ],
+  // ── B4 第 3 步 · 力学第 1 批：8 行（运行时恰好 8 个数值键，与 `LIVE_FALLBACK_MAX` 边界重合，不触截断）──
+  stats: [
+    { label: '时间', unit: 's', read: (e) => e.state.t },
+    { label: '速度', unit: 'm/s', read: (e) => e.state.v },
+    { label: '位移', unit: 'm', read: (e) => e.state.s },
+    { label: '加速度', unit: 'm/s²', read: (e) => e.state.a },
+    { label: '摩擦力', unit: 'N', read: (e) => e.state.f },
+    { label: '正压力', unit: 'N', read: (e) => e.state.N },
+    { label: '最大静摩擦', unit: 'N', read: (e) => e.state.fsMax },
+    { label: '重量', unit: 'N', read: (e) => e.state.weight },
+  ],
   create: (x, y) => new FrictionBlock(frictionblockDef, x, y),
 };
 DEFS.push(() => define(frictionblockDef));
 
-export { Incline, SpringBob, Pendulum, Cart, FreeFall, Lever, Pulley, FrictionBlock };
+// ─────────────────────────────────────────────────────────
+// 9. 三轴加速度计（C8 三轴传感器）
+//
+// 它读的不是"运动加速度"，而是**重力在三轴上的投影** —— 静止时 |a| 恒等于 g，
+// 这正是手机/平板的"重力计"原理。所以它不做积分：测的是**当下姿态**，姿态变、读数立刻变。
+// 三个轴都有值（不是只动一个），且合量守恒 ⇒ 可用 |a| == g 作独立判据。
+//   aX = g·sin(pitch)
+//   aY = g·sin(roll)·cos(pitch)
+//   aZ = g·cos(pitch)·cos(roll)
+// ─────────────────────────────────────────────────────────
+class Accelerometer extends Entity {
+  get g0() { return Math.max(0.1, this.props.g); }
+  /**
+   * 当前姿态下的重力投影三轴分量（纯函数，不碰 state）。
+   * `tare` 是**安装倾角偏差**（传感器没装正）：绕 Y 轴把理想投影再转一个小角。
+   * ⚠ 旋转不改变模长 ⇒ `|a| == g` 这条独立判据在 `tare ≠ 0` 时**照样成立**（这是选它做
+   *   第四个字段的原因：既能真的影响每一轴读数，又不会把守恒判据搞坏）。
+   */
+  axes() {
+    const p = this.props, g0 = this.g0;
+    const pch = p.pitch * Math.PI / 180, rol = p.roll * Math.PI / 180;
+    const tar = (p.tare || 0) * Math.PI / 180;
+    const X0 = g0 * Math.sin(pch);
+    const Y0 = g0 * Math.sin(rol) * Math.cos(pch);
+    const Z0 = g0 * Math.cos(pch) * Math.cos(rol);
+    return {
+      aX: X0 * Math.cos(tar) - Z0 * Math.sin(tar),
+      aY: Y0,
+      aZ: X0 * Math.sin(tar) + Z0 * Math.cos(tar),
+    };
+  }
+  reset() {
+    const st = this.state, a = this.axes();
+    st.aX = a.aX; st.aY = a.aY; st.aZ = a.aZ;
+    st.total = Math.hypot(a.aX, a.aY, a.aZ);
+  }
+  onAdd() { this.reset(); }
+  onProp() { this.reset(); }
+  /** 静止传感器只读姿态：不做数值积分（`state` 里因此也不需要时间键） */
+  step() {
+    const st = this.state, a = this.axes();
+    st.aX = a.aX; st.aY = a.aY; st.aZ = a.aZ;
+    st.total = Math.hypot(a.aX, a.aY, a.aZ);
+  }
+  render(g) {
+    const st = this.state;
+    plate(g, this, 10);
+    const x = 0, y = -this.h / 2 + 18;
+    gfx.text(g, 'X ' + n2(st.aX), x, y, { color: HOT, size: 11 });
+    gfx.text(g, 'Y ' + n2(st.aY), x, y + 14, { color: HOT, size: 11 });
+    gfx.text(g, 'Z ' + n2(st.aZ), x, y + 28, { color: HOT, size: 11 });
+    gfx.text(g, '|a| ' + n2(st.total) + ' m/s²', x, y + 44, { color: DIM, size: 9.5 });
+  }
+}
+const accelDef = {
+  type: 'accelerometer', name: '三轴加速度计', domain: PH, cat: CAT, icon: '🧭',
+  desc: '静止时读重力在三轴上的投影 X = g·sin(pitch)、Y = g·sin(roll)·cos(pitch)、Z = g·cos(pitch)·cos(roll)；合量恒为 g（重力计原理）',
+  w: 92, h: 118,
+  ports: [],
+  defaults: { g: G0, pitch: 30, roll: 0, tare: 0 },
+  // state 恰好 4 个数字键，与下面 4 行 stats 一一对应（不留无出处的键）。
+  state: { aX: 0, aY: 0, aZ: 0, total: 0 },
+  tags: ['力学', '三轴', '加速度计', '重力计', '传感器'],
+  fields: [
+    { k: 'pitch', label: '俯仰角（绕 Y）', type: 'range', min: -90, max: 90, step: 1, unit: '°' },
+    { k: 'roll', label: '横滚角（绕 X）', type: 'range', min: -90, max: 90, step: 1, unit: '°' },
+    { k: 'g', label: '重力加速度', type: 'range', min: 1.6, max: 20, step: 0.1, unit: 'N/kg' },
+    { k: 'tare', label: '安装偏差（绕 Y）', type: 'range', min: -30, max: 30, step: 1, unit: '°' },
+  ],
+  // ── C8 三轴传感器：4 行（本件是力学第 9 件）──
+  stats: [
+    { label: 'X 轴加速度', unit: 'm/s²', read: (e) => e.state.aX },
+    { label: 'Y 轴加速度', unit: 'm/s²', read: (e) => e.state.aY },
+    { label: 'Z 轴加速度', unit: 'm/s²', read: (e) => e.state.aZ },
+    { label: '合加速度', unit: 'm/s²', read: (e) => e.state.total },
+  ],
+  create: (x, y) => new Accelerometer(accelDef, x, y),
+};
+DEFS.push(() => define(accelDef));
+
+export { Incline, SpringBob, Pendulum, Cart, FreeFall, Lever, Pulley, FrictionBlock, Accelerometer };
 
 // ── 插件 ──────────────────────────────────────────────────
 export default {
