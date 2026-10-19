@@ -11,6 +11,11 @@
 // 只做前者，刷新就复活；只做后者，页面不动。两者缺一不可。
 // ══════════════════════════════════════════════════════════
 
+// 拖出落位那条偏好的**真源在 src/ui/palette.js** —— 消费它的是那里（放手那一刻读）。
+// 设置面板只是它的一个界面，所以键名与读写都从那边引进来，不在这里再抄一份：
+// 抄一份就有两个真源，改名时必然漏掉一个，而漏掉的那一份**不会报错**。
+import { DROP_COLLAPSE_KEY, readDropCollapse, saveDropCollapse } from '../ui/palette.js';
+
 /** 被开关管的插件。写死 id 是有意的：设置面板只承诺管这一个「娱乐功能」 */
 const CREDIT_ID = 'xiaomo.system.credit';
 const CREDIT_BUNDLE = 'system';
@@ -150,6 +155,26 @@ export default {
                 </button>
               </div>
             </section>
+            <section class="plug-sec">
+              <div class="plug-sec-head"><h3>器材栏</h3></div>
+              <div class="plug-row" id="setRowDropCollapse">
+                <div class="plug-main">
+                  <div class="plug-title">
+                    <b>拖出器材后收起器材栏</b>
+                    <span class="plug-id"></span>
+                  </div>
+                  <p class="plug-desc">手机与平板上器材栏是浮层抽屉。默认<b>不收起</b>：把器材从器材栏拖到实验台放手后，抽屉保持打开，可以接着拖第二件。</p>
+                  <p class="plug-desc">打开这个开关后，放手即自动收起抽屉，露出整个实验台。桌面布局下器材栏是常驻栏，没有「收起」这回事，这个开关在那时不起作用。</p>
+                  <div class="plug-meta">
+                    <span class="plug-chip soft">默认关（保持打开）</span>
+                    <span class="plug-chip soft">记住选择</span>
+                  </div>
+                </div>
+                <button type="button" class="plug-switch" role="switch" aria-label="拖出器材后收起器材栏" aria-checked="false">
+                  <i></i>
+                </button>
+              </div>
+            </section>
           </div>
           <footer class="drawer-foot">
             <span class="drawer-hint">关掉学分不影响器材、电路与化学反应。</span>
@@ -211,6 +236,22 @@ export default {
         paintD();
       });
       paintD();
+
+      // ── 拖出器材后是否收起器材栏（用户偏好，不是插件启停）──
+      // 与上面那条同构：先记选择、再画界面。真正「生效」的一刻在**放手时**，
+      // 由 src/ui/palette.js 的 afterDrop() 读这个键决定收不收 —— 这里不申请任何效果。
+      const rowC = mask.querySelector('#setRowDropCollapse');
+      rowC.querySelector('.plug-id').textContent = DROP_COLLAPSE_KEY;
+      const swC = rowC.querySelector('.plug-switch');
+      const paintC = () => {
+        const on = readDropCollapse();
+        rowC.classList.toggle('off', !on);
+        swC.classList.toggle('on', on);
+        swC.setAttribute('aria-checked', String(on));
+        swC.title = on ? '关闭：放手后保持器材栏打开' : '开启：放手后自动收起器材栏';
+      };
+      swC.addEventListener('click', () => { saveDropCollapse(!readDropCollapse()); paintC(); });
+      paintC();
 
       // ── 浮层时序与焦点（与插件管理器同一套做法）──────────
       const shell = document.getElementById('app');

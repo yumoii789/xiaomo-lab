@@ -325,12 +325,20 @@ class App {
   }
 
   freeSpot() {
-    const W = this.engine.w, H = this.engine.h;
-    const cx = W * 0.46, cy = H * 0.48;
+    // ⚠ 必须用**可见区在世界坐标里的矩形**，不能用 engine.w/h（那是屏幕尺寸）。
+    //   视口有了缩放之后 屏幕 ≠ 世界：zoom=4 时可见世界只有 w/4 那么宽，而
+    //   0.46*engine.w 早就落到可见区之外 —— 用户一放大、再点器材栏，器材就会
+    //   「凭空消失」。恒等视口（pan=0、zoom=1）下 screenToWorld 是恒等，
+    //   所以这里的取值与改动前**逐位相同**，既有落点判据不受影响。
+    const v0 = this.engine.screenToWorld(0, 0);
+    const v1 = this.engine.screenToWorld(this.engine.w, this.engine.h);
+    const x0 = v0.x, y0 = v0.y, x1 = v1.x, y1 = v1.y;
+    const W = x1 - x0, H = y1 - y0;
+    const cx = x0 + W * 0.46, cy = y0 + H * 0.48;
     for (let r = 0; r < 620; r += 36) {
       for (let a = 0; a < Math.PI * 2 - 1e-6; a += Math.PI / 7) {
         const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
-        if (x < 90 || y < 80 || x > W - 90 || y > H - 60) continue;
+        if (x < x0 + 90 || y < y0 + 80 || x > x1 - 90 || y > y1 - 60) continue;
         const clash = this.world.entities.some(e =>
           Math.abs(e.x - x) < (e.w + 70) / 2 && Math.abs(e.y - y) < (e.h + 70) / 2);
         if (!clash) return { x: Math.round(x), y: Math.round(y) };

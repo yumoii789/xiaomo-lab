@@ -55,11 +55,16 @@ function mkG(trace) {
     setTransform: (a, b, c, d, e, f) => { trace.push(['setTransform', a, b, c, d, e, f]); },
     translate: (x, y) => { trace.push(['translate', x, y]); },
     clearRect: (x, y, w, h) => { trace.push(['clearRect', x, y, w, h]); },
+    // ⚠ 2026-10-19 把 scale 从 NOOP 挪到这里：视口现在有 zoom，`g.scale` 与
+    //   `g.translate` 一样是坐标契约的载体；不记下来就断言不了「zoom=1 时一条都不发」。
+    //   本探针所有场景都是 zoom=1（zoom 的判据在 tools/gesture-probe.mjs），所以既有
+    //   指令流一条都不变 —— 只是「以后能看见它」。
+    scale: (x, y) => { trace.push(['scale', x, y]); },
     save: () => {}, restore: () => {},
   };
   const NOOP = ['beginPath', 'moveTo', 'lineTo', 'arc', 'arcTo', 'stroke', 'fill', 'closePath',
     'quadraticCurveTo', 'rotate', 'fillRect', 'setLineDash', 'createLinearGradient',
-    'measureText', 'fillText', 'clip', 'rect', 'scale', 'ellipse', 'bezierCurveTo', 'roundRect'];
+    'measureText', 'fillText', 'clip', 'rect', 'ellipse', 'bezierCurveTo', 'roundRect'];
   for (const k of NOOP) ctx[k] = () => {};
   ctx.createLinearGradient = () => ({ addColorStop() {} });
   return ctx;
@@ -145,20 +150,35 @@ function mkApp(world, eng, canvas) {
 // ══════════════════════════════════════════════════════════
 head('① 接线（静态读文件 + 实例形状）');
 {
-  const engLine = lineOf('src/core/engine.js', 59);
-  ok(/this\.pan\s*=\s*\{\s*x:\s*0\s*,\s*y:\s*0\s*\}/.test(engLine), `engine.js:59 视口状态挂实例：${engLine.slice(0, 60)}`);
-
-  const sw = lineOf('src/core/engine.js', 136);
-  ok(/x\s*-\s*this\.pan\.x/.test(sw) && /y\s*-\s*this\.pan\.y/.test(sw),
-    `engine.js:136 屏幕→世界唯一出口确实减了 pan：${sw.slice(0, 60)}`);
+  // ⚠ 2026-10-19 改为**按行为**断言（原先是 `lineOf('src/core/engine.js', 59 / 136)`）。
+  //   本轮给 engine.js 加了 zoom 视口 ⇒ 两个行号都漂 ⇒ 判据红，而它错怪的不是产品，
+  //   是**定位方式**（同一个教训在本节末尾的存档口径上已经吃过一次）。行为断言比文本
+  //   匹配强：只要 screenToWorld 还是「减 pan、除 zoom」这条式子，写在第几行都算数。
+  {
+    const eA = mkEngine(new World(), []);
+    eA.pan.x = 30; eA.pan.y = -12; eA.zoom = 2;
+    const bA = eA.screenToWorld(70, 28);          // 屏幕 = 世界×zoom + pan ⇒ 世界 = (70−30)/2, (28+12)/2
+    ok(bA.x === 20 && bA.y === 20,
+      `屏幕→世界唯一出口实测「减 pan、除 zoom」：pan=(30,−12) zoom=2 时屏幕(70,28) → 世界(${bA.x},${bA.y})，应为 (20,20)`);
+  }
+  {
+    const eB = mkEngine(new World(), []);
+    const before = eB.screenToWorld(100, 100);
+    eB.pan.x = 5; eB.pan.y = 7; eB.zoom = 4;
+    const after = eB.screenToWorld(100, 100);
+    ok(before.x === 100 && before.y === 100 && after.x === 23.75 && after.y === 23.25,
+      `同一屏幕点跟着**实例**视口走：恒等时 → (${before.x},${before.y})；pan=(5,7) zoom=4 后 → (${after.x},${after.y})，应为 (23.75,23.25)`);
+  }
 
   const trace = [];
   const world = new World();
   const eng = mkEngine(world, trace);
-  ok(!('pan' in world), '世界对象上没有 pan（视口不是场景数据）');
-  ok(!JSON.stringify(Object.keys(world)).includes('pan'), 'world 的键里没有 pan');
-  ok(typeof eng.resetPan === 'function' && typeof eng.screenToWorld === 'function',
-    'engine 暴露 screenToWorld / resetPan');
+  ok(!('pan' in world) && !('zoom' in world), '世界对象上没有 pan / zoom（视口不是场景数据）');
+  ok(!JSON.stringify(Object.keys(world)).includes('pan') && !JSON.stringify(Object.keys(world)).includes('zoom'),
+    'world 的键里没有 pan / zoom');
+  ok(typeof eng.resetPan === 'function' && typeof eng.screenToWorld === 'function' &&
+    typeof eng.resetView === 'function' && typeof eng.setViewAt === 'function' && typeof eng.clampZoom === 'function',
+    'engine 暴露 screenToWorld / resetPan / resetView / setViewAt / clampZoom');
 
   // 存档口径：只写 entities + wires ⇒ pan 不可能进存档。
   //
@@ -219,7 +239,7 @@ function stagePreimage() {
     const ePre = new mod.Engine(mkCanvas(tracePre), wPre);
     if (ePre) ePre.app = { markDirty() {} };
 
-    ok(e0.pan.x === 0 && e0.pan.y === 0, '新引擎初始 pan = (0,0)');
+    ok(e0.pan.x === 0 && e0.pan.y === 0 && e0.zoom === 1, '新引擎初始视口是恒等：pan = (0,0) 且 zoom = 1');
 
     // ⚠ 先各自 render 一次热身 —— 台面渐变是**首帧建好再缓存**的（benchGradient），
     //   拿「第一次 render」和「第二次 render」比会凭空多出一串差异。
@@ -229,7 +249,7 @@ function stagePreimage() {
     const A = trace0.slice(n0), B = tracePre.slice(nPre);
 
     const J = (t) => JSON.stringify(t);
-    ok(J(A) === J(B), `pan=0 时稳态一帧的绘制指令流逐位相同（${A.length} 条 vs ${B.length} 条）`);
+    ok(J(A) === J(B), `pan=0 且 zoom=1 时稳态一帧的绘制指令流逐位相同（${A.length} 条 vs ${B.length} 条）`);
     if (J(A) !== J(B)) {
       const n = Math.max(A.length, B.length);
       for (let i = 0; i < n; i++) {
@@ -238,8 +258,8 @@ function stagePreimage() {
     }
     ok(J(A) === J(B) && J(A[0]) === J(['setTransform', 1, 0, 0, 1, 0, 0]) && J(A[1]) === J(['clearRect', 0, 0, 800, 600]),
       `头两条严格同位：${J(A[0])} → ${J(A[1])}`);
-    ok(A.filter(([k]) => k === 'translate').length === 0,
-      'pan=0 时一条 translate 都不发（视口恒等，连指令都不产生 ⇒ 逐位相同）');
+    ok(A.filter(([k]) => k === 'translate' || k === 'scale').length === 0,
+      'pan=0 且 zoom=1 时 translate / scale 一条都不发（视口恒等，连指令都不产生 ⇒ 逐位相同）');
 
     // 复位在原点时不许惊动任何人
     const before = trace0.length;
@@ -477,7 +497,10 @@ head('⑥ 触发与复位：空白拖动 / 中键 / 空格不得触发平移 / �
   fire('pointerup', ev('pointerup', 260, 230, { buttons: 0 }));
   inter.cancel();
 
-  // ④ 双击空白处 = 复位（硬要求 6：二选一，报明选了「双击空白处复位」）
+  // ④ 双击空白处 = 复位**整个视图**（pan+zoom）。
+  //   ⚠ 语义由用户裁决为「复位整个视图」（原为只复位 pan）。本探针全程 zoom=1 ⇒
+  //     两者在这里观测等价，区分它们要靠 tools/gesture-probe.mjs §⑧（带调用计数）。
+  //     这里只改口径、不新增断言（条数守恒 = 107，外部消费者按条数断言）。
   // ⚠ 双击的判据是 **350ms 的抬起间隔**，而探针跑到这一节已经花掉远超 350ms 的墙钟
   //   时间（节 ①-⑥ 打了几十行日志）。不冻结时钟的话这里永远是「两次相距很远的单击」，
   //   红的是探针不是功能 —— 所以本段把 performance.now 钉在一个定值上，
@@ -495,7 +518,7 @@ head('⑥ 触发与复位：空白拖动 / 中键 / 空格不得触发平移 / �
   ok(eng.pan.x !== 0 || eng.pan.y !== 0, '第一次点空白处：pan 不动');
   frozen = 5000 + 120;                       // 120ms < DOUBLE_TAP_MS(350)
   tap(601, 521);                             // 位移 √2 px < DOUBLE_TAP_SLOP(8)
-  ok(eng.pan.x === 0 && eng.pan.y === 0, `第二次点空白处（+120ms / 位移 1.4px）⇒ 复位到原点 pan=(${eng.pan.x},${eng.pan.y})`);
+  ok(eng.pan.x === 0 && eng.pan.y === 0 && eng.zoom === 1, `第二次点空白处（+120ms / 位移 1.4px）⇒ 复位到原点 pan=(${eng.pan.x},${eng.pan.y})、zoom=${eng.zoom}（本探针全程 zoom=1）`);
   ok(inter.pan === null, '复位那次没有起手平移');
   ok(app._calls.markDirty > 0, `复位请求了重绘（markDirty 累计 ${app._calls.markDirty} 次）`);
 
@@ -522,9 +545,9 @@ head('⑥ 触发与复位：空白拖动 / 中键 / 空格不得触发平移 / �
 }
 
 // ══════════════════════════════════════════════════════════
-// ⑦ 触控既有手势不许被平移顶掉（长按 / 多指 / 触摸不起手平移）
+// ⑦ 触控：两指接管视口（平移 + 缩放），单指一律不起手平移
 // ══════════════════════════════════════════════════════════
-head('⑦ 触控：多指作废仍在，触摸空白处不擅自平移');
+head('⑦ 触控：两指接管视口，单指不起手平移');
 {
   const trace = [];
   const world = new World();
@@ -540,21 +563,40 @@ head('⑦ 触控：多指作废仍在，触摸空白处不擅自平移');
   const fire = (t, e) => (canvas._listeners[t] || []).forEach((f) => f(e));
 
   fire('pointerdown', ev('pointerdown', 700, 500, { pointerId: 7 }));
-  ok(!inter.pan, '单指触摸空白处：不起手平移（本轮不做双指拖动，见交付说明）');
+  ok(!inter.pan, '单指触摸空白处：不起手平移（**产品决策**：单指 = 滚动/拖器材，平移归两指）');
+  // 起手两指：7 在 (700,500)、8 在 (710,505) ⇒ 中点 (705,502.5)、间距 √(10²+5²)。
+  // ⚠ 锚点用**独立复算**（直接问引擎，不读 inter.gesture 的内部值）：否则「实现算错」
+  //   与「断言跟着一起错」会互相掩护 —— 本文件第一版就是这么把方向写反还全绿的。
+  const midA = { x: 705, y: 502.5 };
+  const w0 = eng.screenToWorld(midA.x, midA.y);
   fire('pointerdown', ev('pointerdown', 710, 505, { pointerId: 8 }));
-  ok(inter.multi === true, '第二根手指落下：多指作废标记仍然置起（既有行为未变）');
+  ok(inter.multi === true && !!inter.gesture && inter.gesture.ids.join() === '7,8',
+    '第二根手指落下：两指**接管**视口（multi 置起 + 手势建立 ids=[7,8]）—— 不再是「多指作废」');
+  // 只动手指 7：中点移到 ((900+710)/2, (700+505)/2) = (805, 602.5)
   fire('pointermove', ev('pointermove', 900, 700, { pointerId: 7 }));
-  ok(eng.pan.x === 0 && eng.pan.y === 0, '多指作废期间画布不跟着任一手指跑');
+  const midB = { x: 805, y: 602.5 };
+  const back = eng.screenToWorld(midB.x, midB.y);      // 中点此刻压着哪个世界点？
+  const f7 = { x: 900 - 700, y: 700 - 500 };           // 「跟着手指 7 走」会得到的 pan
+  const f8 = { x: 710 - 700, y: 505 - 500 };           // 「跟着手指 8 走」会得到的 pan
+  ok(near(back.x, w0.x) && near(back.y, w0.y) &&
+    (eng.pan.x !== f7.x || eng.pan.y !== f7.y) && (eng.pan.x !== f8.x || eng.pan.y !== f8.y),
+    `两指移动：起手世界点仍钉在两指中点下（偏差 ${(back.x - w0.x).toExponential(1)}, ${(back.y - w0.y).toExponential(1)}；`
+    + `zoom=${eng.zoom}），pan=(${eng.pan.x.toFixed(1)},${eng.pan.y.toFixed(1)}) 既不跟手指 7 也不跟手指 8`);
   fire('pointerup', ev('pointerup', 900, 700, { pointerId: 7, buttons: 0 }));
-  ok(inter.multi === false, '抬起后解除封锁');
+  ok(inter.multi === false && inter.gesture === null,
+    '抬起一根：手势与多指封锁一起解除（剩下那根不会接着变成单指拖动）');
   fire('pointerup', ev('pointerup', 710, 505, { pointerId: 8, buttons: 0 }));
 
-  // 触摸空白处**双击**：不做复位，避免和系统的双击缩放/连击抢语义
+  // 触摸空白处**双击**：不做复位，避免和系统的双击缩放/连击抢语义。
+  // ⚠ 与改动前的写法不同：那时 pan 恒为 0，`pan === 0` 这条**永远为真**（等于没测）。
+  //   两指现在真的把 pan 挪走了，所以这里断言「双击**没有把它改掉**」—— 才带信息。
+  const panBefore = { x: eng.pan.x, y: eng.pan.y };
   fire('pointerdown', ev('pointerdown', 600, 520));
   fire('pointerup', ev('pointerup', 600, 520, { buttons: 0 }));
   fire('pointerdown', ev('pointerdown', 600, 520));
   fire('pointerup', ev('pointerup', 600, 520, { buttons: 0 }));
-  ok(eng.pan.x === 0 && eng.pan.y === 0, '触摸双击空白处不触发复位（复位只归鼠标双击）');
+  ok(eng.pan.x === panBefore.x && eng.pan.y === panBefore.y,
+    `触摸双击空白处不触发复位（复位只归鼠标双击）：pan 保持 (${panBefore.x.toFixed(1)},${panBefore.y.toFixed(1)})`);
 }
 
 // ══════════════════════════════════════════════════════════

@@ -4,12 +4,18 @@
 //   连线：点两个接线柱
 //   倾倒：点源容器 → 点目标容器（试剂瓶等「自带一份物质」的器材也能倒 —— 判据是能力，不是命名）
 //   删除：点器材
-//   平移：拖动空白处 / 中键拖动，双击空白处复位（见下）。**空格不参与**——它是运行/暂停。
+//   **视口**：平移 = 拖动空白处（**鼠标类指针**）/ 中键拖动 / **两指拖动**；
+//     缩放 = **两指捏合** + **鼠标滚轮（围绕光标位置）**，上下限 0.25×–4×（engine.ZOOM_MIN/MAX）。
+//     一律是画布**内容**缩放（像地图：器材/连线/网格一起变，三个侧栏不动），不是整页缩放。
+//     双击空白处复位（**只复位平移**，见 armPan）。**空格不参与**——它是运行/暂停。
+//     ⚠ **单指永远不平移、永远不缩放**：手指按在器材上就是移动器材、按在空白处就是
+//       取消选中（用户当面拍板，一个字都不许变）。两指见 beginGesture。
 //
-// ⚠ **坐标纪律（平移功能的地基）**：`pos(ev)` 给的是**屏幕坐标**（相对画布左上角），
-//   而命中检测 / 接线柱 / 吸附 / 叠层绘制全都吃**世界坐标**。这两者之间差一个视口
-//   偏移 `engine.pan`，所以每次要拿世界坐标都必须走 `engine.screenToWorld(x, y)`。
-//   一个地方自己写 `p.x - pan.x` 就等于多一次「看得见但点不中」的机会。
+// ⚠ **坐标纪律（视口功能的地基）**：`pos(ev)` 给的是**屏幕坐标**（相对画布左上角），
+//   而命中检测 / 接线柱 / 吸附 / 叠层绘制全都吃**世界坐标**。这两者之间差一整个视口
+//   （`engine.pan` 与 `engine.zoom`：**世界 = (屏幕 − pan) / zoom**），所以每次要拿
+//   世界坐标都必须走 `engine.screenToWorld(x, y)`。
+//   一个地方自己写 `(p.x - pan.x) / zoom` 就等于多一次「看得见但点不中」的机会。
 //   已经过账的「把指针坐标当世界坐标用」的落点（tools/pan-probe.mjs §③ 钉住）：
 //     `onDown` 里 `select` / `wire` / `pour` / `erase` 四条工具分支的 `pickPort` 与 `pick`；
 //     `onMove` 里的接线柱高亮与器材悬停；叠层 `drawOverlay` 的鼠标端。
@@ -96,10 +102,27 @@ export class Interaction {
     /** 上一次「单击空白处」的抬起：{ at, x, y }；双击空白处 = 视口复位 */
     this.doubleTap = null;
 
-    /** 正在被追踪的指针 id —— 只认第一根按下的手指 */
+    /** 正在被追踪的指针 id —— **单指路径**只认第一根按下的手指 */
     this.pid = null;
-    /** 多指同时按下：本轮手势整体作废（不做捏合缩放，但不能让画布被路人手指拖着走） */
+    /**
+     * 多指同时按下（恒等于 `ptrs.size >= 2`）。它的语义分两种：
+     *   · **没有** `this.gesture` 时 = 本轮单指手势作废的封锁（第二根手指落下时打的）；
+     *   · **有** `this.gesture` 时 = 视口由两指接管（中点 → 平移、间距 → 缩放）。
+     */
     this.multi = false;
+    /**
+     * 活着的指针位置表：pointerId → { x, y }（**屏幕坐标**）。
+     * 单指路径不读它；两指手势靠它取「两根手指各自当前在哪」——
+     * `this.mouse` 只记被追踪的那一根，第二根手指落下时不够用。
+     * 每根指针在 down/move/up/cancel 上各自进出；手势收尾时**不清空**（手指还按着）。
+     */
+    this.ptrs = new Map();
+    /**
+     * 两指手势：`{ ids:[a,b], mid, dist, w0, zoom0 }`，null = 没有手势。
+     * `w0` 是起手时**两指中点下的世界点** —— 手势全过程把它钉在当前中点下方，
+     * 这一条式子同时给出捏合缩放与两指平移（见 updateGesture）。
+     */
+    this.gesture = null;
 
     // 引擎比本交互层先创建，但引擎要读 app._dirty（B1 的脏检查约定）与
     // app.coupling（B6 的耦合流动线索），这里把 app 引用补给它。
@@ -163,12 +186,54 @@ export class Interaction {
     // 指针被系统夺走（通知栏下拉、来电、浏览器接管手势）时必须走和 pointerup
     // 一样的收尾，否则 drag/wireFrom 会永远挂在那里，下一次点按变成「接着上一次拖」。
     cv.addEventListener('pointercancel', (e) => this.onCancel(e));
+    // 指针捕获被夺走（系统手势、元素被移走、抽屉抢指针）⇒ 也该收尾。
+    // ⚠ 监听挂在**画布**上而不是 window 上：本模块不往 window 挂任何监听，
+    //   tools/pan-probe.mjs §⑥ 把这条钉住了（keydown/keyup/blur 计数必须为 0），
+    //   别为了「窗口失焦」把它破掉 —— pointercancel/lostpointercapture 已覆盖那条路。
+    cv.addEventListener('lostpointercapture', (e) => this.onLostCapture(e));
     // 触屏没有右键，contextmenu 只可能是长按菜单（或者鼠标右键）—— 一律挡掉。
     cv.addEventListener('contextmenu', (e) => { e.preventDefault(); this.cancel(); });
+    // 桌面端缩放（鼠标滚轮 / 触控板捏合）。⚠ `{ passive: false }` **不能省** —— 不带它，
+    //   `preventDefault()` 会被浏览器静默忽略：画布缩了、页面也跟着滚，而代码上完全看不出来。
+    //   tools/gesture-probe.mjs §⑩ 把第三参也钉住了（这是本仓第二次遇到同类静默失效）。
+    cv.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
 
     // ⚠ 这里**故意不接管空格键**。空格在本产品里是「运行/暂停」（main.js 的全局快捷键），
     //   那是做实验时的高频操作；再让它兼任平移修饰键，就等于把「按住空格再拖」变成一个
     //   需要教学的手势，而且每拖一次都会顺带切一次运行态。平移只保留空白处拖动与中键拖动。
+  }
+
+  /**
+   * 桌面端缩放：滚轮 = **围绕光标位置**缩放（放大/缩小都围绕指针下的那个世界点）。
+   * 一行复用 `engine.zoomAt()` —— 它就是「地图式缩放」那条式子（`pan = s − zoom·w(s)`）。
+   * ⚠ **不许在这里另写一份围绕点缩放的数学**：那正是「换算与绘制不一致」的入口，
+   *   也是本轮把两指手势整段交给 engine 的原因。上下限与夹取同样不在这里重复一份数字。
+   *
+   * 三件都不能省：
+   *   1. `{ passive: false }`（见 bind）：不带它 `preventDefault()` 会被静默忽略；
+   *   2. **只有真的缩放成功才** `preventDefault()`：到 0.25×/4× 之后要把滚轮还给页面，
+   *      否则用户会以为页面卡死（`engine.zoomAt` 的返回值就是为这件事准备的）；
+   *   3. `ctrlKey` 例外：触控板捏合会被浏览器报成 ctrl+wheel，而浏览器会拿它去缩**整页**，
+   *      所以 ctrl+wheel 一律拦下来（哪怕已经到限），这个手势由画布自己消化。
+   *
+   * `deltaMode` 1=行 / 2=页，单位不是像素；不归一化就会「滚一格跳一大截」。
+   */
+  onWheel(ev) {
+    const eng = this.app && this.app.engine;
+    if (!eng || typeof eng.zoomAt !== 'function') return;      // 引擎没挂上 ⇒ 不抢滚轮
+    const unit = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? 100 : 1;
+    const d = (ev.deltaY || 0) * unit;
+    if (!d) return;
+    // 触控板捏合（ctrl+wheel）的 delta 比滚轮小一个量级，所以用更大的系数
+    const k = ev.ctrlKey ? 0.005 : 0.0015;
+    const f = Math.exp(-d * k);
+    if (!isFinite(f) || f <= 0 || f === 1) return;
+    const p = this.pos(ev);
+    // ⚠ `zoomAt(z, sx, sy)` 收的是**目标 zoom**（绝对倍率），不是增量倍率 —— 它内部
+    //   负责夹取并围绕 (sx,sy) 重算 pan。第一版把 f 当目标传进去，结果「向前滚 = 缩小」。
+    //   zoomAt 自己会 markDirty（`engine.setViewAt` 是纯设置、由调用方判断要不要置脏）
+    const changed = eng.zoomAt(eng.zoom * f, p.x, p.y);
+    if (changed || ev.ctrlKey) ev.preventDefault();
   }
 
   setTool(t) {
@@ -179,7 +244,7 @@ export class Interaction {
   }
 
   cancel() {
-    const had = !!(this.wireFrom || this.pourFrom || this.drag || this.pan ||
+    const had = !!(this.wireFrom || this.pourFrom || this.drag || this.pan || this.gesture ||
       this.app.engine.hotPort || this.app.highlight);
     // ⚠ 落位过渡也必须取消，而且必须 `land:false` —— **停在当前位置，不补跑到旧目标**。
     //   漏了这一句的后果（2026-10-17 由 tools/pan-probe.mjs §⑨ 抓到）：过渡会**不受打断地
@@ -190,6 +255,10 @@ export class Interaction {
     this.pourFrom = null;
     this.drag = null;
     this.pan = null;             // 平移手势也必须收尾，否则下一次按下会接着上一次拖
+    this.gesture = null;         // 两指手势同理（换工具 / 右键 / 点空白一律作废）
+    // ⚠ `cancel()` **不动 `this.ptrs`**（手指还按在屏幕上，位置表要继续维护），
+    //   也**不动 `engine.pan/zoom`**：作废的是「这一轮手势」，不是用户已经调好的视口。
+    //   两指手势自己也会调 `cancel()`（清理单指那半截），必须遵守同一条（见 beginGesture）。
     this.app.engine.hotPort = null;
     this.app.highlight = null;
     if (had) this.markDirty();
@@ -214,14 +283,15 @@ export class Interaction {
     if (ev.button === 1) ev.preventDefault();
     else if (ev.button !== 0) return;
 
-    // 第二根手指落下：不做捏合缩放（本阶段 YAGNI），但必须让整个手势失效，
-    // 否则另一根手指会被当成「同一个拖拽」把器材甩到别处。
-    if (this.pid !== null && ev.pointerId !== this.pid) {
-      this.multi = true;
-      this.releaseCapture(ev);
-      this.cancel();
-      return;
-    }
+    const p = this.pos(ev);
+    this.ptrs.set(ev.pointerId, p);
+
+    // ① 已经有别的指针按着 ⇒ 这一根把它变成**两指手势**。
+    //    判据不是「`this.pid` 已经存在」而是「`ptrs` 里还有别的指针」：上一轮手势
+    //    收尾后剩下的那根手指仍留在 `ptrs` 里（见 endGesture），它再遇上一根新手指
+    //    也必须进手势，而不是被当成一次新的单指拖动。
+    const others = [...this.ptrs.keys()].filter((id) => id !== ev.pointerId);
+    if (others.length > 0) { this.beginGesture(ev, others[others.length - 1]); return; }
     this.pid = ev.pointerId;
     // ⚠ 任何一次新的按下都必须先**停住正在进行的落位过渡**，且停在当前位置（`land:false`）。
     //   不能只在 `cancel()` 里做 —— `cancel()` 只覆盖「点空白处 / 换工具 / 右键」这几条路，
@@ -235,12 +305,11 @@ export class Interaction {
       try { this.canvas.setPointerCapture(ev.pointerId); } catch { /* 指针已失效，退回逐元素派发 */ }
     }
 
-    const p = this.pos(ev);
     this.mouse = p;
     const world = this.app.world;
     const w = this.toWorld(p);          // 命中检测一律吃世界坐标
 
-    // ① 中键拖动 —— 与工具、与指针下有什么都无关，优先放行。
+    // ② 中键拖动 —— 与工具、与指针下有什么都无关，优先放行。
     //    ⚠ 这里**没有**空格：空格归 main.js 的「运行/暂停」，不做平移修饰键。
     if (ev.button === 1) { this.startPan(p); return; }
 
@@ -289,6 +358,8 @@ export class Interaction {
         this.app.select(null);
         // ② 空白处按住左键拖动 = 平移。真正的平移在 onMove 越过阈值后才发生，
         //    所以「点空白处取消选中」这条既有语义原封不动（见 armPan）。
+        //    ⚠ 触屏走不到这里**不是 YAGNI 残留，是产品决策**：单指在触屏上等于
+        //      滚动 / 拖器材，平移归两指（见 beginGesture 与 armPan 的注释）。
         if (ev.pointerType !== 'touch') this.armPan(p);
       }
       this.markDirty();       // 选中框变了
@@ -336,8 +407,11 @@ export class Interaction {
 
   /**
    * 空白处左键「预备平移」。判据是**未命中任何器材/接线柱**（由调用方保证），
-   * 并且是鼠标类指针（手指拖动在触屏上等于滚动手势，本轮不做）。
-   * 这里同时吃掉“双击复位”的第一次点按 —— 第二次才会复位。
+   * 并且是**鼠标类指针**（调用处拦掉 touch）。
+   * ⚠ 触屏不平移**不是「本轮没做」，是产品决策**：单指在触屏上等于滚动/拖器材，
+   *   平移与缩放都归两指。删掉调用处那个 pointerType 判据会改掉「单指点空白处 =
+   *   取消选中」这条既有语义 —— 用户明令不许动的一条。
+   * 这里同时吃掉“双击复位”的第一次点按 —— 第二次才会复位（**只复位平移**）。
    */
   armPan(p) {
     if (this.doubleTap && performance.now() - this.doubleTap.at <= DOUBLE_TAP_MS
@@ -351,6 +425,92 @@ export class Interaction {
     //   当场被自己清掉，表现为「点两次没反应」（pan-probe §⑥ 就是钉这一条的）。
     this.startPan(p);
     this.doubleTap = { at: performance.now(), x: p.x, y: p.y };
+  }
+
+  // ══════════ 两指手势：平移 + 捏合缩放 ══════════
+
+  /**
+   * 第二根手指落下 ⇒ 把两指接管成**视口手势**。
+   *
+   * 为什么锚点存**世界点**而不是「起手 pan/zoom + 屏幕位移」：捏合与平移必须能同时
+   * 发生。把「起手那一刻两指中点下的世界点」(w0) 钉在**当前**中点下方，一句式子
+   * 同时给出两件事（见 updateGesture），而且「中点下的世界点不动」这条唯一判据
+   * 是**构造出来**的，不用分别调试缩放与平移。
+   *
+   * 单指那半截手势按既有口径整体作废（`cancel()`）：否则第二根手指落下后第一根
+   * 手指还会继续把器材拖走（旧行为，保留）。
+   */
+  beginGesture(ev, otherId) {
+    const a = this.ptrs.get(otherId), b = this.ptrs.get(ev.pointerId);
+    this.multi = true;
+    this.releaseCapture(ev);
+    this.cancel();                       // ⚠ 必须在锚点之前：cancel() 不动 engine.pan/zoom
+    if (!a || !b) { this.gesture = null; return; }   // 位置表对不上 ⇒ 不起手势
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const eng = this.app.engine;
+    this.gesture = {
+      ids: [otherId, ev.pointerId],
+      mid,                                     // 起手中点（屏幕坐标）
+      dist: Math.hypot(b.x - a.x, b.y - a.y),  // 起手两指间距（屏幕像素）
+      w0: this.toWorld(mid),                   // 起手中点下的**世界点**：唯一锚点
+      zoom0: eng && eng.zoom ? eng.zoom : 1,
+    };
+    this.doubleTap = null;   // 两指手势不该留下「双击空白处」的候选
+    this.markDirty();
+  }
+
+  /**
+   * 两指手势的每一帧：`z = zoom0 × (当前间距 / 起手间距)`，再把起手世界点 w0 钉在
+   * 当前两指中点下方（`engine.setViewAt`）。于是：
+   *   · 间距不变 ⇒ z 不变 ⇒ **纯平移**，位移就是中点位移；
+   *   · 中点不动 ⇒ **纯缩放**，而且围绕中点（不是画布左上角）。
+   * 上下限由 `engine.clampZoom` 兜住：夹住之后 w0 仍钉在中点下（不跑偏），
+   * 只是「间距比 = 缩放比」在边界处不再成立 —— 这是有意的，比让视口飙到 NaN 好。
+   */
+  updateGesture() {
+    const g = this.gesture, eng = this.app.engine;
+    const a = this.ptrs.get(g.ids[0]), b = this.ptrs.get(g.ids[1]);
+    if (!a || !b || !eng || !eng.setViewAt) { this.gesture = null; return; }  // 指头对不上 ⇒ 作废
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const dist = Math.hypot(b.x - a.x, b.y - a.y);
+    const z = g.dist > 0 ? g.zoom0 * (dist / g.dist) : g.zoom0;   // 起手间距为 0 ⇒ 纯平移
+    const zBefore = eng.zoom, pxBefore = eng.pan.x, pyBefore = eng.pan.y;
+    eng.setViewAt(z, g.w0.x, g.w0.y, mid.x, mid.y);
+    // 真的变了才置脏：手势期间手指没动的那些帧不该惊动重绘
+    if (eng.zoom !== zBefore || eng.pan.x !== pxBefore || eng.pan.y !== pyBefore) this.markDirty();
+  }
+
+  /**
+   * 两指手势收尾：**任一根抬起**都走这里（pointercancel / lostpointercapture 同样）。
+   * ⚠ 剩下那根手指不许接着变成单指拖动 —— 否则用户松开一根手指的瞬间器材就被拖走。
+   *   办法是**主动放弃追踪**（`this.pid = null`）：单指拖动只可能由一次新的
+   *   pointerdown 起手（见 onDown）。这不影响「单指行为一个字都不许变」：
+   *   单指序列里根本没有语法能走到这里。
+   * ⚠ 不回退视口：用户已经调好的 pan/zoom 是他要的结果，作废的只是「这一轮手势」。
+   */
+  endGesture(ev) {
+    this.gesture = null;
+    this.multi = this.ptrs.size >= 2;
+    this.drag = null;
+    this.pan = null;
+    this.pid = null;
+    if (ev) this.releaseCapture(ev);
+    this.canvas.style.cursor = this.tool === 'select' ? 'default' : 'crosshair';
+    this.markDirty();
+  }
+
+  /**
+   * 指针捕获被夺走：只收尾**它参与的那点状态**，不碰无关的拖动。
+   * ⚠ 这里不用 `onCancel` 那套整体清理：浏览器会在我们**主动**
+   *   `releasePointerCapture()` 之后补一条 `lostpointercapture`（异步派发），
+   *   若它顺手清掉 drag/pan，就会误伤这之后刚开始的一次拖动。
+   */
+  onLostCapture(ev) {
+    if (!ev || !ev.pointerId) return;
+    this.ptrs.delete(ev.pointerId);
+    if (this.gesture && this.gesture.ids.includes(ev.pointerId)) this.endGesture(ev);
+    if (ev.pointerId === this.pid) this.pid = null;
+    this.multi = this.ptrs.size >= 2;
   }
 
   startWire(port) {
@@ -377,6 +537,14 @@ export class Interaction {
 
   // ══════════ 移动 ══════════
   onMove(ev) {
+    // ⓪ 两指手势：**必须最先处理**，而且只驱动视口 —— 多指期间不做任何命中/悬停/
+    //    拖动（否则另一根手指会把器材甩到别处）。放在 `if (this.multi)` 之前：
+    //    多指封锁现在是「没有手势时的兜底」。
+    if (this.gesture) {
+      if (ev && this.ptrs.has(ev.pointerId)) this.ptrs.set(ev.pointerId, this.pos(ev));
+      this.updateGesture();
+      return;
+    }
     // 没有按下时只认鼠标：e.pointerType 为空说明这是代码合成的裸事件（探针），
     // 也照鼠标处理。手指不按就不会有 move，无需过滤。
     const hovering = this.pid === null && ev.pointerType !== 'touch';
@@ -387,6 +555,9 @@ export class Interaction {
 
     const p = this.pos(ev);
     this.mouse = p;
+    // 位置表**每次 move 都刷新**：第二根手指可能随时落下，而起手锚点用的是
+    // 「那一刻两根手指的真实位置」（第一根手指用的是它最后一次 move，见 beginGesture）。
+    if (this.ptrs.has(ev.pointerId)) this.ptrs.set(ev.pointerId, p);
     const world = this.app.world;
     const w = this.toWorld(p);
 
@@ -461,10 +632,17 @@ export class Interaction {
 
   // ══════════ 抬起 ══════════
   onUp(ev) {
+    if (ev) this.ptrs.delete(ev.pointerId);
+    // 两指手势：**任一根抬起都结束整段手势**（剩下那根不许接着变成单指拖动，
+    // 否则松开一根手指的瞬间器材就被拖走 —— 见 endGesture）。
+    if (this.gesture && ev && this.gesture.ids.includes(ev.pointerId)) {
+      this.endGesture(ev);
+      return;
+    }
     if (this.pid !== null && ev && ev.pointerId !== this.pid) return;
     if (this.multi) {
-      // 多指作废：第一根手指抬起时解除封锁，本轮手势不再产生任何效果
-      this.multi = false;
+      // 多指作废（没有手势时的兜底）：第一根手指抬起时解除封锁，本轮手势不再产生任何效果
+      this.multi = this.ptrs.size >= 2;
       if (ev) this.releaseCapture(ev);
       this.drag = null;
       this.pan = null;
@@ -476,8 +654,12 @@ export class Interaction {
   }
 
   onCancel(ev) {
+    if (ev) this.ptrs.delete(ev.pointerId);
+    // 参与手势的指针被系统夺走（通知栏下拉、来电、浏览器接管手势）⇒ 整段手势收尾。
+    // ⚠ 收尾**不回退视口**：用户已经调好的 pan/zoom 是他要的结果，与 cancel() 同口径。
+    if (ev && this.gesture && this.gesture.ids.includes(ev.pointerId)) this.gesture = null;
     this.releaseCapture(ev);
-    this.multi = false;
+    this.multi = this.ptrs.size >= 2;
     this.drag = null;          // 取消的拖拽不写回坐标，也不触发单击语义
     this.pan = null;
     this.canvas.style.cursor = this.tool === 'select' ? 'default' : 'crosshair';

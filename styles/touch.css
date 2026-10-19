@@ -108,6 +108,45 @@ button, a, [role="button"] {
   .pal-list, .pane, .log-list, .drawer-body { -webkit-overflow-scrolling: touch; }
 }
 
+/* ── 拖出器材：手势所有权要按**方向**再切一刀 ──
+   器材栏列表在触屏上必须仍然能上下滑（那是浏览器材的主要方式），
+   所以这里**不准**写 `.pal-list{touch-action:none}` —— 那会让整栏滑不动。
+   让出的只有纵向滚动：
+     · 纵向手势在「拖拽尚未成立」时完全归浏览器 ⇒ 滑动列表的手感与改动前一致；
+     · 横向位移不被浏览器的滚动吃掉 ⇒「把器材拖到右边画布」这条主动作
+       不会被滚动手势抢走。
+   拖拽真正成立之后由 src/ui/palette.js 的非被动 touchmove 接管**本次**手势
+   （全仓只有那一条 preventDefault），两层配合才两头都在。 */
+.pal-list { touch-action: pan-y; }
+
+/* 拖动中的幽灵与落点环：跟着指针，屏幕空间。
+   层级只往上抬 —— 本文件既有最高层是 #palette 的 30，main.css 的 .overlay-layer 是 60，
+   这个新元素对谁都不构成遮挡竞争，所以取 70 而不是去动别人的层。
+   pointer-events:none 是必须的：它是浮在手底下的装饰，不能参与命中测试，
+   否则会挡住它正下方的画布，而画布正是要落上去的那块地方。 */
+.pal-ghost, .pal-halo {
+  position: fixed; z-index: 70; pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+.pal-ghost {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px 6px 8px;
+  background: var(--surface-3); border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow);
+  color: var(--text-2); font-size: 12.5px; white-space: nowrap;
+  opacity: .92;
+}
+.pal-halo {
+  width: 34px; height: 34px; border-radius: 50%;
+  border: 2px dashed var(--border-2);
+  transition: border-color var(--t-fast) var(--ease-out),
+              background-color var(--t-fast) var(--ease-out);
+}
+/* 落点环只在落到画布上时变实：一眼看出「松手会落在实验台上」还是「松手会取消」 */
+.pal-halo.on { border-color: var(--accent); border-style: solid; background: var(--accent-soft); }
+/* 正被拖的那一行压暗：它已经离开列表了 */
+.pitem.dragging { opacity: .45; }
+
 /* ══════════ 5. 命中热区（不可见）→ any-pointer: coarse ══════════
    判据：**看不见的改动**（命中盒、热区扩边）用 any-pointer: coarse ——
    它问的是「这台机器能被手指碰吗」。触屏笔记本的主指针是触控板
@@ -461,6 +500,31 @@ button, a, [role="button"] {
    所以这一条不会顺手把键位提示也放出来。 */
 @media (pointer: coarse) and (max-width: 1180px) {
   .hintline.hint-touch { display: inline; }
+
+  /* 提示行在手机上放不下 —— 实测（无头 Edge、390×844、(pointer:coarse)=true）：
+       .hint-touch  右边缘 474px（自身宽 289px）
+       #statusbar   宽 390px、内容 474px、overflow-x: visible
+     ⇒ 内容比盒子宽 84px，右端那几个字**本来就在屏幕外**。这是**改前就存在**的
+       缺陷，不是这轮把提示文案写长才坏的；文案加长后（约 315px）缺口到约 110px。
+     为什么选「换行」而不是「藏掉电路状态与帧率」那条路：
+       在 390px 上 #fps 早已被 ≤990px 那条藏掉、耦合计数早已被 ≤400px 那条藏掉，
+       能再藏的只剩 #stCircuit。而新文案自己就约 315px，加上左侧
+       「当前工具 + 分隔符 + 电路状态」约 185px 仍是约 500px；再藏掉 stCircuit
+       也只有约 440px —— **仍然超宽**。那条路修不好这个缺陷，代价却是永久丢掉
+       电路状态这个信号（它还带 .on/.warn 两种颜色，是唯一的电路状态灯）。
+     换行是唯一既保住全部信息、又真能放下的做法。代价：状态栏高约一行
+       （11px 字 → 约 15px），画布相应少十几像素；row-gap 压到 2px 让这行尽量薄。
+       320px 的极窄机会让提示行自己折成两行（可用宽 304px < 约 315px），
+       状态栏再高一行 —— 仍然完整可读，只是更高，这是可接受的降级。
+     分类：这是**看得见**的布局改动 ⇒ 挂 pointer: coarse，**不挂** any-pointer ——
+       触屏笔记本的主指针是触控板（有鼠标、有键盘），不该被改到桌面观感
+       （plans/07-触控适配.md 立的分类：不可见改动 any-pointer / 看得见改动 pointer）。 */
+  #statusbar { flex-wrap: wrap; row-gap: 2px; }
+
+  /* .st 的 nowrap 是给「一个读数」用的（别把「耦合 0 处」拆开）；
+     提示行是两个完整句子，必须允许在自己内部换行，否则上面那条等于没换。
+     特指度 (1,1,0) 高过 main.css 的 .st (0,1,0)，且只命中提示行，不碰其它读数。 */
+  #statusbar .hintline { white-space: normal; }
 }
 
 /* ══════════ 8. 内层滚动容器：不把滚动串给页面 ══════════

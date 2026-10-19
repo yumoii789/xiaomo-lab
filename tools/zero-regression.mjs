@@ -201,6 +201,37 @@ const SUITE = [
     note: 'T-01 §四十一（交互层唯一 Node 护栏；原依赖 %TEMP% 副本，已改为降级）',
   },
   {
+    id: 'gesture-probe',
+    cmd: ['tools/gesture-probe.mjs'],
+    expect: '"probe":"gesture","mutate":false,"items":68,"pass":68,"fail":0',
+    label: '视口手势层 68 项（两指平移/捏合 + 桌面滚轮 + 单指逐位对照）',
+    layer: 'node',
+    // ★ task-12 新增。最值钱的不是条数而是**逐位对照**：§⑥ 用改动前的字节副本跑同一串
+    //   单指事件（含本轮新增的 S2b「触屏在空白处拖 120px」），比较状态摘要与绘制指令流
+    //   ⇒ 「单指在触屏上也起手平移」这个**会毁掉拖动器材**的改动必然红（该变异体实测红在
+    //   §⑥§⑦ 两处）。全部 5 个变异体 landInCode 实测、声明红节 ≡ 实测红节、ctrlBad 0。
+    //   ⚠ 它的上一版探针曾**自己毒死自己**：用 `eng.zoom` 算屏幕点，而改动前的 engine 上
+    //   `zoom` 是 undefined ⇒ 坐标全 NaN ⇒ 报出来的差异指向引擎、其实是探针缺陷
+    //   （JSON 里 undefined/NaN 都序列化成 null，长得像 pan 丢了）。
+    note: 'task-12（触控视口：两指平移/捏合缩放 + 桌面滚轮缩放）',
+  },
+  {
+    id: 'palette-dnd-probe',
+    cmd: ['tools/palette-dnd-probe.mjs'],
+    expect: '"items":32,"pass":32,"fail":0',
+    label: '器材栏拖出 32 项（长按成立 → 放手即落位 = 放手点）',
+    layer: 'node',
+    // ★ task-13 新增。⚠ 它第一版有一条**假红**：methodBody() 用 indexOf(name+'(') 锚到的
+    //   是**调用点**而不是定义点（本仓元教训 AV），切出来的「函数体」自然不含
+    //   screenToWorld( ⇒ 断言红、实现却是对的。修法不是改断言，而是把「取到的是不是定义」
+    //   变成返回值里的可断言字段（looksLikeDef），让锚**自己会红**。
+    //   同族的另外两面是**假绿**、且只能在 --mutate 下现形：静态判据读的是 srcRaw 而不是
+    //   被测那一份（⇒ 变异体下永远不可能红）、以及 /setPointerCapture/ 命中的是注释
+    //   （⇒ 把实现整行删掉断言照样绿）。三面同因：**锚错了**。
+    //   红档 11 个变异体，expectedRed 14 ≡ observedRed 14、ctrlBad 0、baselineRed []。
+    note: 'task-13（器材栏长按拖出到任意落点 + 抽屉重叠取消）',
+  },
+  {
     id: 'publish-gate',
     cmd: ['tools/publish-gate.mjs'],
     expect: '发布闸门通过：15 项，可以发布',

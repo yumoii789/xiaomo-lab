@@ -44,6 +44,17 @@ function hexRGB(h) {
  */
 export const SPEEDS = [0.1, 0.25, 0.5, 1, 2, 4];
 
+/**
+ * 视口缩放的上下限（见 `Engine.zoom`）。取 0.25×–4× 的理由：
+ *   · 上限 4×：一根 24px 的世界网格线在屏幕上变成 96px，接线柱的屏幕命中半径
+ *     （`HIT_PORT` 是**世界量**）随之放大 4 倍 ⇒ 手指有足够精度去点接线柱；
+ *   · 下限 0.25×：一块 840px 宽的画布能看见 3360 世界像素 ≈ 140 格，够放下整场
+ *     实验的台面；再小接线柱的屏幕半径只剩 3px 出头、点不中 —— 这是内容缩放的
+ *     固有代价，不做补偿（用户要的是「像地图一样缩放」）。
+ */
+export const ZOOM_MIN = 0.25;
+export const ZOOM_MAX = 4;
+
 export class Engine {
   constructor(canvas, world) {
     this.canvas = canvas;
@@ -57,6 +68,16 @@ export class Engine {
      *   所以存盘/回放/账目都不该看见它（谓词见 tools/pan-probe.mjs §②）。
      */
     this.pan = { x: 0, y: 0 };
+    /**
+     * 画布视口缩放：**屏幕坐标 = 世界坐标 × zoom + pan** —— 「缩放实验室」的真源。
+     * ⚠ 与 pan 同族：只是视角状态，**不进 world、不进存档、不参与撤销**。
+     * 恒等值 1：zoom===1 且 pan 为零时**一条变换指令都不发**，绘制指令流与
+     * 「没有视口」时逐位相同（tools/pan-probe.mjs §② 拿改动前的 engine.js 对跑）。
+     * ⚠ 唯一换算出口仍是 `screenToWorld()`：交互层自己写 `(p.x - pan.x) / zoom`
+     *   等于多一个「看得见但点不中」的机会。
+     * ⚠ 合法值恒落在 [ZOOM_MIN, ZOOM_MAX]（`clampZoom`）。
+     */
+    this.zoom = 1;
     /** 当前速度档（B1 的真源）；合法值**恒为** this.speeds 的元素（setSpeed 会吸附） */
     this.speed = 1;
     /** 档位表（B1）：UI 从这里取档，不再把 0.25/1 硬编码在工具栏里 */
@@ -127,13 +148,23 @@ export class Engine {
    * 自己写 `p.x - pan.x` 就等于多一个「看得见但点不中」的机会。交互层只许从
    * 这里取世界坐标（tools/pan-probe.mjs §③ 用一个只统计调用次数的探针把这条钉住）。
    *
-   * ⚠ `window.__XM_PAN_OFF__` 是**变异体回退开关**，只为「判据能红」而存在：
-   *   置真时本函数故意返回原始屏幕坐标（即退回「视口偏移不存在」的旧行为），
-   *   让探针能同一份断言下看到命中失效。正常运行时它不存在，分支恒不成立。
+   * ⚠ `window.__XM_PAN_OFF__` 与 `window.__XM_ZOOM_OFF__` 是**变异体回退开关**，
+   *   只为「判据能红」而存在：前者返回原始屏幕坐标（退回「视口偏移不存在」），
+   *   后者把 zoom 当 1（退回「画布没有缩放」）。正常运行时两个键都不存在，
+   *   两个分支恒不成立。
    */
   screenToWorld(x, y) {
     if (typeof window !== 'undefined' && window.__XM_PAN_OFF__) return { x, y };
-    return { x: x - this.pan.x, y: y - this.pan.y };
+    const z = this._effZoom();
+    return { x: (x - this.pan.x) / z, y: (y - this.pan.y) / z };
+  }
+
+  /** 生效的缩放（变异体开关置起时恒为 1）。
+   *  ⚠ **绘制不走这里** —— 绘制用的是真实的 `this.zoom`，否则「换算与绘制不一致」
+   *    这件事在绘制指令流里根本看不出来，红档就白做了（tools/gesture-probe.mjs §④）。 */
+  _effZoom() {
+    if (typeof window !== 'undefined' && window.__XM_ZOOM_OFF__) return 1;
+    return this.zoom;
   }
 
   /**
@@ -145,6 +176,53 @@ export class Engine {
     this.pan.x = 0; this.pan.y = 0;
     this.markDirty();
     return true;
+  }
+
+  /**
+   * 复位整个视口（pan + zoom 一起回原点）。**与 `resetPan()` 分开**：后者的语义是
+   * 「只复位平移」，被双击空白处与既有探针消费，一个字节都不许改；需要整体复位
+   * 的调用方用这个。返回是否真的动过（没动过就不惊动一帧）。
+   */
+  resetView() {
+    if (this.pan.x === 0 && this.pan.y === 0 && this.zoom === 1) return false;
+    this.pan.x = 0; this.pan.y = 0; this.zoom = 1;
+    this.markDirty();
+    return true;
+  }
+
+  /** 把 zoom 夹到 [ZOOM_MIN, ZOOM_MAX]。非有限值/非正值一律当 1（宁可不动，不许 NaN 进视口） */
+  clampZoom(z) {
+    if (!isFinite(z) || z <= 0) return 1;
+    return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+  }
+
+  /**
+   * 以**屏幕点 (sx,sy) 为不动点**设缩放：该屏幕点下的世界点保持不动。
+   * 「地图式缩放」的全部数学就是 `pan = s − zoom·w(s)` —— 缩放因此天然围绕手势中点，
+   * 而不是画布左上角。返回是否真的变过。
+   */
+  zoomAt(z, sx, sy) {
+    const z2 = this.clampZoom(z);
+    if (z2 === this.zoom) return false;
+    const w = this.screenToWorld(sx, sy);
+    this.setViewAt(z2, w.x, w.y, sx, sy);
+    this.markDirty();
+    return true;
+  }
+
+  /**
+   * 视口设置的**低层原语**：把世界点 (wx,wy) 钉在屏幕点 (sx,sy) 上，并设 zoom=z。
+   * 这一条式子同时承担**捏合缩放**与**两指平移**：
+   *   · 两指间距不变 ⇒ z 不变 ⇒ 退化成纯平移；
+   *   · 两指中点不动 ⇒ 只剩缩放，且围绕中点。
+   * ⚠ 本函数**不** `markDirty()`：它被手势的每一帧调用，要不要重绘由调用方判断
+   *   （tools/gesture-probe.mjs §⑤ 会钉住「没变化的那一帧不置脏」）。
+   */
+  setViewAt(z, wx, wy, sx, sy) {
+    const z2 = this.clampZoom(z);
+    this.zoom = z2;
+    this.pan.x = sx - wx * z2;
+    this.pan.y = sy - wy * z2;
   }
 
   resize() {
@@ -248,12 +326,16 @@ export class Engine {
     //   顺序固定为 setTransform → clearRect → translate 还有一个好处：
     //   平移量为 0 时这条指令流与「没有平移功能」时逐位相同（tools/pan-probe.mjs §②）。
     g.clearRect(0, 0, this.w, this.h);
-    // 视口偏移：屏幕像素 × dpr → 世界像素。此后画的一切（网格、导线、器材、
-    // 端口、选中框、叠层）自动共用同一个视口。
-    // ⚠ pan 为零时**不发这条指令**：矩阵上 translate(0,0) 是恒等，但记进绘制指令流
-    //   它就是一条真实差异。「平移量为 0 时逐位相同」是硬指标，靠这一句保住
-    //   （tools/pan-probe.mjs §② 直接拿改动前的 engine.js 对跑同一串指令）。
+    // 视口：**先平移、再缩放** ⇒ 此后画在世界点 W 的东西落在屏幕 W×zoom + pan 上，
+    // 与 `screenToWorld()` 严格互逆。画的一切（网格、导线、器材、端口、选中框、叠层）
+    // 自动共用同一个视口。
+    // ⚠ 顺序不能反：反过来是「平移量被缩放放大」，同一串世界坐标会落错屏幕位置。
+    // ⚠ 两个恒等值都**不发指令**：pan 为零不发 translate、zoom 为 1 不发 scale。
+    //   矩阵上它们是恒等，但记进绘制指令流就是一条真实差异 ——「pan=0 且 zoom=1 时
+    //   逐位相同」是硬指标，靠这两句保住（tools/pan-probe.mjs §② 直接拿改动前的
+    //   engine.js 对跑同一串指令）。
     if (this.pan.x || this.pan.y) g.translate(this.pan.x, this.pan.y);
+    if (this.zoom !== 1) g.scale(this.zoom, this.zoom);
 
     this.drawBackdrop(g);
     this.drawGrid(g);
@@ -293,12 +375,21 @@ export class Engine {
 
   drawGrid(g) {
     const s = this.gridSize;
-    // 世界坐标下的可见区 = 屏幕区 − pan。这样网格线仍钉在世界格点上，
-    // 拖动画布时是「视角在动」而不是「网格跟着屏幕滑」。
-    // ⚠ 起手四舍五入到整格：省掉看不见的屏外线，也让端点落回世界格点，
-    //   使「平移为 0 时」的线段坐标与改动前逐位相同（0.5 的线宽偏移不漂）。
-    const x0 = Math.floor(this.pan.x / s) * s, x1 = x0 + this.w + s;
-    const y0 = Math.floor(this.pan.y / s) * s, y1 = y0 + this.h + s;
+    // 世界坐标下的可见区 = (屏幕区 − pan) / zoom。这样网格线仍钉在世界格点上，
+    // 拖动画布/缩放时是「视角在动」而不是「网格跟着屏幕滑」。
+    // ⚠ 起手四舍五入到整格：省掉看不见的屏外线，也让端点落回世界格点。
+    // ⚠ 2026-10-19 修正**平移方向**：原式 `Math.floor(this.pan.x / s) * s` 把可见区
+    //   算成了 `[+pan, +pan+w]`，而真实可见区是 `[−pan, −pan+w]` ⇒ 平移量一偏离 0，
+    //   屏幕两端就露出一条**没有网格**的带子，宽约 2·|pan|。实测（800×600 画布）：
+    //   pan=(100,0) 网格只覆盖屏幕 x∈[196,1020]（左边 196px 全空）、
+    //   pan=(−100,40) 覆盖 x∈[−220,604] 与 y∈[64,688]（右边与下边各空一截）。
+    //   这条从来没有判据覆盖（pan-probe §② 只比 pan=0 的指令流）⇒ 现在按真实可见区算。
+    //   「pan=0 且 zoom=1 时线段坐标与改动前逐位相同」仍然保住：此时 x0=0、x1=w+s。
+    // ⚠ 末尾的 `|| 0` 只为消掉 `-0`：pan=0 时 `Math.floor(-0)` 给 -0，而 -0 会污染
+    //   「逐位相同」的对照读数（数值相等、JSON 也相同，但字符串化后不是同一个字符）。
+    const vw = this.w / this.zoom, vh = this.h / this.zoom;
+    const x0 = (Math.floor(-this.pan.x / this.zoom / s) * s) || 0, x1 = x0 + vw + s;
+    const y0 = (Math.floor(-this.pan.y / this.zoom / s) * s) || 0, y1 = y0 + vh + s;
     g.lineWidth = 1;
     g.strokeStyle = C.grid;
     g.beginPath();
