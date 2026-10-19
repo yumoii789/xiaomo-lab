@@ -1,10 +1,10 @@
 const DEFS = [];
 // ══════════════════════════════════════════════════════════
-// 物理域 · 电学增量器材（7 件）
+// 物理域 · 电学增量器材（12 件）
 //
 // 与既有的 src/equipment/electrical.js（10 件：干电池 / 开关 / 小灯泡 /
 // 定值电阻 / 滑动变阻器 / 电流表 / 电压表 / 热敏电阻 / 电热丝 / 电动机）
-// 的分工——这 6 件专门补「交流、暂态、半导体」三块，**逐件不与上面重叠**：
+// 的分工——这 12 件专门补「交流、暂态、半导体、三端器件」四块，**逐件不与上面重叠**：
 //
 //   resistorcap  电容     —— 暂态 RC（既有 10 件全是纯电阻直流）
 //   inductorcoil 电感     —— 暂态 RL + 断电自感尖峰（既有没有储能元件）
@@ -13,6 +13,9 @@ const DEFS = [];
 //   transformer  变压器   —— 互感变比（既有没有磁路元件）
 //   diode        二极管   —— 单向导电 / 半波整流（既有没有非线性元件）
 //   photoresistor 光敏电阻 —— 照度→电阻（**连续**非线性，与二极管的开关型相对；相对照度口径）
+//   photodiode   光敏二极管 —— 照度≥阈值 ⇒ 光生载流子导通（开关型光电元件）
+//   npn / pnp    三极管   —— 电流放大 I_C = β·I_B + 截止/放大/饱和三区（既有没有三端放大器件）
+//   nmos / pmos  MOSFET   —— 电压控流 + 截止/可变电阻/恒流三区、跨导 g_m（既有没有场效应器件）
 //
 // 三条工程约定写在这里，全文件遵守：
 //
@@ -39,6 +42,15 @@ const DEFS = [];
 //      声学/高频信号在 1/120 s 下必然混叠，所以显示用解析函数按细步长光栅化，
 //      这一点在 acoustics.js 与报告里都写明了。
 //
+//   ④ **三端器件用「一条器材多条支路」表达**（三极管 B–E / C–E、MOSFET G–S / D–S），
+//      每条支路自带 {a,b} 端口对；控制端（基极 / 栅极）**接了线才分叉**，没接就返回 null
+//      回落到 `circuitBranch()` 的单支路 —— 与滑动变阻器当变阻器用同一条口径。
+//      ⚠ 求解器只有 R / V / open 三种支路，**没有电流源** ⇒ 「受控电流源」这类模型
+//      （三极管放大区的 I_C = β·I_B、MOSFET 的 I_D = k·V_ov²）一律**线性化成上一帧量算出的
+//      等值电阻**：本帧 solve 里它是常量 ⇒ 矩阵线性；在不动点上电流关系**精确成立**。
+//      这不是文件头 ① 禁掉的 `resistanceAt(U)`（那个每轮迭代都被重问 ⇒ 判据自我否定 ⇒ 抖）。
+//      ⚠ 判决量（state.region）只在 `step()` 里算一次、`circuitBranches` 只读 ⇒ 不漂移。
+//
 // 纯计算部分（RC / RL / 整流 / 变比 / 频率测量…）全部 export，
 // Node 里可直接 import 断言，见 tools/equipment-electronics.mjs。
 // ══════════════════════════════════════════════════════════
@@ -46,6 +58,9 @@ const DEFS = [];
 import { Entity, gfx } from '../core/entity.js';
 import { define } from './registry.js';
 import { bus, EV } from '../core/bus.js';
+// 面板读数行用求解器自己的单位口径（electrical.js 早就是这么引的）⇒ 报出来的串与
+// 「电流 I / 两端电压 U」那四行**同一个格式器**，不会出现两套精度。
+import { fmtA, fmtV } from '../physics/circuit.js';
 
 const PH = 'physics';
 const CAT = '电学';
@@ -212,6 +227,48 @@ export function nearestSignal(world, self, maxDist = 1e9) {
     if (d < bd) { bd = d; best = e; }
   }
   return best;
+}
+
+/**
+ * 三极管工作区判据（纯函数，tools/transistor-probe.mjs 直接 import 断言）。
+ * 入参一律是**同一朝向的幅值口径**（UBE=|U_BE|、UCE=|U_CE|、IB=|I_B|、IC=|I_C|），
+ * NPN / PNP 共用同一套式子（极性由支路 emf 的符号 s 承担，不进这里）。
+ *
+ *   截止 cutoff：UBE ≤ Vbe(on)  —— 发射结没正偏
+ *   饱和 sat   ：β·IB > IC（外部回路把集电极电流压在 β·IB 以下）或 UCE < Vce(sat)（集电结也正偏了）
+ *   放大 active：其余
+ *
+ * ⚠ 为什么以**电流比**为主判据、而不是「UCE < Vce(sat)」一条：见 Bjt 类头的抖动分析
+ *   （两个模型会互相否定 ⇒ 2 帧周期的 ON/OFF 抖动，与二极管第一版同一种病）。
+ */
+export function bjtRegion({ UBE, UCE, IB, IC, beta, vbeOn, vceSat }) {
+  if (!(UBE > vbeOn)) return 'cutoff';
+  if (beta * IB > IC || UCE < vceSat) return 'sat';
+  return 'active';
+}
+
+/**
+ * MOSFET 输出特性（纯函数，探针直接 import 断言）。入参是同一朝向的幅值口径
+ * （N 沟道用 UGS / VDS，P 沟道用 |VGS| / |VDS|），N / P 沟道共用同一套式子。
+ * k 单位 A/V²，Vov = UGS − Vth 是过驱电压。
+ *
+ *   截止       cutoff：UGS ≤ Vth ⇒ ID = 0
+ *   可变电阻区 triode：VDS <  Vov ⇒ ID = k·(2·Vov·VDS − VDS²)
+ *   恒流区     sat   ：VDS ≥ Vov ⇒ ID = k·Vov²
+ *
+ * ⚠ 两段在 VDS = Vov 处**取值相同**（都是 k·Vov²），给出的等值电阻 UDS/ID 也相同
+ *   ⇒ 接缝连续，判决在两段之间翻转不产生抖动（这正是它与二极管/三极管必须改用
+ *   电流判据的区别：那两个的 ON 态端电压会自我否定，这个不会）。
+ * ⚠ 跨导分段：可变电阻区 gm = k·VDS（随 VDS 线性长），恒流区 gm = 2·k·Vov。
+ */
+export function mosLaw(UGS, UDS, vth, k) {
+  const vov = UGS - vth;
+  if (!(vov > 0)) return { region: 'cutoff', vov: 0, id: 0, gm: 0 };
+  if (UDS < vov) {
+    const id = k * (2 * vov * UDS - UDS * UDS);
+    return { region: 'triode', vov, id: Math.max(0, id), gm: k * UDS };
+  }
+  return { region: 'sat', vov, id: k * vov * vov, gm: 2 * k * vov };
 }
 
 /** 画一段波形折线（局部坐标） */
@@ -1038,6 +1095,408 @@ const photoDiodeDef = {
 DEFS.push(() => define(photoDiodeDef));
 
 // ══════════════════════════════════════════════════════════
+// 十、器材 9/10：三极管 NPN / PNP（三端非线性）
+// ══════════════════════════════════════════════════════════
+
+/** 取前 n 个 wire 口的下标；不足 n 个返回 null（顺序 = ports 里出现的顺序） */
+function wirePorts(e, n) {
+  const wp = [];
+  for (let i = 0; i < e.ports.length; i++) if (e.ports[i].kind === 'wire') wp.push(i);
+  return wp.length < n ? null : wp.slice(0, n);
+}
+/** 某个 wire 口是否接了线（world 缺省 / 没有 wires 一律当没接 —— 与滑动变阻器同一条口径） */
+function portWired(e, world, p) {
+  if (!world || !Array.isArray(world.wires)) return false;
+  return world.wires.some((w) => w.kind === 'wire'
+    && ((w.a.e === e.id && w.a.p === p) || (w.b.e === e.id && w.b.p === p)));
+}
+/** 截止口径的等效电阻：roff 一律以 MΩ 记（与 Diode 的 roff 同口径） */
+const offR = (mohm) => clamp(mohm * 1e6, 1, 1e9);
+/** 工作区中文名 / 配色（三极管与 MOSFET 共用一张表）
+ *  `dead` 不是电学工作区，而是「三个端子不全接线」——求解器对 open 支路报 R=Infinity，
+ *  此时端子电位没有物理意义（实测悬空口的节点号会别名到别的节点上，见 tools/transistor-probe.mjs §7），
+ *  所以工作区一栏必须如实说「未接入」，不能报一个看着像真的区（假绿比缺失危险）。 */
+const REGION_CN = { cutoff: '截止', active: '放大', sat: '饱和', triode: '可变电阻区', dead: '未接入' };
+const REGION_COL = { cutoff: BAD, active: OK, sat: HOT, triode: HOT, dead: DIM };
+
+/**
+ * 三极管的两条支路（一条器材多条支路）：
+ *
+ *   主边 bi=0  **C–E** —— 主边独占实体级 state.I/U/P/R ⇒ `state.U` 恒为 V(C)−V(E)
+ *   次边 bi=1  **B–E** —— 真端子、真进矩阵；解写进 `state.be` 盒子（每台本体自有，惰性建）
+ *
+ * 三区的分段线性表达（只用求解器**已有**的 R / V 两种支路，不新造元件类型）：
+ *
+ *   区    发射结 B–E                      集电通路 C–E
+ *   截止  {R, r=offR(roff)}               {R, r=offR(roff)}
+ *   放大  {V, emf=s·U_BE(on), r=rbe}       {R, r=Uce(上一帧)/(β·Ib(上一帧))}
+ *   饱和  {V, emf=s·U_BE(on), r=rbe}       {V, emf=s·U_CE(sat), r=rce_sat}
+ *
+ *   s = +1（NPN）/ −1（PNP）；两条支路的端子朝向**不分极性**（恒为 a=C,b=E 与 a=B,b=E），
+ *   极性只体现在 emf 的符号上 —— 与 Diode.sgn() 同一种做法 ⇒ 面板读数不随极性换口径。
+ *
+ * ⚠ **放大区为什么是「等值电阻」而不是「受控电流源」**：矩阵装配只认 R 与 V 两类章，
+ *   求解器里**没有电流源**。于是把 I_C = β·I_B 线性化成**本帧常量电阻**
+ *   r = Uce(上一帧)/(β·Ib(上一帧))：在不动点上 r 恰好 = Uce/Ic ⇒ **Ic = β·Ib 精确成立**
+ *   （不是近似，残差读数见 tools/transistor-probe.mjs）。
+ *   ⚠ 这与文件头 ① 禁掉的 `resistanceAt(U)` 不同：那个钩子**每一轮定点迭代都被重新问一次**
+ *   （判据追着自己跑 ⇒ 抖）；这里取的是上一帧的量，本帧 solve 里是常量 ⇒ 矩阵线性、
+ *   一轮到达本帧解，跨帧是几何收敛（比值 Rc/(Rce+Rc) < 1）。
+ *   ⚠ 也**不是**纯电阻建模：发射结与饱和态都是 V 支路（固定偏移），
+ *   电阻只承担「把已知电流源折成等值电阻」这一步，且每帧只算一次。
+ *
+ * ⚠ 跨支路耦合只读**上一帧**写下的 state（be.U / be.I / U / I），在本帧 solve 里全是常量
+ *   ⇒ 不存在迭代内代数环。区域判决只在 `step()` 里算一次并写进 `state.region`，
+ *   `circuitBranches` **只读不算** ⇒ 两个调用点不会各自漂移。
+ * ⚠ 判决为什么以**电流比**为主而不是「Uce < U_CE(sat)」一条：后者两个模型互相否定 ——
+ *   饱和态的 V 支路给出 Uce = U_CE(sat)+rce·Ic > U_CE(sat) ⇒ 下一帧被判成不饱和；
+ *   而放大态把 Ic 钉死在 β·Ib，电路真过驱动时 Uce 又掉到 U_CE(sat) 以下 ⇒ 再翻回饱和，
+ *   实测就是 2 帧周期的 ON/OFF 抖动（与二极管第一版同一种病）。电流判据在两个模型下都
+ *   **自我肯定**：饱和时外部回路把 Ic 压在 β·Ib 以下 ⇒ 继续饱和；放大态 Ic = β·Ib
+ *   ⇒ 不满足「严格大于」⇒ 继续放大。电压判据只保留为**进入**饱和的那一支触发。
+ */
+class Bjt extends Entity {
+  /** +1 = NPN，−1 = PNP（只改两条支路 emf 的符号） */
+  sgn() { return this.type === 'pnp' ? -1 : 1; }
+
+  /**
+   * 两线用法（约束④）：**基极（控制端）没接线** ⇒ 返回 null ⇒ 求解器回落到
+   * `circuitBranch()` 的单支路 ⇒ 该用法下与"改动前那条支路"逐位同解，且不产生假告警。
+   * 判据是「接线了没有」而不是「声明了几个口」—— 与滑动变阻器当变阻器用同一条口径。
+   */
+  circuitBranches(world) {
+    const p = wirePorts(this, 3);
+    if (!p) return null;
+    if (!portWired(this, world, p[0])) return null;
+    const deadBe = !portWired(this, world, p[2]);                 // 发射极没接 ⇒ 两条都不通
+    const deadCe = deadBe || !portWired(this, world, p[1]);
+    return [this.ceDef(p[1], p[2], deadCe), this.beDef(p[0], p[2], deadBe)];
+  }
+
+  /** 单支路回落：只有 C–E 一条。走到这里就意味着**基极没接线**（circuitBranches 仅此时返回 null）
+   *  ⇒ 丢掉 be 备忘盒。上一帧的 U_BE/I_B 是"当时基极接着线"的读数，留在盒子里会让 step() 拿陈旧基极
+   *  驱动把区域判成放大/饱和 —— 而集电极侧一旦判成饱和就变成 V 支路，拔掉基极线之后反而凭空生出电流。
+   *  丢掉之后本帧 U_BE = I_B = 0 ⇒ 区域判成截止 ⇒ C–E 给 offR：与"从未接过基极"逐位同解。 */
+  circuitBranch() {
+    const p = wirePorts(this, 3);
+    delete this.state.be;
+    return p ? this.ceDef(p[1], p[2], false) : { type: 'R', r: 1e9 };
+  }
+
+  /**
+   * 主边 C–E。
+   * ⚠ 任一端子没接线时给 `open`（零电流）而不是给 R=offR：集电极悬空时 C 节点只靠 gmin
+   *   与这条支路分压，端电压会落到 V_E/2 量级，再被 Uce/(β·Ib) 折成一个有限等值电阻
+   *   ⇒ 悬空集电极上凭空出现 mA 级电流（幻影电流）。open 与物理一致：没接就是不通。
+   *   `dead` 只在 `circuitBranches` 那条路上可能为真（它拿得到 world）；
+   *   回落路径 `circuitBranch()` 拿不到 world，与既有器材一样按区域给电阻。
+   */
+  ceDef(a, b, dead) {
+    const s = this.sgn();
+    const st = this.state.ce || (this.state.ce = {});
+    if (dead) return { type: 'open', a, b, state: st };
+    if (this.state.region === 'sat') {
+      return { type: 'V', emf: s * Math.max(0, this.props.vceSat),
+        r: clamp(this.props.rceSat, 1e-3, 1e9), a, b, state: st };
+    }
+    return { type: 'R', r: this.state.region === 'active' ? this.ceR() : offR(this.props.roff), a, b, state: st };
+  }
+
+  /** 次边 B–E：正偏 = V 支路（恒压降 + rbe，端电压自洽 U = U_BE(on) + rbe·I_B ≥ U_BE(on)）；未正偏 = 大电阻
+   *  ⚠ 「未接入」（集电极悬空）也走 V 支路 —— 那是**对的**：集电极断开时发射结照样正偏、基极电流照样流，
+   *    实测 I_B = 198 µA、U_BE = 0.7198 V（见 probe §7）。截止才是唯一该给大电阻的区。 */
+  beDef(a, b, dead) {
+    const s = this.sgn();
+    const st = this.state.be || (this.state.be = {});
+    if (dead) return { type: 'open', a, b, state: st };
+    return this.state.region === 'cutoff'
+      ? { type: 'R', r: offR(this.props.roff), a, b, state: st }
+      : { type: 'V', emf: s * Math.max(0, this.props.vbeOn),
+        r: clamp(this.props.rbe, 1e-3, 1e9), a, b, state: st };
+  }
+
+  /**
+   * 放大区的等值电阻 = Uce(上一帧) / (β·Ib(上一帧))（本帧常量）。
+   * 还没有集电极电压（冷启动 / 集电极悬空）时回落成截止电阻，避免 0/0 造出幻影电流。
+   */
+  ceR() {
+    const ib = Math.abs((this.state.be && this.state.be.I) || 0);
+    const ic = this.props.beta * ib;
+    const uce = Math.abs(this.state.U || 0);
+    if (!(ic > 1e-12) || !(uce > 1e-9)) return offR(this.props.roff);
+    return clamp(uce / ic, 1e-3, 1e9);
+  }
+
+  step() {
+    const s = this.sgn();
+    const be = this.state.be || {};
+    // 上一帧的量（求解器在本帧 solve 里刚写下；区域判决存起来给**下一帧**的 circuitBranches 用）
+    const ube = (be.U || 0) * s;                 // 折成「正偏为正」的口径
+    const uce = (this.state.U || 0) * s;
+    const ib = Math.abs(be.I || 0);
+    const ic = Math.abs(this.state.I || 0);
+    // 求解器对 open 支路报 R=Infinity（JSON.stringify 会把它渲染成 null，所以判据只能用 === Infinity）
+    const open = this.state.R === Infinity;
+    this.state.region = open ? 'dead' : bjtRegion({ UBE: ube, UCE: uce, IB: ib, IC: ic,
+      beta: this.props.beta, vbeOn: this.props.vbeOn, vceSat: this.props.vceSat });
+    // 面板口径：端子带符号电压（与求解器的 U 同一朝向 = V(C)−V(E) / V(B)−V(E)），
+    // 电流一律报**幅值** —— R 支路与 V 支路的电流正负号约定不同（二极管先例），
+    // 报符号会把「放大区」与「饱和区」的 I_C 一个正一个负，学生没法比。
+    this.state.Ube = be.U || 0;
+    this.state.Uce = this.state.U || 0;
+    this.state.Ubc = this.state.Ube - this.state.Uce;
+    this.state.Ib = ib;
+    this.state.Ic = ic;
+    this.state.Ie = ib + ic;
+    this.state.betaEff = ib > 1e-9 ? ic / ib : 0;   // 实测 β；饱和区实测 < 设定值 = 饱和的直接证据
+    this.state.sat = this.state.region === 'sat';
+  }
+
+  render(g) {
+    const { w, h } = this;
+    shell(g, w, h, this.type === 'pnp' ? 'PNP 三极管' : 'NPN 三极管');
+    const reg = this.state.region || 'cutoff';
+    const col = REGION_COL[reg] || DIM;
+    const cx = -20, r = 20;
+    // 管壳
+    g.strokeStyle = EDGE; g.lineWidth = 1.5;
+    g.beginPath(); g.arc(cx, 0, r, 0, TAU); g.stroke();
+    // 基极竖杠 + 三根引线
+    g.strokeStyle = WIRE; g.lineWidth = 1.6;
+    g.beginPath(); g.moveTo(-59, 0); g.lineTo(-32, 0); g.stroke();
+    g.beginPath(); g.moveTo(-32, -13); g.lineTo(-32, 13); g.stroke();
+    g.lineWidth = 2;
+    g.beginPath(); g.moveTo(-32, -9); g.lineTo(24, -30); g.lineTo(59, -30); g.stroke();
+    g.beginPath(); g.moveTo(-32, 9); g.lineTo(24, 30); g.lineTo(59, 30); g.stroke();
+    // 发射极箭头：NPN 朝外（背离基极）、PNP 朝内
+    const arrow = (x, y, dx, dy) => {
+      const n = Math.hypot(dx, dy) || 1, ux = dx / n, uy = dy / n, px = -uy, py = ux;
+      g.fillStyle = col; g.beginPath();
+      g.moveTo(x + ux * 8, y + uy * 8);
+      g.lineTo(x + px * 3.4, y + py * 3.4);
+      g.lineTo(x - px * 3.4, y - py * 3.4);
+      g.closePath(); g.fill();
+    };
+    if (this.type === 'pnp') arrow(17, 20, -1, -1); else arrow(24, 30, 1, 1);
+    dot(g, -59, 0); dot(g, 59, -30); dot(g, 59, 30);
+    gfx.text(g, `${this.type === 'pnp' ? 'PNP' : 'NPN'} · ${REGION_CN[reg] || '—'}  β=${this.props.beta}`,
+      -59, 38, { color: col, size: 9.5, align: 'left' });
+    gfx.text(g, `U_BE ${fmtV(this.state.Ube || 0)}   U_CE ${fmtV(this.state.Uce || 0)}`,
+      -59, 48, { color: TXT, size: 9, align: 'left' });
+    gfx.text(g, `I_B ${fmtA(this.state.Ib || 0)}   I_C ${fmtA(this.state.Ic || 0)}`,
+      -59, 58, { color: HOT, size: 9, align: 'left' });
+  }
+}
+
+/** NPN / PNP 两个定义只有一个字段不同（type / name / icon / desc）；极性由 Bjt.sgn() 从 type 读 */
+function bjtDefOf(type, name, icon, desc) {
+  const def = {
+    type, name, domain: PH, cat: CAT, icon, desc,
+    w: 124, h: 124,
+    ports: [
+      { x: -59, y: 0, kind: 'wire', label: 'B' },
+      { x: 59, y: -30, kind: 'wire', label: 'C' },
+      { x: 59, y: 30, kind: 'wire', label: 'E' },
+    ],
+    defaults: { beta: 100, vbeOn: 0.7, rbe: 100, vceSat: 0.2, rceSat: 20, roff: 1 },
+    // ⚠ `be` / `ce` 只能是 null：entity.js 的 `Object.assign({}, def.state)` 是浅拷贝，
+    //   在 def.state 里放对象会被**多台三极管共享同一个盒子** ⇒ 盒子在 ceDef/beDef 里惰性建。
+    state: { region: 'cutoff', Ube: 0, Uce: 0, Ubc: 0, Ib: 0, Ic: 0, Ie: 0,
+      betaEff: 0, sat: false, be: null, ce: null },
+    // 面板读数：一律「元件名 + 端子字母」（U_BE / U_CE / U_BC、I_B / I_C），不用含糊的「电压」。
+    // 走器材自报（def.stats）⇒ 不需要改 inspector.js，单位与精度与四键同一个格式器。
+    stats: [
+      { label: '工作区', read: (e) => REGION_CN[e.state.region] || '—' },
+      { label: '电压BE U_BE', read: (e) => e.state.Ube || 0, fmt: fmtV },
+      { label: '电压CE U_CE', read: (e) => e.state.Uce || 0, fmt: fmtV },
+      { label: '电压BC U_BC', read: (e) => e.state.Ubc || 0, fmt: fmtV },
+      { label: '基极电流 I_B', read: (e) => e.state.Ib || 0, fmt: fmtA },
+      { label: '集电极电流 I_C', read: (e) => e.state.Ic || 0, fmt: fmtA },
+      { label: '发射极电流 I_E', read: (e) => e.state.Ie || 0, fmt: fmtA },
+      { label: '实测 β=I_C/I_B', read: (e) => e.state.betaEff || 0, digits: 1 },
+    ],
+    tags: ['三极管', type === 'pnp' ? 'PNP' : 'NPN', '电流放大', '半导体', '非线性', '三端'],
+    fields: [
+      { k: 'beta', label: '电流放大系数 β', type: 'range', min: 10, max: 500, step: 10 },
+      { k: 'vbeOn', label: '发射结导通压降 U_BE(on)', type: 'range', min: 0, max: 1.5, step: 0.05, unit: 'V' },
+      { k: 'rbe', label: '发射结导通电阻', type: 'range', min: 1, max: 2000, step: 1, unit: 'Ω' },
+      { k: 'vceSat', label: '饱和压降 U_CE(sat)', type: 'range', min: 0, max: 1.5, step: 0.05, unit: 'V' },
+      { k: 'rceSat', label: '饱和区电阻', type: 'range', min: 1, max: 200, step: 1, unit: 'Ω' },
+      { k: 'roff', label: '截止电阻', type: 'range', min: 0.1, max: 50, step: 0.1, unit: 'MΩ' },
+    ],
+    create: (x, y) => new Bjt(def, x, y),
+  };
+  return def;   // def 先建、create 后挂 ⇒ 注册表里的 def 与 e.def 是同一个对象
+}
+const npnDef = bjtDefOf('npn', 'NPN 三极管', '▲',
+  '电流放大：I_C = β·I_B（放大区，发射结正偏、集电结反偏）、U_BE≈0.7V 钳位；饱和区 U_CE ≥ U_CE(sat)；截止区 I_C≈0');
+const pnpDef = bjtDefOf('pnp', 'PNP 三极管', '▼',
+  '与 NPN 极性相反：发射极电位最高，电流由 E 流入、从 B/C 流出（面板电压为端子带符号值 ⇒ 导通时 U_BE/U_CE 为负）');
+DEFS.push(() => define(npnDef));
+DEFS.push(() => define(pnpDef));
+
+// ══════════════════════════════════════════════════════════
+// 十一、器材 11/12：MOSFET N 沟道 / P 沟道（三端非线性）
+// ══════════════════════════════════════════════════════════
+/**
+ * MOSFET 的两条支路：
+ *
+ *   主边 bi=0  **D–S** 沟道 —— 三区都是 R 支路（`state.U` 恒为 V(D)−V(S)）
+ *   次边 bi=1  **G–S**      —— `open`：栅极绝缘 ⇒ I_G ≡ 0，但**必须声明**这条支路，
+ *                             否则栅极一接线就被判成「接了线却被忽略」= 假告警；
+ *                             它同时把 state.gs.U 带回 V(G)−V(S)。
+ *
+ * 三区（纯函数 mosLaw()）：
+ *   截止       U_GS ≤ Vth        ⇒ r = offR(roff)
+ *   可变电阻区 U_DS <  U_ov       ⇒ I_D = k(2·U_ov·U_DS − U_DS²)   ⇒ r = U_DS(上一帧)/I_D(上一帧)
+ *   恒流区     U_DS ≥  U_ov       ⇒ I_D = k·U_ov²                   ⇒ 同上
+ *
+ * ⚠ 与三极管/二极管的关键差别：**两段在 U_DS = U_ov 处取值相同**（都是 k·U_ov²），
+ *   给出的等值电阻也相同 ⇒ 接缝连续，判决在两段间翻转**不会**自我否定 ⇒ 这里用电压判据
+ *   是安全的。而栅极是绝缘的（I_G ≡ 0）⇒ 沟道电流不会反过来改变 U_GS ⇒ 截止判决也不可能
+ *   自我否定。两件器件为什么一个必须用电流判据、一个可以用电压判据，差别就在这两句。
+ * ⚠ 等值电阻同样只取**上一帧**的量（本帧 solve 里是常量）⇒ 与三极管同一条口径，
+ *   不动点上 I_D 精确等于 mosLaw() 给的式子。
+ */
+class Mosfet extends Entity {
+  /** +1 = N 沟道，−1 = P 沟道（只改各量的符号，式子一律走幅值口径） */
+  sgn() { return this.type === 'pmos' ? -1 : 1; }
+  /** 导电因子 k：面板按 mA/V² 记（学生口径），进模型换算成 A/V² */
+  kSI() { return Math.max(1e-9, this.props.k) * 1e-3; }
+
+  /** 两线用法（约束④）：**栅极（控制端）没接线** ⇒ null ⇒ 回落 circuitBranch() 的单支路 */
+  circuitBranches(world) {
+    const p = wirePorts(this, 3);
+    if (!p) return null;
+    if (!portWired(this, world, p[0])) return null;
+    const dead = !portWired(this, world, p[1]) || !portWired(this, world, p[2]);
+    return [this.dsDef(p[1], p[2], dead), this.gsDef(p[0], p[2])];
+  }
+  /** 单支路回落：只有 D–S 一条。走到这里就意味着**栅极没接线** ⇒ 丢掉 gs 备忘盒。
+   *  栅极悬空时没有可用的 U_GS：实测悬空栅结点会被求解器别名到别的结点上（能读出 12 V 的假栅压），
+   *  留着旧盒子则会让"拔掉栅极导线"这件事看起来没发生、沟道照旧导通。丢掉之后 U_GS = 0 ⇒ 截止。
+   *  刻意简化：真器件的悬空栅极会保持栅电荷，本模型不建栅电容 ⇒ 统一按「无栅压即无沟道」读。 */
+  circuitBranch() {
+    const p = wirePorts(this, 3);
+    delete this.state.gs;
+    return p ? this.dsDef(p[1], p[2], false) : { type: 'R', r: 1e9 };
+  }
+
+  /** 主边 D–S：三区都是电阻支路（值由上一帧的 U_GS / U_DS 定）；任一端子没接 ⇒ open */
+  dsDef(a, b, dead) {
+    const st = this.state.ds || (this.state.ds = {});
+    if (dead) return { type: 'open', a, b, state: st };
+    return { type: 'R', r: this.chR(), a, b, state: st };
+  }
+  /** 次边 G–S：栅极绝缘 ⇒ 恒为 open（I_G ≡ 0），只为让栅极口"属于某条支路"+ 回报 V(G)−V(S) */
+  gsDef(a, b) {
+    return { type: 'open', a, b, state: this.state.gs || (this.state.gs = {}) };
+  }
+
+  /** 沟道等值电阻（本帧常量）。U_DS→0 时 U_DS/I_D 是 0/0 ⇒ 改取解析极限 1/(2k·U_ov)（深可变电阻区 = 压控电阻） */
+  chR() {
+    const s = this.sgn();
+    const ugs = s * ((this.state.gs && this.state.gs.U) || 0);
+    const uds = Math.abs(this.state.U || 0);
+    const m = mosLaw(ugs, uds, this.props.vth, this.kSI());
+    if (m.region === 'cutoff') return offR(this.props.roff);
+    if (!(m.id > 1e-12)) return clamp(1 / Math.max(1e-12, 2 * this.kSI() * m.vov), 1e-3, 1e9);
+    return clamp(uds / m.id, 1e-3, 1e9);
+  }
+
+  step() {
+    const s = this.sgn();
+    const gs = this.state.gs || {};
+    const ugs = s * (gs.U || 0);                 // 折成「增强为正」的口径
+    const uds = Math.abs(this.state.U || 0);
+    const m = mosLaw(ugs, uds, this.props.vth, this.kSI());
+    const open = this.state.R === Infinity;      // 漏/源有一端悬空 ⇒ 端子电压无意义（同三极管）
+    this.state.region = open ? 'dead' : m.region;
+    this.state.on = !open && m.region !== 'cutoff';
+    // 面板口径：端子带符号电压（V(G)−V(S) / V(D)−V(S)），P 沟道导通时为负 —— 与教科书一致
+    this.state.Ugs = gs.U || 0;
+    this.state.Uds = this.state.U || 0;
+    this.state.Ugd = this.state.Ugs - this.state.Uds;
+    this.state.vov = open ? 0 : m.vov;           // 过驱电压（幅值）
+    this.state.Id = Math.abs(this.state.I || 0);
+    this.state.gm = open ? 0 : m.gm;             // 跨导（分段：k·U_DS / 2k·U_ov）
+    this.state.rds = open ? Infinity : this.chR();
+  }
+
+  render(g) {
+    const { w, h } = this;
+    shell(g, w, h, this.type === 'pmos' ? 'P 沟道 MOSFET' : 'N 沟道 MOSFET');
+    const reg = this.state.region || 'cutoff';
+    const col = REGION_COL[reg] || DIM;
+    // 栅极板 + 沟道板（三段）
+    g.strokeStyle = WIRE; g.lineWidth = 1.6;
+    g.beginPath(); g.moveTo(-59, 0); g.lineTo(-44, 0); g.stroke();
+    g.beginPath(); g.moveTo(-44, -16); g.lineTo(-44, 16); g.stroke();
+    g.strokeStyle = col; g.lineWidth = 2.6;
+    for (const [y0, y1] of [[-17, -7], [-5, 5], [7, 17]]) {
+      g.beginPath(); g.moveTo(-34, y0); g.lineTo(-34, y1); g.stroke();
+    }
+    // 衬底引线 + 箭头（N 沟道指向沟道、P 沟道背离沟道）
+    g.strokeStyle = WIRE; g.lineWidth = 1.6;
+    g.beginPath(); g.moveTo(-34, 0); g.lineTo(-14, 0); g.stroke();
+    const ax = this.type === 'pmos' ? -30 : -18;
+    g.fillStyle = col; g.beginPath();
+    if (this.type === 'pmos') { g.moveTo(ax - 8, 0); g.lineTo(ax, -4); g.lineTo(ax, 4); }
+    else { g.moveTo(ax + 8, 0); g.lineTo(ax, -4); g.lineTo(ax, 4); }
+    g.closePath(); g.fill();
+    // 漏 / 源引线
+    g.lineWidth = 2;
+    g.beginPath(); g.moveTo(-34, -12); g.lineTo(24, -30); g.lineTo(59, -30); g.stroke();
+    g.beginPath(); g.moveTo(-34, 12); g.lineTo(24, 30); g.lineTo(59, 30); g.stroke();
+    dot(g, -59, 0); dot(g, 59, -30); dot(g, 59, 30);
+    gfx.text(g, `${this.type === 'pmos' ? 'P' : 'N'} 沟道 · ${REGION_CN[reg] || '—'}  Vth=${this.props.vth}V`,
+      -59, 38, { color: col, size: 9.5, align: 'left' });
+    gfx.text(g, `U_GS ${fmtV(this.state.Ugs || 0)}   U_DS ${fmtV(this.state.Uds || 0)}`,
+      -59, 48, { color: TXT, size: 9, align: 'left' });
+    gfx.text(g, `I_D ${fmtA(this.state.Id || 0)}   g_m ${((this.state.gm || 0) * 1000).toFixed(2)} mS`,
+      -59, 58, { color: HOT, size: 9, align: 'left' });
+  }
+}
+
+function mosDefOf(type, name, icon, desc) {
+  const def = {
+    type, name, domain: PH, cat: CAT, icon, desc,
+    w: 124, h: 124,
+    ports: [
+      { x: -59, y: 0, kind: 'wire', label: 'G' },
+      { x: 59, y: -30, kind: 'wire', label: 'D' },
+      { x: 59, y: 30, kind: 'wire', label: 'S' },
+    ],
+    defaults: { vth: 2, k: 1, roff: 1 },
+    state: { region: 'cutoff', on: false, Ugs: 0, Uds: 0, Ugd: 0, vov: 0, Id: 0,
+      gm: 0, rds: 0, gs: null, ds: null },
+    stats: [
+      { label: '工作区', read: (e) => REGION_CN[e.state.region] || '—' },
+      { label: '电压GS U_GS', read: (e) => e.state.Ugs || 0, fmt: fmtV },
+      { label: '电压DS U_DS', read: (e) => e.state.Uds || 0, fmt: fmtV },
+      { label: '电压GD U_GD', read: (e) => e.state.Ugd || 0, fmt: fmtV },
+      { label: '漏极电流 I_D', read: (e) => e.state.Id || 0, fmt: fmtA },
+      { label: '过驱电压 U_ov', read: (e) => e.state.vov || 0, fmt: fmtV },
+      { label: '跨导 g_m', read: (e) => (e.state.gm || 0) * 1000, digits: 2, unit: 'mS' },
+    ],
+    tags: ['MOSFET', type === 'pmos' ? 'P 沟道' : 'N 沟道', '场效应', '电压控流', '跨导', '三端', '非线性'],
+    fields: [
+      { k: 'vth', label: '阈值电压 U_GS(th)（幅值）', type: 'range', min: 0, max: 6, step: 0.1, unit: 'V' },
+      { k: 'k', label: '导电因子 k', type: 'range', min: 0.1, max: 20, step: 0.1, unit: 'mA/V²' },
+      { k: 'roff', label: '截止电阻', type: 'range', min: 0.1, max: 50, step: 0.1, unit: 'MΩ' },
+    ],
+    create: (x, y) => new Mosfet(def, x, y),
+  };
+  return def;
+}
+const nmosDef = mosDefOf('nmos', 'N 沟道 MOSFET', '⊓',
+  '电压控流：U_GS>U_GS(th) 导通，恒流区 I_D = k·(U_GS−U_GS(th))²、可变电阻区 I_D = k(2U_ov·U_DS − U_DS²)；栅极绝缘 I_G=0');
+const pmosDef = mosDefOf('pmos', 'P 沟道 MOSFET', '⊔',
+  '与 N 沟道极性相反：U_GS 低于 −U_GS(th) 才导通（面板 U_GS/U_DS 为端子带符号值 ⇒ 导通时为负）');
+DEFS.push(() => define(nmosDef));
+DEFS.push(() => define(pmosDef));
+
+// ══════════════════════════════════════════════════════════
 // 插件
 // ══════════════════════════════════════════════════════════
 export default {
@@ -1047,7 +1506,7 @@ export default {
   kind: 'equipment',
   domain: PH,
   order: 32,
-  desc: '交流 / 暂态 / 半导体：电容、电感、交流电源、示波器、变压器、二极管、光敏电阻、光敏二极管（8 件，接进真电路）',
+  desc: '交流 / 暂态 / 半导体 / 三端器件：电容、电感、交流电源、示波器、变压器、二极管、光敏电阻、光敏二极管、NPN/PNP 三极管、N 沟道/P 沟道 MOSFET（12 件，接进真电路）',
   author: '小墨实验室',
   builtin: true,
   tags: ['电学', '交流', '暂态', '器材'],

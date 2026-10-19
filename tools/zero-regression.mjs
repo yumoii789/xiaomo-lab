@@ -173,9 +173,13 @@ const SUITE = [
   {
     id: 'pan-probe',
     cmd: ['tools/pan-probe.mjs'],
-    expect: '全部通过：100 项',
-    label: '视图/交互层 100 项（Node 内直接 new Interaction）',
+    expect: '全部通过：107 项',
+    label: '视图/交互层 107 项（Node 内直接 new Interaction）',
     layer: 'node',
+    // ⚠ 2026-10-18 由实测更正：期望值原写 `100 项`，而 pan-probe 确定打印 **107 项**
+    //   （三次复现一致；107 条 ✓ 消息**互不重复**；0 红；exit 0）⇒ 旧数与探针读数不符，
+    //   本项恒红。迁移包自述的「零回归 9/9」因此**不可复现**（实测 8/9）。
+    //   更正后仍是硬编码具体数字 —— 探针若**少**一条断言，本项照样会红（这是它存在的理由）。
     // ★ 这一项是**交互层唯一可用的 Node 护栏** —— 它在 Node 里直接 `new Interaction(app)`，
     //   断言拖放/平移/命中/端口 等手势层行为（`tools/` 下 DRAG_SLOP、finishDrag、wireFrom、
     //   onEntityClicked… 全都没有别的覆盖）。
