@@ -7,7 +7,7 @@
 //   **视口**：平移 = 拖动空白处（**鼠标类指针**）/ 中键拖动 / **两指拖动**；
 //     缩放 = **两指捏合** + **鼠标滚轮（围绕光标位置）**，上下限 0.25×–4×（engine.ZOOM_MIN/MAX）。
 //     一律是画布**内容**缩放（像地图：器材/连线/网格一起变，三个侧栏不动），不是整页缩放。
-//     双击空白处复位（**只复位平移**，见 armPan）。**空格不参与**——它是运行/暂停。
+//     双击空白处复位**整个视图**（pan + zoom，用户当面裁决；见 armPan）。**空格不参与**——它是运行/暂停。
 //     ⚠ **单指永远不平移、永远不缩放**：手指按在器材上就是移动器材、按在空白处就是
 //       取消选中（用户当面拍板，一个字都不许变）。两指见 beginGesture。
 //
@@ -148,16 +148,34 @@ export class Interaction {
     if (this.app.markDirty) this.app.markDirty();
   }
 
-  /** 把器材中心限制在画布可见区域内（B4：拖到边缘不再静默丢失跟随） */
+  /**
+   * 把器材中心限制在**可见区**内（B4：拖到边缘不再静默丢失跟随）。
+   *
+   * ⚠ 可见区必须按**世界**坐标算 —— `engine.w/h` 是**屏幕**尺寸，拿它当世界边界是
+   *   「屏幕量 vs 世界量」这条病灶的**第二处**（第一处是拖动的 `p.x + d.dx`，见文件上方
+   *   `onMove` 里的注释与 tools/gesture-probe.mjs §⑪）。恒等视口下两种写法数值相同，
+   *   所以它一直没被测出来；一旦动过视口：
+   *     · zoom=0.25 ⇒ 可见世界宽是屏幕宽的 4 倍，上界却钉在屏幕宽 ⇒ **屏幕右侧 76% 拖不进去**
+   *       （用户真机「放不到想放的位置」的另一条路径）；
+   *     · zoom=4   ⇒ 可见世界宽只有屏幕宽的 1/4，上界仍是屏幕宽 ⇒ **能拖到屏幕外 2.8 个屏宽**；
+   *     · pan≠0   ⇒ 旧式的框钉死在原点，不跟着视口走。
+   *
+   * 恒等视口（pan=0、zoom=1）下 `screenToWorld(0,0)=(0,0)`、`screenToWorld(w,h)=(w,h)`，
+   * 与旧式**逐位相同** —— 这一条由 §⑫ 用 `Object.is` 对拍钉住，不是嘴上说说。
+   */
   clampXY(x, y, ent) {
     const eng = this.app.engine;
-    const W = (eng && eng.w) || 0, H = (eng && eng.h) || 0;
+    if (!eng || !eng.screenToWorld) return { x, y };
+    // 可见区在**世界**坐标里的矩形（唯一换算出口，不自己写 (0−pan)/zoom）
+    const v0 = eng.screenToWorld(0, 0);
+    const v1 = eng.screenToWorld(eng.w, eng.h);
+    const W = v1.x - v0.x, H = v1.y - v0.y;
     if (!W || !H) return { x, y };
     const hw = Math.min(ent.w / 2, W / 2);
     const hh = Math.min(ent.h / 2, H / 2);
     return {
-      x: Math.max(hw, Math.min(W - hw, x)),
-      y: Math.max(hh, Math.min(H - hh, y)),
+      x: Math.max(v0.x + hw, Math.min(v1.x - hw, x)),
+      y: Math.max(v0.y + hh, Math.min(v1.y - hh, y)),
     };
   }
 
@@ -208,6 +226,12 @@ export class Interaction {
    * 一行复用 `engine.zoomAt()` —— 它就是「地图式缩放」那条式子（`pan = s − zoom·w(s)`）。
    * ⚠ **不许在这里另写一份围绕点缩放的数学**：那正是「换算与绘制不一致」的入口，
    *   也是本轮把两指手势整段交给 engine 的原因。上下限与夹取同样不在这里重复一份数字。
+   *
+   * 决策记录（Lead 裁定，2026-xx）：裸 wheel 落在**画布**上就是缩放，不改 Figma 式（裸滚轮滚页面、
+   * 只有 ctrl+wheel 缩放）。理由不是「像地图」，而是**这个应用没有页面滚动可让**：固定布局、
+   * #app 撑满视口，裸滚轮落在画布上唯一合理的响应就是缩放；而调色板/属性栏/日志栏各有自己的
+   * 滚动，且本监听只挂在 canvas 上 ⇒ 那些列表的滚动一点不受影响（gesture-probe §⑩ 有断言：
+   * 滚轮不产生任何拖动/连线/手势状态）。
    *
    * 三件都不能省：
    *   1. `{ passive: false }`（见 bind）：不带它 `preventDefault()` 会被静默忽略；
@@ -411,13 +435,16 @@ export class Interaction {
    * ⚠ 触屏不平移**不是「本轮没做」，是产品决策**：单指在触屏上等于滚动/拖器材，
    *   平移与缩放都归两指。删掉调用处那个 pointerType 判据会改掉「单指点空白处 =
    *   取消选中」这条既有语义 —— 用户明令不许动的一条。
-   * 这里同时吃掉“双击复位”的第一次点按 —— 第二次才会复位（**只复位平移**）。
+   * 这里同时吃掉“双击复位”的第一次点按 —— 第二次才会复位（**复位整个视图**：pan + zoom，
+   * 用户当面裁决；`resetPan()` 作为 API 保留、语义不变，只是双击不再走它）。
    */
   armPan(p) {
     if (this.doubleTap && performance.now() - this.doubleTap.at <= DOUBLE_TAP_MS
         && Math.hypot(p.x - this.doubleTap.x, p.y - this.doubleTap.y) <= DOUBLE_TAP_SLOP) {
       this.doubleTap = null;
-      if (this.app.engine.resetPan()) this.markDirty();
+      // 双击 = 复位**整个视图**（pan + zoom）。恒等视口上 resetView() 返回 false ⇒
+      // 不惊动一帧（tools/gesture-probe.mjs §⑧ 的负控按 markDirty 增量钉住这一条）。
+      if (this.app.engine.resetView()) this.markDirty();
       return;                     // 双击 = 复位，不再起手平移
     }
     // ⚠ 顺序要紧：startPan() 会把上一次的 doubleTap 清掉（起手平移即作废双击候选），
@@ -594,7 +621,14 @@ export class Interaction {
         }
         d.moved = true;
       }
-      const q = this.clampXY(p.x + d.dx, p.y + d.dy, d.ent);
+      // ⚠⚠ 这里必须是**世界**指针（`w`），不是屏幕指针（`p`）：`d.dx/dy` 的定义是
+      //   「按下时器材位置 − 按下时的**世界**指针」⇒ 它只能和世界指针相加。
+      //   写成 `p.x + d.dx` 就是「屏幕量 + 世界量」，误差恰好等于 pan：
+      //     误差 = p − (p − pan)/zoom，zoom=1 时 = pan
+      //   真机缺陷（用户原话）：「拖动仪器时，仪器位置会飞到触控摸位置 10.5 个格子上面的
+      //   位置」—— 10.5 × gridSize(24) = 252 ⇒ 当时 pan.y ≈ −252，逐字吻合。
+      //   恒等视口（pan=0 且 zoom=1）下两种写法数值相同，所以旧判据全体漏过（gesture-probe §⑪）。
+      const q = this.clampXY(w.x + d.dx, w.y + d.dy, d.ent);
       d.ent.x = Math.round(q.x);
       d.ent.y = Math.round(q.y);
       this.markDirty();

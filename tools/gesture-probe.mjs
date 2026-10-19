@@ -19,6 +19,11 @@
 //   node tools/gesture-probe.mjs --mutate   # 变异体自证：每个变异体必须让**指定的**判据转红，
 //                                           # 且对照组一条都不许红（打印 GESTURE_MUTATE_JSON）
 //
+// ⚠ 变异体的两个自证键（与 `palette-dnd-probe.mjs` **同一口径**，别再让键名撒谎）：
+//   · `landInCode` = **落点自证**：锚点在**代码行**上唯一命中（剥掉整行注释后再数），
+//     且变异后旧文本已从代码里消失 ⇒ 变异真的落在代码上，而不是命中了一句注释；
+//   · `redsAligned` = **红数对齐**：声明的红节集合 ≡ 实测红节集合，且声明之外一条都不红（ctrlBad 0）。
+//
 // ⚠ 单指镜像对照需要**改动前的字节副本**：`%TEMP%\t12-pre\{interact.js,engine.js}`。
 //   副本不在时本探针会**如实报一条红**（而不是静默跳过）—— 一条会自己消失的判据比没有更坏。
 //   补副本的办法（在仓库根执行，不写仓库）：
@@ -39,6 +44,8 @@ const MUTATE = process.argv.includes('--mutate');
 const PRE_DIR = join(TMP, 't12-pre');
 
 const near = (a, b, tol = 1e-9) => Math.abs(a - b) <= tol;
+/** 剥注释：与全仓探针同一口径（行首 // + 整行 * 或 /*）—— 自证「锚点落在代码行上」要用它 */
+const stripComments = (s) => s.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 /**
  * 屏幕坐标的**独立复算**：canvas 的变换是 `translate(pan)` 然后 `scale(zoom)`，
  * 所以画在世界点 W 的东西出现在屏幕 `W×zoom + pan`。
@@ -557,8 +564,8 @@ async function runSuite(T, opt = {}) {
       `单指在空白处拖 120px：pan/zoom 一动都不动（pan=(${eng.pan.x},${eng.pan.y})、zoom=${eng.zoom}）`);
   }
 
-  // ── ⑧ resetPan 语义未变；resetView 才是整体复位；双击只复位平移 ────────
-  head('⑧ 复位语义：resetPan 只复位平移；resetView 才是 pan+zoom；双击 = resetPan');
+  // ── ⑧ 复位语义：resetPan 不变；resetView = pan+zoom；双击空白 = resetView ──
+  head('⑧ 复位语义：resetPan 只复位平移；resetView = pan+zoom；双击空白 = 复位整个视图（用户裁决）');
   {
     const world = new T.World();
     const eng = mkEngine(T, new T.World(), []);
@@ -570,7 +577,7 @@ async function runSuite(T, opt = {}) {
     eng.pan.x = 33; eng.pan.y = -21; eng.zoom = 2.5;
     const d1 = eng.resetPan();
     ok(d1 === true && eng.pan.x === 0 && eng.pan.y === 0 && eng.zoom === 2.5,
-      `resetPan() 只复位平移：返回 ${d1}、pan=(${eng.pan.x},${eng.pan.y})、zoom 保持 ${eng.zoom}`);
+      `resetPan() 只复位平移：返回 ${d1}、pan=(${eng.pan.x},${eng.pan.y})、zoom 保持 ${eng.zoom}（API 保留、语义一字未改）`);
     const d2 = eng.resetPan();
     ok(d2 === false, `resetPan() 在原点仍返回 false（既有语义未变：没动过就不惊动一帧）`);
     const d3 = eng.resetView();
@@ -579,14 +586,50 @@ async function runSuite(T, opt = {}) {
     const d4 = eng.resetView();
     ok(d4 === false, `resetView() 在恒等视口返回 false（幂等）`);
 
-    // 双击空白处（armPan 路径）只复位平移，**不动** zoom
-    eng.pan.x = -60; eng.pan.y = -40; eng.zoom = 3;
+    // ⚠ 「双击到底调的是哪个函数」不能靠视口状态猜：在 zoom=1 上 resetPan 与 resetView
+    //   的观测效果**一模一样**（恒等视口下两者都只是把 pan 归零）。所以给两个复位函数套计数器 ——
+    //   这样即使在恒等视口上，负控也仍然在断言一件真事（走的是 resetView 而不是 resetPan）。
+    const calls = { resetView: 0, resetPan: 0 };
+    const rv = eng.resetView.bind(eng), rp = eng.resetPan.bind(eng);
+    eng.resetView = (...a) => { calls.resetView++; return rv(...a); };
+    eng.resetPan = (...a) => { calls.resetPan++; return rp(...a); };
+    const tap = (x, y) => { Sf.down(1, x, y); Sf.up(1, x, y); };
+
+    // (a) 用户的真实场景：zoom=3.2 时双击空白 ⇒ 整个视图回恒等
+    eng.pan.x = -60; eng.pan.y = -40; eng.zoom = 3.2;
+    const md0 = app._calls.markDirty;
     NOW = 5000;
-    Sf.down(1, 700, 500); Sf.up(1, 700, 500);
+    tap(700, 500);
+    ok(inter.doubleTap !== null, '双击的第一次点按：架起候选，还没复位');
     NOW += 120;
-    Sf.down(1, 700, 500); Sf.up(1, 700, 500);
-    ok(eng.pan.x === 0 && eng.pan.y === 0 && eng.zoom === 3,
-      `鼠标双击空白 = 只复位平移：pan=(${eng.pan.x},${eng.pan.y})、zoom 仍 ${eng.zoom}（**不**同时复位 zoom，见交付说明）`);
+    tap(700, 500);
+    ok(eng.pan.x === 0 && eng.pan.y === 0 && eng.zoom === 1,
+      `鼠标双击空白 = 复位**整个视图**：pan=(${eng.pan.x},${eng.pan.y})、zoom 3.2 → ${eng.zoom}`);
+    ok(calls.resetView === 1 && calls.resetPan === 0,
+      `双击走的是 resetView（实测调用 resetView ${calls.resetView} 次 / resetPan ${calls.resetPan} 次）`);
+    ok(inter.pan === null, '复位那次没有起手平移（双击仍然吃掉第一次点按）');
+    const dReal = app._calls.markDirty - md0;
+
+    // (b) 负控：已经是恒等视口时双击「什么都不发」—— 视口不动、且不额外请求重绘
+    const md1 = app._calls.markDirty;
+    NOW += 5000;
+    tap(700, 500);
+    NOW += 120;
+    tap(700, 500);
+    const dIdem = app._calls.markDirty - md1;
+    ok(eng.pan.x === 0 && eng.pan.y === 0 && eng.zoom === 1 && dIdem === dReal - 1,
+      `恒等视口双击不发额外重绘（markDirty 增量 ${dIdem} vs 真复位那次 ${dReal}：差恰为 1，即 resetView 返回 false 的那一帧）`);
+    ok(calls.resetView === 2 && calls.resetPan === 0,
+      `恒等视口双击仍走 resetView（累计 ${calls.resetView} 次 / resetPan ${calls.resetPan} 次）—— 负控不空转`);
+
+    // (c) 既有语义护栏：点空白处仍然取消选中（不许被双击/复位吃掉）
+    const ent = T.create('battery', 300, 250);
+    world.add(ent, true);
+    app.select(ent);
+    eng.pan.x = -60; eng.zoom = 2;                 // 非恒等，确保复位那条路是活的
+    NOW += 5000;                                   // 让上一次点按的候选过期
+    tap(700, 500);
+    ok(app.selected === null, `点空白处仍然取消选中（selected=${app.selected}），既有语义未被双击改动吃掉`);
   }
 
   // ── ⑨ zoom≠1 时的命中：看得见也要点得中 ────────────────────────────────
@@ -704,6 +747,139 @@ async function runSuite(T, opt = {}) {
       `滚轮不产生任何拖动/连线/手势状态（drag=${!!inter.drag}、wireFrom=${!!inter.wireFrom}、gesture=${!!inter.gesture}）`);
   }
 
+
+  // ── ⑪ 拖动器材的坐标换算（用户真机报的「飞到手指上方 10.5 格」）────────────
+  head('⑪ 拖动器材：世界位移 = 屏幕位移 / zoom（pan≠0 与 zoom≠1 下都必须成立）');
+  {
+    // 夹具复现用户读数：真机报「飞 10.5 个格子」，engine.gridSize = 24 ⇒ 10.5×24 = 252 ⇒ pan.y = −252
+    const SNAP_TOL = 4;               // 与 interact.js 的 SNAP（4px 网格吸附）同口径，只作容差用
+    // ⚠ 夹具契约（两层判据必须分得开：§⑪ 只量「换算」，边界夹取归 §⑫）：
+    //   起点与终点都要同时落在 ① **可见世界矩形**内（新 clampXY 的契约），
+    //   与 ② **旧 clampXY 的框**内（世界边界=屏幕尺寸；电池 86×42 ⇒ 中心 [43,757]×[21,579]）——
+    //   否则「边界夹取」那一层的变异会连带把本节打红，「红在哪一层」就说不清了。
+    //   zoom=0.5 那档的可见矩形是 [620,2220]×[−174,1026]，与旧框的交集只有 [620,757] 这条窄带，
+    //   所以它的**位移被缩短**成 (40,−30) 屏幕像素（原先 140,−60 会把落点推到世界 x=1700、
+    //   落在旧框之外）—— 缩短的是夹具的行程，不是判据本身（判据仍是零误差）。
+    const VIEWS = [
+      { pan: { x: 120, y: -252 }, zoom: 1, start: { x: 280, y: 552 }, dS: { x: 140, y: -60 } },   // 用户当时的视口：只平移过（屏幕≠世界）
+      { pan: { x: 120, y: -252 }, zoom: 2, start: { x: 140, y: 276 }, dS: { x: 140, y: -60 } },   // 平移 + 缩放叠加
+      { pan: { x: -310, y: 87 }, zoom: 0.5, start: { x: 660, y: 320 }, dS: { x: 40, y: -30 } },   // 反向的 pan 与缩小（行程已缩短，见上）
+    ];
+    for (const view of VIEWS) {
+      const world = new T.World();
+      const trace = [];
+      const eng = mkEngine(T, world, trace);
+      const canvas = eng.canvas;
+      const app = mkApp(world, eng, canvas);
+      const inter = new T.Interaction(app);
+      const Sf = mkSender(canvas);
+      eng.pan.x = view.pan.x; eng.pan.y = view.pan.y; eng.zoom = view.zoom;
+      // ⚠ 起点由每档显式给定，且**同时**满足上面两条契约：本节量的是「换算」，一旦把器材拖到
+      //   可见区之外，clampXY 会（正确地）把它拉回来，测到的就不再是换算误差 ——
+      //   本节的夹具第一版正是站在旧 clampXY 的错误边界内：起点写死 (300,250)，器材中心落在
+      //   屏幕 y=−2、目标在世界 y=190，两者都在可见区之外 —— 修第二处同病灶时被 9 条断言当场抓住。
+      const ent = T.create('battery', view.start.x, view.start.y);
+      world.add(ent, true);
+      if (view.zoom === 1) {
+        const grid = eng.gridSize || 24;
+        ok(Math.abs(view.pan.y) / grid === 10.5,
+          `夹具复现用户读数：pan.y=${view.pan.y} ÷ gridSize ${grid} = ${Math.abs(view.pan.y) / grid} 格（用户原话「10.5 个格子」）`);
+      }
+      // 行为护栏：拖一次必须真的经过**唯一换算出口** screenToWorld；谁自己写 (p.x−pan.x)/zoom 就红
+      const realS2W = eng.screenToWorld.bind(eng);
+      let s2wCalls = 0;
+      eng.screenToWorld = (x, y) => { s2wCalls++; return realS2W(x, y); };
+
+      const s0 = screenOf(ent.x, ent.y, eng.pan, eng.zoom);   // 独立公式：器材此刻在屏幕上的位置
+      const d0 = { x: ent.x, y: ent.y };
+      const dS = view.dS;                                     // 手指在屏幕上走了多远（契约见 VIEWS 上方）
+      Sf.down(1, s0.x, s0.y);
+      Sf.move(1, s0.x + dS.x, s0.y + dS.y);
+      const got = { x: ent.x - d0.x, y: ent.y - d0.y };
+      const exp = { x: dS.x / view.zoom, y: dS.y / view.zoom };
+      const err = { x: got.x - exp.x, y: got.y - exp.y };
+      ok(Math.abs(err.x) < 1e-6 && Math.abs(err.y) < 1e-6,
+        `pan=(${view.pan.x},${view.pan.y}) zoom=${view.zoom}：世界位移 = 屏幕位移/zoom（实测 (${got.x.toFixed(3)},${got.y.toFixed(3)})，期望 (${exp.x.toFixed(3)},${exp.y.toFixed(3)})，误差 (${err.x.toFixed(3)},${err.y.toFixed(3)})）`);
+      ok(Math.abs(err.x - view.pan.x) > 1 || Math.abs(err.y - view.pan.y) > 1,
+        `误差**不等于 pan**（误差 (${err.x.toFixed(3)},${err.y.toFixed(3)}) vs pan (${view.pan.x},${view.pan.y})）—— 「屏幕量 + 世界量」这个写法会把误差写成 pan`);
+      const sNow = screenOf(ent.x, ent.y, eng.pan, eng.zoom);
+      const off = Math.hypot(sNow.x - s0.x - dS.x, sNow.y - s0.y - dS.y);
+      ok(off <= SNAP_TOL,
+        `手指下就是器材（器材屏幕 (${sNow.x.toFixed(1)},${sNow.y.toFixed(1)}) vs 手指 (${(s0.x + dS.x).toFixed(1)},${(s0.y + dS.y).toFixed(1)})，偏差 ${off.toFixed(1)}px = ${(off / (eng.gridSize || 24)).toFixed(1)} 格）—— 用户原话「应该在我手指位置」`);
+      ok(s2wCalls > 0,
+        `拖动过程经过唯一换算出口 screenToWorld（实测 ${s2wCalls} 次）—— 绕过它自己写 (p.x−pan.x)/zoom 就红`);
+      Sf.up(1, s0.x + dS.x, s0.y + dS.y);
+      ok(Math.abs(ent.x - (d0.x + exp.x)) <= SNAP_TOL && Math.abs(ent.y - (d0.y + exp.y)) <= SNAP_TOL,
+        `松手落位仍在手指对应的世界点附近（±${SNAP_TOL}px；实测 (${ent.x},${ent.y}) vs 期望 ≈(${(d0.x + exp.x).toFixed(0)},${(d0.y + exp.y).toFixed(0)})）`);
+    }
+  }
+
+  // ── ⑫ clampXY：可见区必须跟着 pan/zoom 走（「屏幕量当世界量」的第二处）────────
+  head('⑫ clampXY 夹的是**可见世界矩形**：恒等视口逐位相同 + 三档 zoom/pan≠0 停在可见区内');
+  {
+    // 旧式的逐字副本（改前源码：`const W = eng.w, H = eng.h` ⇒ `max(hw, min(W-hw, x))`）。
+    // 只在这个对拍里出现，用来把「恒等视口下逐位相同」变成**判据**而不是报告里的一句话。
+    const legacyClamp = (x, y, ent, W, H) => {
+      const hw = Math.min(ent.w / 2, W / 2), hh = Math.min(ent.h / 2, H / 2);
+      return { x: Math.max(hw, Math.min(W - hw, x)), y: Math.max(hh, Math.min(H - hh, y)) };
+    };
+    {
+      const world = new T.World();
+      const ent = T.create('battery', 300, 250);
+      world.add(ent, true);
+      const eng = mkEngine(T, world, []);
+      const app = mkApp(world, eng, eng.canvas);
+      const inter = new T.Interaction(app);
+      const XS = [-5000, -1, 0, 1, 42, 43, 44, 400, 757, 758, 5000];
+      const YS = [-5000, -1, 0, 1, 20, 21, 22, 300, 579, 580, 5000];
+      let same = 0, diff = null;
+      for (const x of XS) for (const y of YS) {
+        const a = inter.clampXY(x, y, ent);
+        const b = legacyClamp(x, y, ent, eng.w, eng.h);
+        if (Object.is(a.x, b.x) && Object.is(a.y, b.y)) same++;
+        else if (!diff) diff = `(${x},${y}) 新 ${a.x},${a.y} vs 旧 ${b.x},${b.y}`;
+      }
+      ok(same === XS.length * YS.length,
+        `恒等视口（pan=0 zoom=1）：新式与旧式**逐位相同** ${same}/${XS.length * YS.length} 组候选点（Object.is）${diff ? '，首个不同：' + diff : ''}`);
+      // 非空转对照：同一个对拍在 zoom=0.25 下**必须不等** —— 否则上面那条只是在拿同一个函数比自己
+      eng.zoom = 0.25;
+      const c = inter.clampXY(2000, 300, ent);
+      const d = legacyClamp(2000, 300, ent, eng.w, eng.h);
+      ok(c.x !== d.x,
+        `对拍有鉴别力（非空转对照）：同一组入参在 zoom=0.25 下新式 ${c.x} ≠ 旧式 ${d.x}`);
+    }
+    const VIEWS = [
+      { pan: { x: 120, y: -252 }, zoom: 0.25 },   // 缩小：旧式「屏幕 x>189 就拖不进去」
+      { pan: { x: 120, y: -252 }, zoom: 1 },      // 只平移
+      { pan: { x: -310, y: 87 }, zoom: 4 },       // 放大：旧式能拖到屏幕外
+    ];
+    for (const view of VIEWS) {
+      const world = new T.World();
+      // 器材放在**可见区中心**（探针自己的逆式，不走 engine），再往右下角远处拖
+      const ent = T.create('battery', (400 - view.pan.x) / view.zoom, (300 - view.pan.y) / view.zoom);
+      world.add(ent, true);
+      const eng = mkEngine(T, world, []);
+      const app = mkApp(world, eng, eng.canvas);
+      const inter = new T.Interaction(app);
+      const Sf = mkSender(eng.canvas);
+      eng.pan.x = view.pan.x; eng.pan.y = view.pan.y; eng.zoom = view.zoom;
+      const s0 = screenOf(ent.x, ent.y, eng.pan, eng.zoom);
+      const FAR = { x: 5000, y: 5000 };
+      ok(Math.hypot(FAR.x - s0.x, FAR.y - s0.y) > eng.w,
+        `夹具诚实：手指目标 (5000,5000) 远在画布 ${eng.w}×${eng.h} 之外（离起点 ${Math.hypot(FAR.x - s0.x, FAR.y - s0.y).toFixed(0)}px）`);
+      Sf.down(1, s0.x, s0.y);
+      Sf.move(1, FAR.x, FAR.y);
+      const sN = screenOf(ent.x, ent.y, eng.pan, eng.zoom);
+      const hw = ent.w / 2, hh = ent.h / 2;
+      const expS = { x: eng.w - hw * view.zoom, y: eng.h - hh * view.zoom };   // 中心贴可见区右下内边
+      const tol = 0.5 * view.zoom + 1e-6;                                      // 写回时的 Math.round（世界整数）
+      ok(sN.x >= 0 && sN.x <= eng.w && sN.y >= 0 && sN.y <= eng.h,
+        `zoom=${view.zoom} pan=(${view.pan.x},${view.pan.y})：拖到远处后器材**仍在画布内**（屏幕 (${sN.x.toFixed(1)},${sN.y.toFixed(1)}) ⊆ [0,${eng.w}]×[0,${eng.h}]）`);
+      ok(Math.abs(sN.x - expS.x) <= tol && Math.abs(sN.y - expS.y) <= tol,
+        `zoom=${view.zoom}：器材正好停在**可见区右下角内边**（实测 (${sN.x.toFixed(1)},${sN.y.toFixed(1)}) vs 期望 (${expS.x.toFixed(1)},${expS.y.toFixed(1)})，容差 ±${tol.toFixed(2)}px）—— 旧式（世界边界=屏幕尺寸）会停在 (${(Math.max(hw, Math.min(eng.w - hw, (FAR.x - view.pan.x) / view.zoom)) * view.zoom + view.pan.x).toFixed(1)},${(Math.max(hh, Math.min(eng.h - hh, (FAR.y - view.pan.y) / view.zoom)) * view.zoom + view.pan.y).toFixed(1)})`);
+      Sf.up(1, FAR.x, FAR.y);
+    }
+  }
   return S;
 }
 
@@ -717,8 +893,8 @@ function mutateCases() {
       file: 'src/core/engine.js',
       old: '    const z = this._effZoom();\n    return { x: (x - this.pan.x) / z, y: (y - this.pan.y) / z };',
       new: '    const z = 1;   // MUTANT：换算忘掉 zoom（绘制照旧缩放）\n    return { x: (x - this.pan.x) / z, y: (y - this.pan.y) / z };',
-      red: ['①', '②', '③', '⑨', '⑩'],          // 换算出口被改 ⇒ 所有依赖它的节
-      note: '换算忘掉 zoom：绘制照旧缩放 ⇒ 看得见、点不中（§①③ 的数值与 §②⑩ 的不动点全红）',
+      red: ['①', '②', '③', '⑨', '⑩', '⑪', '⑫'],     // 换算出口被改 ⇒ 所有依赖它的节。§⑪（换算）与 §⑫（边界夹取）都吃 screenToWorld ⇒ 一起红是真实耦合
+      note: '换算忘掉 zoom：绘制照旧缩放 ⇒ 看得见、点不中（§①③ 的数值与 §②⑩ 的不动点全红，§⑪⑫ 一起红）。⚠ §⑪ 只在 zoom≠1 抓到它：zoom=1 时锚点与当前指针**错得一样**（差值恰好是屏幕位移）⇒ 误差自相抵消 —— 这是该断言的真实覆盖边界，不是漏测',
     },
     {
       tag: 'setViewAt-forgets-zoom',
@@ -762,6 +938,22 @@ function mutateCases() {
       red: ['⑧'],
       note: '用户裁决「双击空白 = 复位整个视图」被退回成只复位平移：zoom=3.2 双击后 zoom 仍 3.2。§⑥ 的镜像在 zoom=1 上看不出来 ⇒ 只有 §⑧ 会红（这正是 §⑧ 存在的理由）',
     },
+    {
+      tag: 'drag-screen-plus-world',
+      file: 'src/ui/interact.js',
+      old: '      const q = this.clampXY(w.x + d.dx, w.y + d.dy, d.ent);',
+      new: '      const q = this.clampXY(p.x + d.dx, p.y + d.dy, d.ent);   // MUTANT：屏幕量 + 世界量',
+      red: ['⑪'],
+      note: '把拖动换算退回「屏幕量 + 世界量」—— 用户真机报的「器材飞到手指上方 10.5 格」就是这个写法：zoom=1 时误差恒等于 pan（252px ÷ 24 = 10.5 格）。恒等视口下两种写法数值相同，所以旧的拖动判据全体漏过',
+    },
+    {
+      tag: 'clampxy-screen-bounds',
+      file: 'src/ui/interact.js',
+      old: '    const v0 = eng.screenToWorld(0, 0);\n    const v1 = eng.screenToWorld(eng.w, eng.h);',
+      new: '    const v0 = { x: 0, y: 0 };   // MUTANT：可见区钉死成屏幕尺寸\n    const v1 = { x: eng.w, y: eng.h };',
+      red: ['⑫'],
+      note: '把可见世界矩形退回「屏幕尺寸」= 改前的旧式（第二处同病灶）：zoom=0.25 时屏幕右侧 76% 拖不进去、zoom=4 时能拖到屏幕外、pan≠0 时框不跟视口走。恒等视口下两种写法逐位相同 ⇒ 只有 §⑫ 会红（§⑪ 的拖动落点都落在旧边界之内）',
+    },
   ];
 }
 
@@ -777,9 +969,12 @@ try {
     let allOk = true;
     for (const c of cases) {
       const srcRaw = readFileSync(join(ROOT, c.file), 'utf8');
-      const hits = srcRaw.split(c.old).length - 1;
+      const hits = srcRaw.split(c.old).length - 1;              // 原文命中（含整行注释）
+      const hitsCode = stripComments(srcRaw).split(c.old).length - 1;   // **代码行**命中（剥注释后）
       const mutated = srcRaw.replace(c.old, c.new);
-      const landInCode = hits === 1 && mutated !== srcRaw;     // 实测推导，不是写死
+      // 落点自证（与 palette-dnd-probe 同口径）：锚点在**代码行**上唯一命中，且变异后旧文本
+      // 已从代码里消失 ⇒ 变异真的落在代码上，而不是命中了一句注释。实测推导，不是写死。
+      const landInCode = hitsCode === 1 && !stripComments(mutated).includes(c.old);
       const tree = stageTree('gesture-mut-' + c.tag);
       writeFileSync(join(tree, c.file), mutated, 'utf8');
       const T = await loadTarget(tree, c.tag);
@@ -791,10 +986,11 @@ try {
       const observedSecs = [...new Set(S.failSec)].sort();
       const extraRed = S.failed.map((m, i) => ({ m, s: S.failSec[i] || '?' })).filter((r) => !declared.includes(r.s));
       const missingRed = declared.filter((k) => !observedSecs.includes(k));
-      const okThis = landInCode && missingRed.length === 0 && extraRed.length === 0;
+      const redsAligned = missingRed.length === 0 && extraRed.length === 0;
+      const okThis = landInCode && redsAligned && hits === 1;
       const inDeclared = declared.reduce((n2, k) => n2 + (S.secTotal[k] || 0), 0);
       results.push({
-        tag: c.tag, file: c.file, landInCode, oldHits: hits, note: c.note || null,
+        tag: c.tag, file: c.file, landInCode, redsAligned, oldHits: hits, oldHitsCode: hitsCode, note: c.note || null,
         granularity: 'section',
         expectedRed: declared.join(''), observedRed: observedSecs.join(''),
         redSectionsDeclared: declared, redSectionsObserved: observedSecs,
@@ -802,12 +998,17 @@ try {
         declaredSectionAssertions: inDeclared,
         missingRed,
         firstRed: (S.failed[0] || '').slice(0, 140),
+        redTexts: S.failed.slice(0, 8).map((m) => m.slice(0, 200)),   // 供台账直接引用，不必再猜红在哪
         extraRed: extraRed.map((r) => (r.s + ' ' + r.m).slice(0, 120)),
       });
       rmSync(tree, { recursive: true, force: true });
       allOk = allOk && okThis;
     }
     out.mutants = results;
+    // ⓘ 两个自证键各算各的（palette-dnd-probe 同款）：`landInCode` 只答「变异落到代码行上了吗」，
+    //   「声明的红节 ≡ 实测的红节吗」归 `redsAligned`。一个键同时算两件事，名字迟早撒谎。
+    out.landInCode = results.every((r) => r.landInCode);
+    out.redsAligned = results.every((r) => r.redsAligned);
     out.ok = allOk;
   }
 } catch (err) {

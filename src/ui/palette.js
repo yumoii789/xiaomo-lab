@@ -248,11 +248,32 @@ export class Palette {
     const st = this.drag;
     if (!st || ev.pointerId !== st.id) return;
     st.x = ev.clientX; st.y = ev.clientY;
-    const far = Math.hypot(ev.clientX - st.x0, ev.clientY - st.y0);
+    const dx = ev.clientX - st.x0, dy = ev.clientY - st.y0;
+    const far = Math.hypot(dx, dy);
     if (!st.armed) {
       if (st.touch) {
-        // 长按还没成立就划走了 ⇒ 用户在滑列表。撤掉预备，手势整条还给浏览器。
-        if (far > SLOP) this.endDrag();
+        // 触屏有**两条**入口，都在回答同一个问题：「这一下是要滚列表，还是要拖器材？」
+        //
+        // 1) **轴向意图（即时）**：位移超过 SLOP 且 |dx| > |dy| ⇒ 立刻成立，不用等。
+        //    依据：器材栏是**纵向**滚动列表，横向位移**不可能**是滚列表 ——
+        //    这就是浏览器/移动端标准的轴向锁定。用户要的「像 nb 那样直接把物品拖出来」
+        //    靠它拿掉等待。真机代价是量出来的：3840×2160@3x 的一体机上，
+        //    真手指按住 550ms 而抖动不超过 10px 很难做到，症状就是「仍然无法拖出」。
+        // 2) **长按 550ms**（保留）：与 src/ui/touch.js 的 LONG_PRESS_MS/SLOP 同源。
+        //    「按住再慢慢拖」的人走这条 —— 时间轴上的停顿本身就是意图声明。
+        //    它成立之后**不再看轴向**（见函数末的 moveGhost 分支），否则按住后只能横着
+        //    拖，长按这条入口就废了 —— 而纵向落位恰恰是桌面/竖屏最常见的用法。
+        //
+        // ⚠ 轴向锁定**只给触屏**。鼠标/笔没有「滚列表 vs 拖器材」这个歧义，
+        //    给它加轴向锁定只会**弄坏**已经能用的桌面档：桌面用户会**纵向**把器材拖到
+        //    画布上（画布就在列表右侧偏下），要求横向占优会当场把那条路关掉。
+        if (far > SLOP) {
+          const adx = Math.abs(dx), ady = Math.abs(dy);
+          if (adx > ady) this.armDrag(st);        // 横向 ⇒ 只可能是拖器材
+          else if (ady > adx) this.endDrag();     // 纵向 ⇒ 只可能是滚列表，整条还给浏览器
+          // 恰好 45° 谁也不占：方向真的模糊，不猜（猜哪边都有一半是错的），
+          // 保持待定 —— 上面那条长按入口仍然可以成立。
+        }
       } else if (far > DRAG_SLOP) {
         this.armDrag(st);
       }
@@ -282,7 +303,23 @@ export class Palette {
     // 进入过拖拽就一定吃掉这次 click：落位已经在放手里做完了
     this.suppressClick = true;
     setTimeout(() => { this.suppressClick = false; }, 0);
-    if (w) this.dropAt(st.d, w.x, w.y);
+    if (w) { this.dropAt(st.d, w.x, w.y); return; }
+    // 取消也要**说出来**。这条规则是新的、而且看不见：桌面档「拖回器材栏 = 取消」
+    // 是用户已经学会的手势，窄屏档「拖到器材栏上也算取消」却是没学过的新规则，
+    // 不解释的话表现就是「拖了半天什么都没发生」= 看起来拖放坏了。
+    // 用户眼里「什么都没发生」是最坏的反馈 —— 与「静默挪位」同一条原则。
+    this.cancelToast(
+      ev && ev.clientX !== undefined ? ev.clientX : st.x,
+      ev && ev.clientY !== undefined ? ev.clientY : st.y,
+    );
+  }
+
+  /** 取消时给一句人能读的理由；两种原因分开说，不混成一句含糊的话 */
+  cancelToast(cx, cy) {
+    if (!this.app || !this.app.toast) return;
+    this.app.toast(this.overPalette(cx, cy)
+      ? '落在器材栏上不算放下 —— 拖到画布上再松手'
+      : '松手点不在画布上，没有放下', 'warn');
   }
 
   onRowCancel(ev) {
@@ -391,14 +428,38 @@ export class Palette {
     const x = ev.clientX, y = ev.clientY;
     if (g.style) { g.style.left = x + 'px'; g.style.top = y + 'px'; }
     if (h && h.style) { h.style.left = x + 'px'; h.style.top = y + 'px'; }
-    if (h && h.classList) h.classList.toggle('on', this.overCanvas(x, y));
+    if (h && h.classList) h.classList.toggle('on', this.dropTargetOK(x, y));
   }
 
-  /** 指针此刻是否在画布上（决定落点环的实/虚）。纯屏幕矩形判定，不涉及世界坐标 */
-  overCanvas(cx, cy) {
+  /**
+   * 松手点是不是一个**有效落点**：在画布上、且**不被器材栏自己盖住**。
+   * 落点环的实/虚（moveGhost）与真正投放（dropWorld）**共用这一条判据** ——
+   * 两处各写一份必然漂移，而漂移的表现就是「环是实的，落下去却什么都没有」。
+   * 纯屏幕矩形判定，不涉及世界坐标。
+   *
+   * ⚠ 为什么要单独判「有没有被器材栏盖住」：画布矩形**包含**被器材栏覆盖的那一块。
+   *   窄屏抽屉模式下器材栏是 `position:fixed; width:320`，390px 的机器上盖掉约八成宽；
+   *   从器材行上长按后**不往右拖就松手**，松手点仍在抽屉矩形内，而画布矩形判定会通过
+   *   ⇒ 器材落到抽屉背后，用户什么都看不见（默认 B 又不收抽屉，等于彻底没反应）。
+   *   静默落到看不见的地方与「静默挪位」是同一族问题：**看不见的落点等于没有落点**。
+   *   ⇒ 视同取消，与桌面档「拖回器材栏 = 取消」同一个语义，全屏与窄屏也一致。
+   * 桌面档（宽屏）器材栏与画布**并排**、不重叠 ⇒ 这条在宽屏上恒不触发，行为与改前一致。
+   */
+  dropTargetOK(cx, cy) {
     const cv = this.app.canvas;
     if (!cv || !cv.getBoundingClientRect) return false;
     const r = cv.getBoundingClientRect();
+    if (!(cx >= r.left && cy >= r.top && cx <= r.left + r.width && cy <= r.top + r.height)) return false;
+    return !this.overPalette(cx, cy);
+  }
+
+  /** 松手点是否落在器材栏自己的矩形里（拿不到矩形就返回 false —— 退化成改前的行为） */
+  overPalette(cx, cy) {
+    if (typeof document === 'undefined' || !document.querySelector) return false;
+    const pal = document.querySelector('#palette');
+    if (!pal || !pal.getBoundingClientRect) return false;
+    const r = pal.getBoundingClientRect();
+    if (!r || !r.width || !r.height) return false;
     return cx >= r.left && cy >= r.top && cx <= r.left + r.width && cy <= r.top + r.height;
   }
 

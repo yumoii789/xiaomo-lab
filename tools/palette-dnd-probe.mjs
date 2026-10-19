@@ -108,7 +108,7 @@ class El {
   }
   /** 记录 click 被调用（collapseDrawer 走的就是这条路） */
   click() { this.clicked = (this.clicked || 0) + 1; this.fire('click', {}); }
-  getBoundingClientRect() { return { left: 0, top: 0, width: 320, height: 500 }; }
+  getBoundingClientRect() { return this._rect || { left: 0, top: 0, width: 320, height: 500 }; }
   setPointerCapture(id) { this.captured = id; (this.captureCalls = (this.captureCalls || 0) + 1); }
   releasePointerCapture(id) { this.released = id; }
 }
@@ -263,8 +263,8 @@ const MUTANTS = [
     //   这句承诺的唯一守卫。把它记在 breaks 里，就等于承认这一条只有静态断言守得住。
     id: 'M1-raw-pan',
     why: '落点自己减 pan，绕开 engine.screenToWorld（今天算得出同一个数，引擎加上 zoom 后必错）',
-    old: 'return eng.screenToWorld(sx, sy);',
-    neu: 'return { x: sx - (eng.pan ? eng.pan.x : 0), y: sy - (eng.pan ? eng.pan.y : 0) };',
+    old: 'return eng.screenToWorld(cxp - r.left, cyp - r.top);',
+    neu: 'return { x: (cxp - r.left) - (eng.pan ? eng.pan.x : 0), y: (cyp - r.top) - (eng.pan ? eng.pan.y : 0) };',
     breaks: ['W0'],
   },
   {
@@ -272,8 +272,8 @@ const MUTANTS = [
     // 刻意不写 `eng.pan`，让 W0 保持绿，这样两条各自只打红自己那一条。
     id: 'M1b-pan-sign',
     why: 'pan 的方向写反（屏幕-世界的关系反了）',
-    old: 'return eng.screenToWorld(sx, sy);',
-    neu: 'const _p = eng.screenToWorld(0, 0); return { x: sx - _p.x, y: sy - _p.y };',
+    old: 'return eng.screenToWorld(cxp - r.left, cyp - r.top);',
+    neu: 'const _p = eng.screenToWorld(0, 0); return { x: (cxp - r.left) - _p.x, y: (cyp - r.top) - _p.y };',
     breaks: ['W2'],
   },
   {
@@ -281,24 +281,25 @@ const MUTANTS = [
     why: '拖放不认落点，退回点击落位（freeSpot 自己挑位置）',
     old: '    const ent = this.place(d, x, y);',
     neu: '    const ent = this.place(d);',
-    breaks: ['W1', 'W2'],
+    // O2b（宽屏落位）与 O4（窄屏可见条落位）都在数「落在了算出来的那个点上」，跟着红是**应该**红的
+    breaks: ['W1', 'W2', 'O2b', 'O4'],
   },
   {
     // 第一版我写成 `if (false)`，方向搞反了：那等于**彻底不装长按**，
     // 于是滑动列表那条（G1）反而更绿了。真正要证明的是「不等长按就进拖拽」，
     // 所以改成把「滑动列表」的取消动作换成「进入拖拽」。
     id: 'M3-swipe-arms',
-    why: '触屏不等长按：手指一划就进入拖拽（滑动列表被误判成拖出）',
-    old: 'if (far > SLOP) this.endDrag();',
-    neu: 'if (far > SLOP) this.armDrag(st);',
-    breaks: ['G1'],
+    why: '触屏纵向滑动也进拖拽（滑列表被误判成拖出 —— 这个闸门存在的全部理由）',
+    old: 'else if (ady > adx) this.endDrag();',
+    neu: 'else if (ady > adx) this.armDrag(st);',
+    breaks: ['G1', 'G4'],
   },
   {
     id: 'M4-ghost-leak',
     why: 'pointercancel 后不收幽灵（屏幕上留一个永远挂着的影子）',
     old: '    if (this.ghost) { this.ghost.remove(); this.ghost = null; }',
     neu: '',
-    breaks: ['C2', 'O1'],     // O1 的判据里也含「收干净」，它跟着红是**应该**红的
+    breaks: ['C2', 'O1', 'O3b'],   // O1 与 O3b 的判据里都含「收干净」，它们跟着红是**应该**红的
   },
   {
     id: 'M5-ignore-pref',
@@ -310,9 +311,20 @@ const MUTANTS = [
   {
     id: 'M6-no-bounds',
     why: '不判「松手在不在画布上」，拖回器材栏也照样投放',
-    old: '    if (sx < 0 || sy < 0 || sx > r.width || sy > r.height) return null;',
+    old: '    if (!(cx >= r.left && cy >= r.top && cx <= r.left + r.width && cy <= r.top + r.height)) return false;',
     neu: '',
     breaks: ['O1'],
+  },
+  {
+    // 与 M6 分开：M6 只拆「画布边界」这一半，这条只拆「被器材栏盖住」那一半。
+    // 两条各自只打红自己那一组，才能证明两个判据是**相互独立**在起作用的
+    // —— 合成一条的话，任何一半坏掉都会让两组一起红，分不清坏的是哪一半。
+    id: 'M6b-no-palette-guard',
+    why: '不判「松手是不是落在器材栏自己身上」（取消判据消失 ⇒ 器材落到抽屉背后，什么都不发生的样子）',
+    old: '    return !this.overPalette(cx, cy);',
+    neu: '    return true;',
+    // O5 也跟着红是**应该**的：环与投放共用判据，判据被拆掉后环也不再区分抽屉/画布
+    breaks: ['O2', 'O3', 'O5'],
   },
   {
     id: 'M7-double-add',
@@ -344,6 +356,59 @@ const MUTANTS = [
     old: '    try { if (st.row.setPointerCapture) st.row.setPointerCapture(st.id); } catch (e) { /* 无指针 API 的环境 */ }',
     neu: '',
     breaks: ['A2', 'A2b'],
+  },
+  {
+    // 「取消要说出来」也是可失效的一环：把提示删掉，行为（取消）仍然对，
+    // 但用户看到的是「什么都没发生」—— 只有 O3 会红。这正是把「反馈」
+    // 单独断言、而不是混进 O2 的原因。
+    id: 'M11-no-cancel-toast',
+    why: '取消时不说话了（取消本身仍然生效，但用户看到的是「拖了半天什么都没发生」）',
+    old: '    this.cancelToast(\n      ev && ev.clientX !== undefined ? ev.clientX : st.x,\n      ev && ev.clientY !== undefined ? ev.clientY : st.y,\n    );',
+    neu: '',
+    breaks: ['O3'],
+  },
+  {
+    // 真机症状的直接回归点：横向即时入口被删掉 ⇒ 退回「长按唯一入口」，
+    // 而真手指在 3840×2160@3x 一体机上做不到「按住 550ms 且抖动 <10px」。
+    // ⓘ 这里必须保留 if/else 的骨架（neu 不能置空，否则后面的 else if 会变成语法错误），
+    //   所以用 `if (false)` 而不是删除整行。
+    id: 'M12-no-horizontal-entry',
+    why: '横向意图不再即时成立（退回长按唯一入口）—— 真机上用户看到的就是「仍然无法拖出」',
+    old: '          if (adx > ady) this.armDrag(st);',
+    neu: '          if (false) this.armDrag(st);',
+    breaks: ['G3', 'G3b'],
+  },
+  {
+    id: 'M13-axis-applies-to-mouse',
+    why: '把轴向锁定也加到鼠标/笔上（桌面**纵向**拖出被关掉，而画布就在列表右下）',
+    old: '      } else if (far > DRAG_SLOP) {\n        this.armDrag(st);\n      }',
+    neu: '      } else if (far > DRAG_SLOP && Math.abs(dx) > Math.abs(dy)) {\n        this.armDrag(st);\n      }',
+    breaks: ['G5'],
+  },
+  {
+    id: 'M14-open-drawer-cancels-all',
+    why: '抽屉开着就一律判成「落在器材栏上」（窄屏那条 70px 可见画布条被吃掉 ⇒ 功能等于关掉）',
+    old: '    return !this.overPalette(cx, cy);',
+    neu: '    const _p = typeof document !== "undefined" && document.querySelector ? document.querySelector("#palette") : null; return !(_p && _p.hasAttribute && _p.hasAttribute("data-open"));',
+    // O5 也跟着红是**应该**的：环与投放共用判据，投放被关掉时环也不会再亮。
+    // S2 也跟着红同样是**应该**的，而且是个独立佐证：S2 那条（抽屉开着、鼠标拖到
+    // x=360 的可见条上）本来就是「抽屉模式可见条要能落位」的测例 —— 它先于今天这条判据存在，
+    // 说明这条性质**早就是承重的**，不是我今天新加的口径。
+    breaks: ['O4', 'O5', 'S2'],
+  },
+  {
+    id: 'M15-halo-canvas-only',
+    why: '落点环退回只看画布矩形（环在抽屉上是实的、落下去却什么都没有 —— 正是「共用一条判据」要防的漂移）',
+    old: '    if (h && h.classList) h.classList.toggle(\'on\', this.dropTargetOK(x, y));',
+    neu: '    if (h && h.classList) h.classList.toggle(\'on\', this.dropTargetOK(x, y) || this.overPalette(x, y));',
+    breaks: ['O5'],
+  },
+  {
+    id: 'M16-no-longpress',
+    why: '长按 550ms 这条入口被删掉（「按住再慢慢拖」的人拖不出来）',
+    old: '        if (this.drag === st && !st.armed) this.armDrag(st);',
+    neu: '        if (false && this.drag === st && !st.armed) this.armDrag(st);',
+    breaks: ['G1b', 'G6'],
   },
 ];
 
@@ -385,6 +450,11 @@ const info = (t) => console.log('    · ' + t);
 
 function mkScene(PaletteClass, opts = {}) {
   const cv = mkCanvas(opts.cw || 800, opts.ch || 600);
+  // 画布矩形的左边界可调：宽屏档要模拟「器材栏在画布左侧、两者不重叠」，
+  // 此时同一个 client 落点仍然落在画布上（窄屏抽屉档则是「器材栏盖在画布上」）。
+  if (opts.canvasLeft !== undefined) {
+    cv.getBoundingClientRect = () => ({ left: opts.canvasLeft, top: 0, width: opts.cw || 800, height: opts.ch || 600 });
+  }
   const world = new World();
   const eng = new Engine(cv, world);
   eng.app = { markDirty() {} };
@@ -395,6 +465,9 @@ function mkScene(PaletteClass, opts = {}) {
   list.className = 'pal-list';
   const palHost = DOC.createElement('aside');
   palHost.setAttribute('id', 'palette');
+  // 器材栏矩形可调：默认 320×500 与画布（0,0 起）左下角重叠，近似窄屏抽屉；
+  // 要模拟宽屏「器材栏在画布左侧、不重叠」时传 paletteRect 把左边界收窄。
+  if (opts.paletteRect) palHost._rect = opts.paletteRect;
   palHost.appendChild(list);
   DOC.body.appendChild(palHost);
 
@@ -603,6 +676,66 @@ async function runAll(PaletteClass, api, srcText) {
     s.pal.drag = null;
     ok('G2b', preventedArmed && !preventedIdle,
       `守卫只在拖拽成立时 preventDefault（未拖拽 ${preventedIdle ? '挡了 ✗' : '不挡 ✓'}；拖拽中 ${preventedArmed ? '挡 ✓' : '不挡 ✗'}）—— 列表滚动不受影响`);
+
+    // 4-4 轴向意图（即时入口）：横向位移 ⇒ **不等长按**立刻成立。
+    // 这是真机症状「仍然无法拖出」的直接回归点：3840×2160@3x 一体机上，
+    // 真手指做不到「按住 550ms 且抖动 <10px」。
+    const s3 = mkScene(PaletteClass);
+    const row3 = firstRow(s3.list);
+    const waited = 30;                                  // 远小于 LONG_PRESS_MS
+    row3.fire('pointerdown', pev('pointerdown', { x: 100, y: 300, pt: 'touch' }));
+    await sleep(waited);
+    row3.fire('pointermove', pev('pointermove', { x: 420, y: 306, pt: 'touch' }));   // 横 320 / 纵 6
+    const armedFast = !!(s3.pal.drag && s3.pal.drag.armed);
+    row3.fire('pointerup', pev('pointerup', { x: 420, y: 306, pt: 'touch' }));
+    ok('G3', armedFast && s3.calls.addEntity.length === 1 && waited < api.LONG_PRESS_MS,
+      `横向划走 ⇒ **不等长按**（只等了 ${waited}ms，长按阈值 ${api.LONG_PRESS_MS}ms）就进入拖拽并落位（armed=${armedFast}，addEntity ${s3.calls.addEntity.length} 次）`);
+
+    // 4-5 横向阈值就是 SLOP：9px 不成立、12px 成立（既不许放宽，也不许收紧）
+    const s4 = mkScene(PaletteClass);
+    const row4 = firstRow(s4.list);
+    row4.fire('pointerdown', pev('pointerdown', { x: 100, y: 300, pt: 'touch' }));
+    row4.fire('pointermove', pev('pointermove', { x: 109, y: 300, pt: 'touch' }));   // 9px < SLOP
+    const armed9 = !!(s4.pal.drag && s4.pal.drag.armed);
+    row4.fire('pointermove', pev('pointermove', { x: 112, y: 300, pt: 'touch' }));   // 12px > SLOP
+    const armed12 = !!(s4.pal.drag && s4.pal.drag.armed);
+    row4.fire('pointercancel', pev('pointercancel', { x: 112, y: 300, pt: 'touch' }));
+    ok('G3b', !armed9 && armed12,
+      `横向阈值 = SLOP(${api.SLOP}px)：横移 9px 不成立（armed=${armed9}）、12px 成立（armed=${armed12}）`);
+
+    // 4-6 纵向滑动 ⇒ 待定被**取消**（不只是「没成立」）：手势整条还给列表。
+    // 这是这个闸门存在的全部理由，变异体 M3 把它钉死。
+    const s5 = mkScene(PaletteClass);
+    const row5 = firstRow(s5.list);
+    row5.fire('pointerdown', pev('pointerdown', { x: 100, y: 300, pt: 'touch' }));
+    row5.fire('pointermove', pev('pointermove', { x: 104, y: 250, pt: 'touch' }));   // 横 4 / 纵 50
+    const armedV = !!(s5.pal.drag && s5.pal.drag.armed);
+    const cleared = s5.pal.drag === null;
+    row5.fire('pointerup', pev('pointerup', { x: 104, y: 250, pt: 'touch' }));
+    ok('G4', !armedV && cleared && s5.calls.addEntity.length === 0,
+      `纵向划走 ⇒ 未进入拖拽（armed=${armedV}）**且待定被取消**（drag ${cleared ? '= null ✓' : '还在 ✗'}），一件都没落（addEntity ${s5.calls.addEntity.length} 次）`);
+
+    // 4-7 轴向锁定**只给触屏**：鼠标纵向拖动必须照旧成立（桌面档不回归）
+    const s6 = mkScene(PaletteClass);
+    const row6 = firstRow(s6.list);
+    row6.fire('pointerdown', pev('pointerdown', { x: 420, y: 100, pt: 'mouse' }));
+    row6.fire('pointermove', pev('pointermove', { x: 452, y: 180, pt: 'mouse' }));   // 横 32 / 纵 80（纵向占优）
+    const armedMouseV = !!(s6.pal.drag && s6.pal.drag.armed);
+    row6.fire('pointerup', pev('pointerup', { x: 452, y: 180, pt: 'mouse' }));
+    ok('G5', armedMouseV && s6.calls.addEntity.length === 1,
+      `鼠标**纵向**拖动照旧进入拖拽并落位（armed=${armedMouseV}，addEntity ${s6.calls.addEntity.length} 次）—— 轴向锁定只作用于触屏`);
+
+    // 4-8 长按这条入口保留，而且成立之后**不再看轴向**：
+    // 住后纵向拖也要能落位，否则长按就只在横向上有用，而纵向落位是最常见的用法。
+    const s7 = mkScene(PaletteClass);
+    const row7 = firstRow(s7.list);
+    row7.fire('pointerdown', pev('pointerdown', { x: 100, y: 300, pt: 'touch' }));
+    await sleep(api.LONG_PRESS_MS + 60);
+    const armedHold7 = !!(s7.pal.drag && s7.pal.drag.armed);
+    row7.fire('pointermove', pev('pointermove', { x: 200, y: 560, pt: 'touch' }));   // 横 100 / 纵 260（纵向占优）
+    row7.fire('pointerup', pev('pointerup', { x: 200, y: 560, pt: 'touch' }));
+    ok('G6', armedHold7 && s7.calls.addEntity.length === 1,
+      `长按 ${api.LONG_PRESS_MS}ms 成立后再**纵向**拖（横 100/纵 260）⇒ 仍然落位（armed=${armedHold7}，addEntity ${s7.calls.addEntity.length} 次）—— 长按入口没被轴向规则吃掉`);
   }
 
   // ── ⑤ 收尾：pointercancel / 画布之外放手 ──
@@ -660,11 +793,14 @@ async function runAll(PaletteClass, api, srcText) {
   // ── ⑦ 拖出后不吃掉 click ⇒ 一次拖动只落一件 ──
   head('⑦ 一次拖动只落一件（拖出后紧随的 click 必须被吃掉）');
   {
-    const s = mkScene(PaletteClass);
+    // 用**真实窄屏几何**（390 宽、器材栏占 0–320）⇒ 落点必须落在可见画布那一块
+    // （x>320），否则会被 dropTargetOK 判成「落在器材栏上」而取消 —— 那是对的行为，
+    // 但这个用例要测的是「一次拖动只落一件」，得先让它真的落下。
+    const s = mkScene(PaletteClass, { cw: 390, ch: 600 });
     const row = firstRow(s.list);
     row.fire('pointerdown', pev('pointerdown', { x: 100, y: 200, pt: 'mouse' }));
-    row.fire('pointermove', pev('pointermove', { x: 300, y: 300, pt: 'mouse' }));
-    row.fire('pointerup', pev('pointerup', { x: 300, y: 300, pt: 'mouse' }));
+    row.fire('pointermove', pev('pointermove', { x: 360, y: 260, pt: 'mouse' }));
+    row.fire('pointerup', pev('pointerup', { x: 360, y: 260, pt: 'mouse' }));
     const afterDrag = s.calls.addEntity.length;
     row.fire('click', {});        // 浏览器在 pointerup 之后补发的那一次
     ok('D2', afterDrag === 1 && s.calls.addEntity.length === 1,
@@ -679,33 +815,101 @@ async function runAll(PaletteClass, api, srcText) {
     delete globalThis.localStorage._d[K];
     ok('S0', api.readDropCollapse() === false, '键不存在时默认为「不收起」（= 用户要的 B）');
     // 抽屉开着（data-open 在），默认不许点它
-    const s = mkScene(PaletteClass);
+    const s = mkScene(PaletteClass, { cw: 390, ch: 600 });
     const row = firstRow(s.list);
     s.palHost.setAttribute('data-open', '');
     row.fire('pointerdown', pev('pointerdown', { x: 100, y: 200, pt: 'mouse' }));
-    row.fire('pointermove', pev('pointermove', { x: 300, y: 300, pt: 'mouse' }));
-    row.fire('pointerup', pev('pointerup', { x: 300, y: 300, pt: 'mouse' }));
+    row.fire('pointermove', pev('pointermove', { x: 360, y: 260, pt: 'mouse' }));
+    row.fire('pointerup', pev('pointerup', { x: 360, y: 260, pt: 'mouse' }));
     ok('S1', (s.btn.clicked || 0) === 0,
       `默认 B：放手**不**收起抽屉（抽屉按钮被点 ${s.btn.clicked || 0} 次）`);
     // 切到 A：必须走 #btnPalette 的既有开合入口
     globalThis.localStorage.setItem(K, '1');
-    const s2 = mkScene(PaletteClass);
+    const s2 = mkScene(PaletteClass, { cw: 390, ch: 600 });
     const row2 = firstRow(s2.list);
     s2.palHost.setAttribute('data-open', '');
     row2.fire('pointerdown', pev('pointerdown', { x: 100, y: 200, pt: 'mouse' }));
-    row2.fire('pointermove', pev('pointermove', { x: 300, y: 300, pt: 'mouse' }));
-    row2.fire('pointerup', pev('pointerup', { x: 300, y: 300, pt: 'mouse' }));
+    row2.fire('pointermove', pev('pointermove', { x: 360, y: 260, pt: 'mouse' }));
+    row2.fire('pointerup', pev('pointerup', { x: 360, y: 260, pt: 'mouse' }));
     ok('S2', api.readDropCollapse() === true && (s2.btn.clicked || 0) === 1,
       `切到 A：放手收起抽屉，且走的是既有入口 #btnPalette（被点 ${s2.btn.clicked || 0} 次）`);
     // 抽屉本来就关着 ⇒ 不许去点它（避免把「关」点成「开」）
-    const s3 = mkScene(PaletteClass);
+    const s3 = mkScene(PaletteClass, { cw: 390, ch: 600 });
     const row3 = firstRow(s3.list);
     row3.fire('pointerdown', pev('pointerdown', { x: 100, y: 200, pt: 'mouse' }));
-    row3.fire('pointermove', pev('pointermove', { x: 300, y: 300, pt: 'mouse' }));
-    row3.fire('pointerup', pev('pointerup', { x: 300, y: 300, pt: 'mouse' }));
+    row3.fire('pointermove', pev('pointermove', { x: 360, y: 260, pt: 'mouse' }));
+    row3.fire('pointerup', pev('pointerup', { x: 360, y: 260, pt: 'mouse' }));
     ok('S3', (s3.btn.clicked || 0) === 0,
       `抽屉本来就没开时不去点按钮（点了会把「关」toggle 成「开」）—— 实测被点 ${s3.btn.clicked || 0} 次`);
     delete globalThis.localStorage._d[K];
+  }
+
+  // ── ⑨ 松手落在器材栏自己身上 ⇒ 取消并说明；宽屏同一落点必须照常成功 ──
+  head('⑨ 落在器材栏上 = 取消（并说明）；宽屏同一点仍成功（防误杀）');
+  {
+    const PX = 300, PY = 200;      // **同一个** client 落点，只换布局
+    // 9-1 窄屏抽屉：器材栏盖在画布上（390 宽、器材栏占 0–320）⇒ 取消 + 一句 toast。
+    //     这条规则是新的且看不见，所以「说出来」是要断言的一部分，不是装饰。
+    const narrow = mkScene(PaletteClass, {
+      cw: 390, ch: 600, paletteRect: { left: 0, top: 0, width: 320, height: 600 },
+    });
+    narrow.palHost.setAttribute('data-open', '');   // 抽屉模式 = 抽屉是开着的
+    const rn = firstRow(narrow.list);
+    rn.fire('pointerdown', pev('pointerdown', { x: 100, y: 300, pt: 'mouse' }));
+    rn.fire('pointermove', pev('pointermove', { x: PX, y: PY, pt: 'mouse' }));
+    rn.fire('pointerup', pev('pointerup', { x: PX, y: PY, pt: 'mouse' }));
+    ok('O2', narrow.calls.addEntity.length === 0,
+      `松手在器材栏矩形内（(${PX},${PY}) 落在 320 宽的抽屉上）⇒ 取消，一件都没落（addEntity ${narrow.calls.addEntity.length} 次）`);
+    const tt = narrow.calls.toast.join(' | ');
+    ok('O3', narrow.calls.toast.length === 1 && /器材栏/.test(tt),
+      `取消时**说出来**了（toast ${narrow.calls.toast.length} 条：${tt || '（无）'}）`);
+    ok('O3b', !narrow.pal.ghost && !narrow.pal.halo && !narrow.pal.drag,
+      `取消后幽灵/环/拖拽态全清（ghost=${!!narrow.pal.ghost} halo=${!!narrow.pal.halo} drag=${!!narrow.pal.drag}）`);
+
+    // 9-1b 窄屏抽屉模式下，右侧那条**可见画布条**必须仍然能落位。
+    //      几何取自真机：视口 390 宽、抽屉占 0–320 ⇒ 可见条只剩 70px（x ∈ (320,390]）。
+    //      这条防的是「取消规则把窄屏功能整个关掉」。注意判据本来就只有一句话：
+    //      「落在抽屉上 ⇒ 取消」⟺「落在可见条上 ⇒ 成功」，是同一条判据的两面，
+    //      所以不需要新规则 —— 需要的是**证明那条 70px 真的通**。
+    //      顺带把「环」也测了：环与投放共用判据，可见条上必须实、抽屉上必须虚。
+    //
+    //      ⚠ 这里**故意用鼠标**，不用触屏：本场景要测的是**几何判据**（可见条算不算有效落点），
+    //      而几何与指针类型无关。用触屏的话就得先过「长按/轴向」那道入口闸门，
+    //      于是 M12（横向即时入口被删）会连带把 O4/O5 打红 —— 那是**测例耦合**，
+    //      会让变异体的红数说不清到底坏在哪一层。鼠标走的是「位移 > DRAG_SLOP 即成」这条
+    //      与入口闸门无关的老路，正好把几何单独隔离出来。
+    const strip = mkScene(PaletteClass, {
+      cw: 390, ch: 600, paletteRect: { left: 0, top: 0, width: 320, height: 600 },
+    });
+    strip.palHost.setAttribute('data-open', '');
+    const rs = firstRow(strip.list);
+    rs.fire('pointerdown', pev('pointerdown', { x: 60, y: 300, pt: 'mouse' }));
+    rs.fire('pointermove', pev('pointermove', { x: 350, y: 300, pt: 'mouse' }));   // 横 290 / 纵 0 ⇒ 可见条上
+    const haloStrip = !!(strip.pal.halo && strip.pal.halo.classList.contains('on'));
+    rs.fire('pointermove', pev('pointermove', { x: 300, y: 250, pt: 'mouse' }));   // 回到抽屉上方
+    const haloDrawer = !!(strip.pal.halo && strip.pal.halo.classList.contains('on'));
+    rs.fire('pointermove', pev('pointermove', { x: 350, y: 300, pt: 'mouse' }));   // 再回可见条
+    rs.fire('pointerup', pev('pointerup', { x: 350, y: 300, pt: 'mouse' }));
+    const sc = strip.calls.addEntity[strip.calls.addEntity.length - 1];
+    ok('O4', strip.calls.addEntity.length === 1 && !!sc && sc.x === snap(350) && sc.y === snap(300),
+      `抽屉模式（390 宽、抽屉 0–320、抽屉开着）松手在右侧可见条 x=350 ⇒ **照常落位** (${sc && sc.x},${sc && sc.y})，addEntity ${strip.calls.addEntity.length} 次 —— 窄屏功能没被取消规则关掉`);
+    ok('O5', haloStrip && !haloDrawer,
+      `落点环与投放**共用同一条判据**：可见条上实（.on=${haloStrip}）、抽屉上虚（.on=${haloDrawer}）—— 不会出现「环是实的、落下去却什么都没有」`);
+
+    // 9-2 宽屏：器材栏与画布**并排不重叠** ⇒ 同一个落点必须照常落下。
+    //     这条专门防「新判据把正常拖出误杀」，也是「宽屏行为与改前一致」的证据。
+    const wide = mkScene(PaletteClass, {
+      cw: 800, ch: 600, canvasLeft: 240, paletteRect: { left: 0, top: 0, width: 240, height: 600 },
+    });
+    const rw = firstRow(wide.list);
+    rw.fire('pointerdown', pev('pointerdown', { x: 100, y: 300, pt: 'mouse' }));
+    rw.fire('pointermove', pev('pointermove', { x: PX, y: PY, pt: 'mouse' }));
+    rw.fire('pointerup', pev('pointerup', { x: PX, y: PY, pt: 'mouse' }));
+    const wc = wide.calls.addEntity[wide.calls.addEntity.length - 1];
+    ok('O2b', wide.calls.addEntity.length === 1 && !!wc && wc.x === snap(PX - 240) && wc.y === snap(PY),
+      `宽屏（器材栏 0–240、画布从 x=240 起，不重叠）⇒ 同一点 (${PX},${PY}) 照常落下 (${wc && wc.x},${wc && wc.y})，没被新判据误杀`);
+    ok('O2c', wide.calls.toast.length === 0,
+      `成功落位时不弹取消提示（toast ${wide.calls.toast.length} 条）`);
   }
 
   return { pass: PASS, fail: FAIL, results: new Map(results) };
@@ -774,12 +978,18 @@ for (const m of MUTANTS) {
 }
 
 const allLanded = rows.every((r) => r.landInCode);
-const okAll = allLanded && expectedRed === observedRed && ctrlBad === 0 && MUTANTS.length > 0;
+const redsAligned = expectedRed === observedRed && ctrlBad === 0;
+const okAll = allLanded && redsAligned && MUTANTS.length > 0;
 console.log('');
 console.log(`\x1b[1mPALETTE_DND_MUTATE_JSON\x1b[0m ${JSON.stringify({
   mutants: MUTANTS.length, expectedRed, observedRed, ctrlBad,
+  // 两个独立的事实，分开报：①「变异体有没有真的落到代码行上」②「红数对不对齐」。
+  // ⓘ 这里原本只有一个键叫 landInCode，但它算的其实是 ②（名字与含义相反）——
+  //   名字撒谎的自证字段正是这轮在清的病灶，所以：landInCode 现在字面为真（=全部落到
+  //   代码行上，与 stubLanded 同义，保留是为了不打断既有的读法），② 交给 redsAligned。
   stubLanded: allLanded,
-  landInCode: expectedRed === observedRed && ctrlBad === 0,
+  landInCode: allLanded,
+  redsAligned,
   baselineRed: baseFail,
   ok: okAll,
 })}`);

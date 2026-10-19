@@ -203,9 +203,15 @@ const SUITE = [
   {
     id: 'gesture-probe',
     cmd: ['tools/gesture-probe.mjs'],
-    expect: '"probe":"gesture","mutate":false,"items":68,"pass":68,"fail":0',
-    label: '视口手势层 68 项（两指平移/捏合 + 桌面滚轮 + 单指逐位对照）',
+    expect: '"probe":"gesture","mutate":false,"items":101,"pass":101,"fail":0',
+    label: '视口手势层 101 项（两指平移/捏合 + 滚轮 + 单指逐位对照 + 双击复位视图 + pan≠0 位移换算 + 可见世界夹取）',
     layer: 'node',
+    // ⚠ 条数是**硬编码**的，这是刻意的：探针若**少**一条断言，本项照样会红。
+    //   2026-10-20 由 68 → 74：§⑧ 新增 6 条钉「双击空白 = 复位整个视图」。
+    //   为什么值得单开一节：**zoom=1 时 `resetPan()` 与 `resetView()` 观测效果完全相同**
+    //   （都只是把 pan 归零）⇒ 只断言视口状态的判据在恒等视口上是**空转**的。§⑧ 改用
+    //   「两个复位函数的调用计数器」把「到底调了哪个」变成可观测量，并配一条
+    //   `double-tap-resets-pan-only` 变异体（实测红 §⑧ 4 条）证明它真的会红。
     // ★ task-12 新增。最值钱的不是条数而是**逐位对照**：§⑥ 用改动前的字节副本跑同一串
     //   单指事件（含本轮新增的 S2b「触屏在空白处拖 120px」），比较状态摘要与绘制指令流
     //   ⇒ 「单指在触屏上也起手平移」这个**会毁掉拖动器材**的改动必然红（该变异体实测红在
@@ -218,8 +224,8 @@ const SUITE = [
   {
     id: 'palette-dnd-probe',
     cmd: ['tools/palette-dnd-probe.mjs'],
-    expect: '"items":32,"pass":32,"fail":0',
-    label: '器材栏拖出 32 项（长按成立 → 放手即落位 = 放手点）',
+    expect: '"items":44,"pass":44,"fail":0',
+    label: '器材栏拖出 44 项（轴向即时成立 + 长按成立 → 放手即落位 = 放手点）',
     layer: 'node',
     // ★ task-13 新增。⚠ 它第一版有一条**假红**：methodBody() 用 indexOf(name+'(') 锚到的
     //   是**调用点**而不是定义点（本仓元教训 AV），切出来的「函数体」自然不含
@@ -228,8 +234,8 @@ const SUITE = [
     //   同族的另外两面是**假绿**、且只能在 --mutate 下现形：静态判据读的是 srcRaw 而不是
     //   被测那一份（⇒ 变异体下永远不可能红）、以及 /setPointerCapture/ 命中的是注释
     //   （⇒ 把实现整行删掉断言照样绿）。三面同因：**锚错了**。
-    //   红档 11 个变异体，expectedRed 14 ≡ observedRed 14、ctrlBad 0、baselineRed []。
-    note: 'task-13（器材栏长按拖出到任意落点 + 抽屉重叠取消）',
+    //   红档 18 个变异体，expectedRed 31 ≡ observedRed 31、ctrlBad 0、baselineRed []。
+    note: 'task-13（器材栏轴向即时拖出 / 长按拖出到任意落点 + 抽屉重叠取消）',
   },
   {
     id: 'publish-gate',
