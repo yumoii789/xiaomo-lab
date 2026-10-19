@@ -319,11 +319,15 @@ if (MUTATE) {
   const OLD = 'const t = clamp((this.state.relE || 0) / 100, 0, 1);';
   const NEW = 'const t = 0; // MUTANT：忽略照度（等价于永远暗态）';
   ok(srcCode.includes(OLD), '变异锚点在**代码行**上（剥注释后命中）');
-  ok(srcRaw.split(OLD).length - 1 === srcCode.split(OLD).length - 1,
-    `锚点不在注释里：原始 ${srcRaw.split(OLD).length - 1} 次 ⟷ 剥注释 ${srcCode.split(OLD).length - 1} 次`);
+  const nRaw = srcRaw.split(OLD).length - 1;
+  const nCode = srcCode.split(OLD).length - 1;
+  ok(nRaw === nCode,
+    `锚点不在注释里：原始 ${nRaw} 次 ⟷ 剥注释 ${nCode} 次`);
   const mutated = srcRaw.replace(OLD, NEW);
   ok(mutated !== srcRaw && stripComments(mutated).includes(NEW), '替换确实落到了文本上');
   const mCode = stripComments(mutated);
+  // 自证字段的实测量：下面 JSON 里的 stubLanded/landInCode 直接取这两个常量的比较值
+  const appliedClean = mutated !== srcRaw && mCode.split(NEW).length - 1 === 1;
   ok(!mCode.includes(OLD) && mCode.split(NEW).length - 1 === 1,
     '桩落在**代码行**上：变异体剥注释后旧行 0 处、新行 1 处');
   // 变异体的相对 import 改写成绝对 file:// —— 否则 %TEMP% 里 import 不到仓库
@@ -331,7 +335,12 @@ if (MUTATE) {
   const fixed = mutated
     .replace("'../core/entity.js'", `'${abs('src/core/entity.js')}'`)
     .replace("'./registry.js'", `'${abs('src/equipment/registry.js')}'`)
-    .replace("'../core/bus.js'", `'${abs('src/core/bus.js')}'`);
+    .replace("'../core/bus.js'", `'${abs('src/core/bus.js')}'`)
+    // MUTANT 落在 %TEMP%：下面这两条相对 import 若不改写成绝对 file:// 就会
+    // 指到 C:\...\AppData\Local\physics|equipment\... ⇒ 变异体 import 直接抛
+    // ERR_MODULE_NOT_FOUND，在打印任何 JSON 之前就死掉（--mutate 整个失能）
+    .replace("'../physics/circuit.js'", `'${abs('src/physics/circuit.js')}'`)
+    .replace("'./registry.js'", `'${abs('src/equipment/registry.js')}'`);
   const variantPath = fileURLToPath(new URL('xm-photo-mutant.mjs', `file:///${process.env.TEMP.replace(/\\/g, '/')}/`));
   writeFileSync(variantPath, fixed, 'utf8');
   info('变异体 → ' + variantPath);
@@ -367,7 +376,7 @@ if (MUTATE) {
   ok(ctrlBad === 0, `对照组（不改的那一侧）误红 ${ctrlBad} 条`);
   console.log('\n\x1b[1mPHOTORESISTOR_MUTATE_JSON\x1b[0m ' + JSON.stringify({
     expectedRed: expected.length, observedRed, ctrlBad,
-    stubLanded: true, landInCode: true,
+    stubLanded: appliedClean, landInCode: nRaw === 1 && nCode === 1 && mCode.split(NEW).length - 1 === 1,
     ok: observedRed === expected.length && expected.length > 0 && ctrlBad === 0,
   }));
 }

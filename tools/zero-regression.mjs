@@ -13,8 +13,8 @@
  *   只看 exit code 是抓不住这类退化的（一个探针把 100 项砍成 60 项，甩手照样 exit 0）。
  *
  * 用法：
- *   node tools/zero-regression.mjs              # 默认：Node 层 4 项（快、稳，可当提交前门禁）
- *   node tools/zero-regression.mjs --browser    # 追加浏览器层 4 项（约 5 min；⚠ 见下）
+ *   node tools/zero-regression.mjs              # 默认：只跑 Node 层（快、稳，可当提交前门禁）
+ *   node tools/zero-regression.mjs --browser    # 追加浏览器层各项（约 5 min；⚠ 见下）
  *   node tools/zero-regression.mjs --mutate     # 能红证明：只跑首项且把期望值改错，必须报红并 exit 1
  *
  * ⚠ 浏览器层各项**单独跑**都是绿的，但**连跑会互相干扰**（实测 dotscan exit 3、
@@ -132,6 +132,18 @@ const SUITE = [
     //   混在大套件里容易被"两边都绿"糊过去，所以 §④ 在同一照度下**并排量**两支器件：
     //   电阻给出中间值（连续单调），二极管给出 V/R 两种形态（开关）。见 T-01 §三十九。
     note: 'C4 另一半 · T-01 §三十九',
+  },
+  {
+    id: 'polarity-probe',
+    cmd: ['tools/polarity-probe.mjs'],
+    expect: '"probe":"polarity","items":25,"pass":25,"fail":0',
+    label: '极性一致性探针 25 项（干电池印的 +/− ↔ 求解器极性）',
+    layer: 'node',
+    // ⚠ 这一项守的是**画出来的记号**，不是内部数值：干电池 ports[0] 印 '+'、ports[1] 印 '−'，
+    //   必须与 solveCircuit() 上报的 U(ports[0]) − U(ports[1]) = emf − ri·I 同号。
+    //   改前两者恒反（用户按印的 '+' 推电流方向正好相反），且 gfx 是硬编码字面量 ——
+    //   只改 ports[].label 不改图形，或反过来，本项都会红。
+    note: 'task-5 · 显示层极性必须与求解器口径同向（含 gfx 落点：+ 在左半、− 在右半、凸点与 + 同侧）',
   },
   {
     id: 'display-runner',

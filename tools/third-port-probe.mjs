@@ -312,15 +312,36 @@ if (MUTATE) {
   head('⑦ --mutate：把记账掐掉（回到静默丢弃）⇒ 告警断言必须红，两条对照必须仍绿');
   const srcRaw = readRaw(CIRCUIT_SRC);
   const srcCode = stripComments(srcRaw);
-  const OLD = 'if (wp.length > 2) {';
-  const NEW = 'if (false) { // MUTANT：回到静默丢弃第三端口';
+  // ⚠ 锚点已重新锚定（原锚点失效，详据见下）：
+  //   旧锚点 `if (wp.length > 2) {` 验的是「wire 口多于 2 个 ⇒ 第 3 口起被静默丢弃」。
+  //   该写法在 circuit.js 的多支路重构后被删掉了 —— 实测（git 112386c2，全文检索）：
+  //     旧锚点 raw_hits=0  code_hits=0
+  //     现在只有 `:89 if (wp.length < 2) continue;` 与 `:120 else if (wp.length > k + 1) {`
+  //   于是 OLD 在变异体里一处都落不到 —— `--mutate` 静默退化成"空转"，
+  //   报告 observedRed=0 而 ok:false（探针在正确地报错：变异落不到代码行就不算通过）。
+  //
+  //   原锚点要验的语义（三端件当两端用时，第三根线必须被点名，不能静默消失）在重构后
+  //   由**接线判据**承担，而不是**端口计数**：
+  //     旧：wp 多于 2 个 ⇒ 第 3 口起一律忽略（三端电位器当变阻器用是合法用法，会被误报）
+  //     新：`const orphan = wp.filter((i) => wired(i) && !used.has(i))` ⇒ 只点名"真的接了线、
+  //         却不属于任何一条已声明支路"的口（真静默丢弃），合法用法自然不响。
+  //   所以改锚到承包该语义的那一行，而不是把它掐掉的 `if (orphan.length)` 守卫 ——
+  //   把 orphan 判空等于「被忽略的口一个都数不出来 ⇒ 什么也不记」，
+  //   这正是历史那个 bug 的行为，且不改变支路解析结果（对照必须仍绿）。
+  const OLD = 'const orphan = wp.filter((i) => wired(i) && !used.has(i));';
+  const NEW = 'const orphan = []; // MUTANT：数不出被忽略的口 ⇒ 回到静默丢弃第三端口';
   const nOld = srcCode.split(OLD).length - 1;
   ok(nOld === 1, `变异锚点在代码行上且唯一（剥注释后 ${nOld} 次）`);
   ok(srcRaw.split(OLD).length - 1 === nOld, `锚点不在注释里：原始 ${srcRaw.split(OLD).length - 1} 次 ⟷ 剥注释 ${nOld} 次`);
   const mutated = srcRaw.replace(OLD, NEW);
   const mCode = stripComments(mutated);
-  ok(!mCode.includes(OLD) && mCode.split(NEW).length - 1 === 1,
-    `桩落在代码行上：变异体剥注释后旧行 0 处、新行 1 处`);
+  // 落点自证：这两个数是**测出来的**，不是写死的 —— 下面 JSON 里的 landInCode/stubLanded 直接取它们
+  const oldHitsInCode = mCode.split(OLD).length - 1;
+  const stubHitsInCode = mCode.split(NEW).length - 1;
+  const landInCode = nOld === 1 && oldHitsInCode === 0 && stubHitsInCode === 1;
+  const stubLanded = mutated !== srcRaw;
+  ok(oldHitsInCode === 0 && stubHitsInCode === 1,
+    `桩落在代码行上：变异体剥注释后旧行 ${oldHitsInCode} 处、新行 ${stubHitsInCode} 处`);
   const variantPath = fileURLToPath(new URL('xm-circuit-mutant.mjs', `file:///${process.env.TEMP.replace(/\\/g, '/')}/`));
   writeFileSync(variantPath, mutated, 'utf8');
   info('变异体 → ' + variantPath);
@@ -367,7 +388,7 @@ if (MUTATE) {
     `期望变红 ${expected.length} 条，实测变红 ${observedRed} 条`);
   ok(ctrlBad === 0, `对照组误红 ${ctrlBad} 条`);
   console.log('\n\x1b[1mTHIRDPORT_MUTATE_JSON\x1b[0m ' + JSON.stringify({
-    expectedRed: expected.length, observedRed, ctrlBad, stubLanded: true, landInCode: true,
+    expectedRed: expected.length, observedRed, ctrlBad, stubLanded, landInCode,
     ok: observedRed === expected.length && expected.length > 0 && ctrlBad === 0,
   }));
 }

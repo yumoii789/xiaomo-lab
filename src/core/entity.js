@@ -12,6 +12,28 @@ let _seq = 0;
 export const nextId = (p = 'e') => p + (++_seq);
 export const resetIdSeq = () => { _seq = 0; };
 
+/**
+ * 按值克隆 state 模板 —— 数组与**纯对象**逐层复制，别的一律按引用保留。
+ *
+ * 为什么必须深：`Object.assign({}, def.state)` 是浅拷贝，凡在 def.state 里写
+ * `buf: []` / `raster: { times: [], values: [] }` 的器材，**所有实例共用同一个数组/对象** ——
+ * 摆两台示波器，波形会合进同一个缓冲区（判据见 tools/instance-isolation-probe.mjs，
+ * 改前实测 10 / 117 件器材中招且串台可观察）。
+ *
+ * 为什么只认「数组 + 纯对象」：函数、类实例、Date/Map 这类东西若出现在 state 里，
+ * 它的语义就是**共享**的（如 world 回指、注册表查表）；把它们也复制一份才是错的。
+ * 顶层对象本来就每次新建（原写法也是），所以这里不改变 state 的键集合与形状。
+ */
+function cloneState(src) {
+  if (Array.isArray(src)) return src.map(cloneState);
+  if (src === null || typeof src !== 'object') return src;
+  const proto = Object.getPrototypeOf(src);
+  if (proto !== Object.prototype && proto !== null) return src;
+  const out = {};
+  for (const k of Object.keys(src)) out[k] = cloneState(src[k]);
+  return out;
+}
+
 export class Entity {
   /**
    * @param {object} def   器材定义（来自 registry）
@@ -31,8 +53,8 @@ export class Entity {
 
     /** 可调参数（出现在右侧属性面板） */
     this.props = Object.assign({}, def.defaults);
-    /** 运行时状态（不序列化进 props 的那部分） */
-    this.state = Object.assign({}, def.state);
+    /** 运行时状态（不序列化进 props 的那部分）；**每台本体自有**，不与 def.state 共享数组/对象 */
+    this.state = cloneState(def.state);
 
     /** 接线柱：坐标相对实体中心 */
     this.ports = (def.ports || []).map((p, i) => ({

@@ -57,10 +57,15 @@ class Battery extends Entity {
     leads(g, this);
     gfx.fillRR(g, -w / 2, -h / 2, w, h, 5, broken ? '#242a30' : '#2b333b');
     gfx.strokeRR(g, -w / 2, -h / 2, w, h, 5, broken ? '#5b4b3f' : '#3d4852', 1.5);
-    gfx.fillRR(g, w / 2 - 2, -7, 5, 14, 2, broken ? '#7d858d' : '#b9c4cd');
+    // 极性以**求解器口径**为准，不跟习惯画法：端口 0（左）是支路的 ka ——
+    // solveCircuit() 对无 a/b 的支路取端口对 `ia = wp[0]; ib = wp[1]`，
+    // 上报 `const U = (ia >= 0 ? x[ia] : 0) - (ib >= 0 ? x[ib] : 0)`，
+    // 于是 U = V(ka) − V(kb) = emf − ri·I > 0 ⇒ 左端恒为正端。
+    // 所以印的 '+' 与正极凸点都在左边。判据见 tools/polarity-probe.mjs。
+    gfx.fillRR(g, -w / 2 - 3, -7, 5, 14, 2, broken ? '#7d858d' : '#b9c4cd');
     gfx.text(g, this.props.emf.toFixed(1) + ' V', 0, -6, { color: broken ? DIM : HOT, size: 12.5, weight: '600' });
-    gfx.text(g, '−', -w / 2 + 10, 5, { color: DIM, size: 13 });
-    gfx.text(g, '+', w / 2 - 12, 5, { color: broken ? DIM : HOT, size: 13 });
+    gfx.text(g, '+', -w / 2 + 10, 5, { color: broken ? DIM : HOT, size: 13 });
+    gfx.text(g, '−', w / 2 - 12, 5, { color: DIM, size: 13 });
 
     if (!broken) return;
     // 损坏：内部气体把外壳顶出鼓包，顶盖裂开并留下焦痕
@@ -86,7 +91,11 @@ class Battery extends Entity {
 const batteryDef = {
   type: 'battery', name: '干电池', domain: PH, cat: '电源', icon: '🔋',
   desc: '直流电源，电动势与内阻可调', w: 86, h: 42,
-  ports: [{ x: -48, y: 0, label: '−', kind: 'wire' }, { x: 48, y: 0, label: '+', kind: 'wire' }],
+  // ⚠ 端口 0 = 求解器意义上的**正端**（solveCircuit() 对无 a/b 的支路取 `ia = wp[0]; ib = wp[1]`），
+  //   所以它印 '+'。这不是"显示习惯"：`ports[].label` 只被 Entity 构造函数透传（`label: p.label || ''`）、
+  //   被 solveCircuit() 的孤口告警文案取用（`e.ports[i].label || ('#' + (i + 1))`），
+  //   没有任何逻辑读它（唯一被逻辑读的端口标签是电位器里的 `p.label === '滑片'`）。
+  ports: [{ x: -48, y: 0, label: '+', kind: 'wire' }, { x: 48, y: 0, label: '−', kind: 'wire' }],
   defaults: { emf: 1.5, internalR: 0.5 },
   tags: ['电源', '电池'],
   fields: [

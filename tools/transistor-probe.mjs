@@ -3,21 +3,28 @@
 //
 //   node tools/transistor-probe.mjs            # 全部断言
 //   node tools/transistor-probe.mjs --mutate   # 每条断言配一个变异体，证明它能红
+//   node tools/transistor-probe.mjs --self-check  # §9 的敏感度自证（差分法，见下）
 //
 // 这份探针要证明八件事（编号对应任务书的验收门 A）：
 //   ① 截止区：U_BE 不到阈值 ⇒ I_C ≈ 0（且给出「≈0」的定量口径，不是"看着小"）
 //   ② 放大区：实测 I_C ↔ 手推 I_C = β·I_B（含电源内阻/rbe 这些真存在的串联项），给出残差与残差来源
 //   ③ 饱和区：U_CE ≥ U_CE(sat)，且饱和判据在两帧之间自我肯定（不存在 ON/OFF 抖动）
 //   ④ NPN / PNP 极性相反：同一条镜像电路给出符号相反、幅值一致的解
-//   ⑤ MOSFET：阈值 + 跨导**分段**（可变电阻区 k·U_DS ⟷ 恒流区 2k·U_ov，接缝处两式相等）
+//   ⑤ MOSFET：阈值 + 跨导**分段**（可变电阻区 k·U_DS ⟷ 恒流区 k·U_ov²，接缝处两式相等）
 //   ⑥ 三端当两端用：逐位（Object.is）等于单支路回落，且无假 port-ignored
 //   ⑦ 未接线端子不产生假 port-ignored 告警（基极/栅极接线后仍 0 条）
 //   ⑧ 每条新断言配一个变异体，--mutate 打印 {expectedRed, observedRed, ctrlBad, ok}
 //
 // 另外两件不出现在验收门里、但必须证明的事：
-//   · 与 git HEAD 的逐位回归：把 HEAD 版 electronics.js 装进镜像树，跑既有器件电路，
-//     逐件 Object.is 对比 I/U/P/R 与支路数 ⇒ 「新增器材没有动到任何既有解」
+//   · §9 与**冻结基准提交**（BASE_COMMIT，task-1 之前那次提交）的逐位回归：把基准版 electronics.js
+//     装进镜像树，逐件 Object.is 对比 I/U/P/R 与支路数 ⇒ 「新增器材没有动到任何既有解」。
+//     ⚠ 参照物写死成 sha，绝不相对"当前 HEAD"——相对 HEAD 的护栏会随提交把自己变成参照物（恒假），
+//       也会被队友的合法提交打红；相对基准则对并发合法编辑免疫（镜像只换 electronics.js）而敏感度不变。
 //   · 面板读数：def.stats 的行名必须是「元件名+端子字母」（电压BE/电压CE/电压BC/电压GS…）
+//
+// ⚠ §9 与 --mutate 的分工：§9 比的是"被测树 vs 冻结基准"，与"被替换的那一行"无关 ⇒ 变异模式里它按设计
+//   跳过（否则它的红只反映工作区动没动既有器材，会污染对照组 ctrlBad、毁掉每行变异的归因）。
+//   它的敏感度用 --self-check 做**差分自证**：同一棵树只把一件既有器材的支路改成常数 ⇒ §9.bit 必须翻转。
 //
 // ⚠ 本文件内的所有"手推"都是**独立推导**，不是把实现抄一遍：
 //   元件级定律用教科书式子（β·I_B、平方律），电路级解用结点法/回路法，
@@ -29,23 +36,34 @@
 //   探针里对这两类分别给界（退出条件写死在断言里），不给"万能宽容差"。
 // ══════════════════════════════════════════════════════════
 
-import { readFileSync, writeFileSync, mkdirSync, rmSync, cpSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, cpSync, readdirSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
 
-const known = new Set(['--mutate']);
+const known = new Set(['--mutate', '--self-check']);
 const unknown = process.argv.slice(2).filter((a) => !known.has(a));
 if (unknown.length) {
   console.log(`✗ 不认识的开关：${unknown.join(' ')} —— 本探针只认 ${[...known].join(' / ')}`);
   process.exit(2);
 }
 const MUTATE = process.argv.includes('--mutate');
+const SELFCHECK = process.argv.includes('--self-check');
 const SRC_DIR = fileURLToPath(new URL('../src/', import.meta.url));
 const ROOT_DIR = fileURLToPath(new URL('../', import.meta.url));
-/** HEAD 版镜像树（改动前的真身）与它的失败原因，在 main 里填 */
-let HEAD = null, HEAD_ERR = '';
+/**
+ * §9 的参照物：**冻结的基准提交**，永不随 HEAD 前进。
+ *   为什么写死 sha，而不是用 HEAD / HEAD~1：
+ *    · 上一版把参照物设成"当前 HEAD"，task-1 一被提交，参照物就变成了它自己 ⇒ 那条断言恒假
+ *      （永远不可能绿 = 比没有更坏：它会持续掩盖 §9 里真正的回归）；
+ *    · HEAD 会随任何新提交前进、HEAD~1 会随历史重写漂移 —— 参照物跟着动，护栏就不是护栏了。
+ *   来历：BASE_COMMIT 是 TASK1_COMMIT 的父提交（见 S9.base.commit 的祖先断言 + S9.hist.scope 的改动名单）。
+ */
+const BASE_COMMIT = 'ebb9d52';   // task-1（三端器件波次）之前的那次提交：v2.1.0 交互改进 + 光敏二极管 + 发布闸门
+const TASK1_COMMIT = '112386c';  // task-1 自己的提交，只用于 S9.hist.scope 那条历史记录
+/** 基准版镜像树（"改动前的真身"）与它的失败原因，在 main 里填 */
+let BASE = null, BASE_ERR = '';
 
 const stripComments = (s) => s.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 const readRaw = (rel) => readFileSync(path.join(SRC_DIR, rel), 'utf8');
@@ -73,7 +91,7 @@ const near = (a, b, tolRel) => Math.abs(a - b) <= tolRel * Math.max(1e-12, Math.
 const near2 = (a, b, tolRel, tolAbs) => Math.abs(a - b) <= Math.max(tolAbs, tolRel * Math.abs(b));
 const rel = (a, b) => Math.abs(a - b) / Math.max(1e-300, Math.abs(b));
 
-/** 把一棵 src 树整个装进来。工作区 / HEAD 镜像 / 变异体镜像走同一个函数 ⇒ 同一套断言可重跑 */
+/** 把一棵 src 树整个装进来。工作区 / 基准镜像 / 变异体镜像走同一个函数 ⇒ 同一套断言可重跑 */
 async function loadTree(srcDir, tag) {
   const b = pathToFileURL(srcDir.replace(/[\\/]+$/, '')).href + '/';
   const { World } = await import(b + 'core/world.js');
@@ -91,21 +109,24 @@ async function loadTree(srcDir, tag) {
     log: { push() {}, clear() {} }, toast() {},
     addTick(fn) { this.ticks.push(fn); return () => {}; },
   };
-  // 逐插件装，记下每件插件各自报了几件器材（验收门 B 要求新器材必须长在既有 electronics 插件里）
-  const counts = {};
+  // 逐插件装，记下每件插件各自报了几件器材 + 分别贡献了哪些类型
+  // （验收门 B 要求新器材必须长在既有 electronics 插件里：用"安装增量"判定，不用总数判定）
+  const counts = {}, sets = {};
   const host = new PluginHost(bootApp);
-  let prev = 0;
+  let prev = 0, prevTypes = [];
   for (const p of [physics, electrical, electronics]) {
     host.define(p);
     host.installAll();
-    const n = host.registry('equipment').list().length;
-    counts[p.id] = n - prev;
-    prev = n;
+    const nowTypes = host.registry('equipment').list().map((d) => d.type);
+    counts[p.id] = nowTypes.length - prev;
+    sets[p.id] = nowTypes.filter((t) => !prevTypes.includes(t));
+    prev = nowTypes.length;
+    prevTypes = nowTypes;
   }
   bindRegistry(host.registry('equipment'));
   const reg = host.registry('equipment');
   return { tag, b, srcDir, World, PluginHost, create, bindRegistry, CouplingBus, solveCircuit, C, E,
-    host, reg, counts, byType: new Map(reg.list().map((d) => [d.type, d])) };
+    host, reg, counts, sets, byType: new Map(reg.list().map((d) => [d.type, d])) };
 }
 
 const DT = 1 / 120;
@@ -196,8 +217,14 @@ async function runSuite(T) {
       `四个新类型都注册：${NEW_TYPES.filter((t) => T.byType.has(t)).join(' / ')}`);
     ok('S0.batch', NEW_TYPES.every((t) => !['battery', 'diode', 'transformer', 'rheostat'].includes(t)),
       '类型名与既有器材零重叠（不顶掉任何旧名字）');
-    ok('S0.elcount', T.counts['xiaomo.equipment.electronics'] === 12,
-      `electronics 插件自报器材数 = ${T.counts['xiaomo.equipment.electronics']}（改前 8 件 + 新的 4 件；插件 id 未变 ⇒ 插件总数 32 不变）`);
+    // 插件归属：不做"器材数正好 = 12"这种断言（别人以后往同一插件加器材是合法改动，会把恒绿变恒红），
+    // 改成两条不会过期的：①数量 ≥ 改前 8 + 新 4；②四个新类型**由这个插件贡献**（按插件安装增量算，不看总数）
+    const elId = 'xiaomo.equipment.electronics';
+    const elCount = T.counts[elId];
+    const elTypes = (T.sets && T.sets[elId]) || [];
+    const mineInPlugin = NEW_TYPES.filter((t) => elTypes.includes(t));
+    ok('S0.elcount', elCount >= 12 && mineInPlugin.length === NEW_TYPES.length,
+      `electronics 插件自报器材数 = ${elCount}（≥ 改前 8 件 + 新的 4 件 = 12 ⇒ 本插件变大了，但插件 id 未变 ⇒ 插件总数 32 不变）；四个新类型全部由这个插件贡献：${mineInPlugin.join('/')}（按安装增量算，不看总数 ⇒ 别人再往同一插件加器材不会打红本条）`);
     for (const t of NEW_TYPES) {
       const d = T.byType.get(t);
       const need = ['type', 'name', 'domain', 'cat', 'icon', 'desc', 'w', 'h', 'ports', 'fields', 'defaults', 'state', 'tags', 'create', 'stats'];
@@ -651,28 +678,71 @@ async function runSuite(T) {
       `MOSFET 第一行 ${JSON.stringify(mrows[0].read(mm.get(2)))}，其余每行都给有限数值：${mrows.slice(1).map((r) => r.label + '=' + r.read(mm.get(2)).toPrecision(6)).join(' / ')}`);
   });
 
-  sectionRun('§9 与 git HEAD 镜像逐位回归：既有器材一件都不许变（"改动前"的实测口径）', () => {
-    if (!HEAD) {
-      // --mutate 模式下变体树没有 HEAD 对照（也不需要：那边只问"断言有没有变红"）⇒ 明确跳过，不注册假红
-      if (MUTATE) { info('§9 在 --mutate 模式跳过（变异体树不需要 HEAD 对照）'); return; }
-      ok('S9.git', false, '取不到 git HEAD 镜像：' + HEAD_ERR);
+  sectionRun(`§9 与**冻结基准提交** ${BASE_COMMIT} 的逐位回归：既有器材一件都不许变（参照物不随 HEAD 前进）`, () => {
+    // --mutate 模式**按设计不参与**：§9 比的是"被测树 vs 冻结基准"，与被替换的那一行代码无关；
+    // 变异模式只问"某条断言会不会因这次替换而变红"，若让 §9 在这里跑，它的红只反映"工作区相对基准
+    // 动没动既有器材"（并发合法编辑也会让它红），与变异无关 ⇒ 污染对照组（ctrlBad）、毁掉每行变异的归因。
+    // 它的敏感度由 --self-check 用**差分法**单独自证：同一棵树只改一行 ⇒ §9.bit 必须翻转。
+    if (MUTATE) { info('§9 在 --mutate 模式按设计跳过（镜像对照在变异模式没有归因意义；敏感度见 --self-check）'); return; }
+    if (!BASE) {
+      ok('S9.base.mirror', false, `取不到基准提交 ${BASE_COMMIT} 的镜像：${BASE_ERR}`);
       return;
     }
-    for (const rel of ['src/physics/circuit.js', 'src/ui/inspector.js', 'src/equipment/electrical.js', 'src/core/entity.js']) {
-      const h = gitShow(rel), w = readFileSync(path.join(ROOT_DIR, rel));
-      const same = Buffer.compare(h, w) === 0;
-      const sameEol = !same && h.toString('utf8').replace(/\r\n/g, '\n') === w.toString('utf8').replace(/\r\n/g, '\n');
-      ok('S9.untouched.' + rel.split('/').pop(), same || sameEol,
-        `${rel} 与 HEAD ${same ? '逐字节相同' : sameEol ? '相同（仅行尾归一后）' : '**不同**'} ⇒ 改动只落在 electronics.js 一个文件里`);
+    // ① 参照物本身还有效吗：基准提交必须是 HEAD 的祖先
+    //    （历史被改写 ⇒ 写死的 sha 不再指向"改动前"，镜像内容也就不可信 ⇒ 该红）
+    let anc = null, ancErr = '';
+    try { execFileSync('git', ['merge-base', '--is-ancestor', BASE_COMMIT, 'HEAD'], { cwd: ROOT_DIR }); anc = true; }
+    catch (err) { anc = false; ancErr = String((err && err.message) || err).split('\n')[0]; }
+    ok('S9.base.commit', anc === true,
+      `基准提交 ${BASE_COMMIT} 仍是 HEAD 的祖先 ⇒ 冻结参照物指向的确实是"task-1 之前"${anc ? '' : `；实测失败：${ancErr}`}`);
+    // ② 历史记录式断言（口径 a）：冻结两个 sha，问"task-1 那次提交碰了哪些文件"
+    //    只读**提交内容**、不读工作区、不看 HEAD ⇒ 恒真、且对并发合法编辑免疫（上一版的病根就在"看 HEAD"）
+    let changed = null, histErr = '';
+    try {
+      changed = gitOut(['diff', '--name-only', `${BASE_COMMIT}..${TASK1_COMMIT}`]).split('\n').map((s) => s.trim()).filter(Boolean);
+    } catch (err) { histErr = String((err && err.message) || err).split('\n')[0]; }
+    const GUARDED = ['src/physics/circuit.js', 'src/ui/inspector.js', 'src/equipment/electrical.js', 'src/core/entity.js'];
+    const touched = changed ? GUARDED.filter((rel) => changed.includes(rel)) : [];
+    ok('S9.hist.scope', changed !== null && touched.length === 0,
+      changed === null
+        ? `读不到 ${BASE_COMMIT}..${TASK1_COMMIT} 的改动名单（${histErr}）⇒ 这条历史记录失效（它护的东西已由 S9.bit 与 S9.live.owner 接手）`
+        : `冻结区间 ${BASE_COMMIT}→${TASK1_COMMIT} 的改动名单 = [${changed.join(', ')}]，其中不含 ${GUARDED.length} 个受保护源文件（${GUARDED.map((s) => s.split('/').pop()).join(' / ')}）⇒ "task-1 的改动只落在 electronics.js + 探针"作为历史记录成立（zero-regression.mjs 是当时工作区里已被别人改好、被同一次提交顺带收进去的，与 task-1 无关）`);
+    // ③ 活口径（接管 S9.untouched.* 的本意）：四个新器材的类型名只许出现在 electronics.js 一个文件里
+    //    只读**被测树**的当前内容（剥注释），不比对 git 字节 ⇒ 对并发合法编辑与任何新提交都免疫
+    const NEW4 = ['npn', 'pnp', 'nmos', 'pmos'];
+    const scanHits = [];
+    const walkSrc = (d) => readdirSync(d, { withFileTypes: true })
+      .flatMap((e) => (e.isDirectory() ? walkSrc(path.join(d, e.name)) : [path.join(d, e.name)]));
+    let scanned = 0;
+    for (const f of walkSrc(T.srcDir)) {
+      if (!/\.(js|mjs)$/.test(f)) continue;
+      scanned++;
+      const rel = path.relative(T.srcDir, f).split(path.sep).join('/');
+      const body = stripComments(readFileSync(f, 'utf8'));
+      const n = NEW4.reduce((a, t) => a + (body.split(`'${t}'`).length - 1), 0);
+      if (n) scanHits.push(`${rel}×${n}`);
     }
+    ok('S9.live.owner', scanHits.length === 1 && scanHits[0].startsWith('equipment/electronics.js'),
+      `扫了 ${scanned} 个 src 文件（剥注释后）：四个新类型名只出现在 ${scanHits.join('、') || '（一处都没有！）'} ⇒ 新器材没溜到别的文件/别的插件里去（这条是 S9.untouched.* 的活口径接管者：守的还是"task-1 的改动只落在 electronics.js 一个文件里"，但只读当前内容 ⇒ 别人合法改别的文件不会打红它）`);
+    // ④ 镜像身份（恒真的不变量，不做"正好差 4 件"这种会被别人新器材打红的断言）
     const workTypes = T.reg.list().map((q) => q.type);
-    const headTypes = HEAD.reg.list().map((q) => q.type);
-    const newOnly = workTypes.filter((q) => !headTypes.includes(q)).sort();
-    ok('S9.types', newOnly.join(',') === 'nmos,npn,pmos,pnp',
-      `镜像树比工作区正好少的 4 件：${newOnly.join('/') || '（无）'} ⇒ 镜像 = 改动前的真身，不是"另一份实现"`);
+    const baseTypes = BASE.reg.list().map((q) => q.type);
+    const missingNew = NEW4.filter((t) => !workTypes.includes(t));
+    const leaked = NEW4.filter((t) => baseTypes.includes(t));
+    const lost = baseTypes.filter((q) => !workTypes.includes(q));
+    const added = workTypes.filter((q) => !baseTypes.includes(q)).sort();
+    ok('S9.types.new', missingNew.length === 0,
+      `被测树注册了全部四个新类型${missingNew.length ? '（缺 ' + missingNew.join('/') + '）' : ''}：${NEW4.join(' / ')}`);
+    ok('S9.types.base', leaked.length === 0,
+      `基准提交 ${BASE_COMMIT} 的镜像**不含**任何新类型${leaked.length ? '（竟含 ' + leaked.join('/') + '）' : ''} ⇒ 镜像确实是"改动前的真身"，不是"另一份实现"`);
+    ok('S9.types.subset', lost.length === 0,
+      `基准树的 ${baseTypes.length} 个类型全部仍在被测树里${lost.length ? '（丢了 ' + lost.join('/') + '）' : ''}；两树差集 = [${added.join(', ') || '（空）'}]（只作记录，不断言"正好差 4 件"—— 别人以后加器材是与本探针无关的合法改动，不该打红它）`);
+    // ⑤ 行为级逐位对比：§9 的全部价值所在（判据与 task-1 交付时一致，只换了参照物）
+    //    镜像 = 工作区 src + 只把 electronics.js 换成基准提交的字节 ⇒ 两侧共享受测树的其它文件，
+    //    差异只能来自 electronics.js ⇒ 既对并发合法编辑免疫，又保住"既有器材解变了就红"的敏感度
     let pairs = 0, bothThrew = 0;
-    const mism = [], skipped = [];
-    for (const q of headTypes) {
+    const mism = [], skipped = [], detail = [];
+    for (const q of baseTypes) {
       if (q === 'battery') continue;
       for (const extraR of [0, 1000]) {
         const sc = scGeneric(T, q, extraR);
@@ -685,19 +755,32 @@ async function runSuite(T) {
             return { ok: true, snap: b.snap(), n: b.last().branches.size };
           } catch (err) { return { ok: false, err: err.message }; }
         };
-        const w = runc(T), h = runc(HEAD);
+        const w = runc(T), h = runc(BASE);
         if (!w.ok && !h.ok) { bothThrew++; continue; }
         if (w.ok !== h.ok) { mism.push(`${q}${extraR ? '+R' : ''}(抛异常不一致)`); continue; }
         let bad = w.n !== h.n || w.snap.length !== h.snap.length;
         for (let i = 0; !bad && i < w.snap.length; i++) {
           for (const k of ['I', 'U', 'P', 'R']) if (!Object.is(w.snap[i][k], h.snap[i][k])) bad = true;
         }
-        if (bad) mism.push(q + (extraR ? '+R' : ''));
+        if (bad) {
+          mism.push(q + (extraR ? '+R' : ''));
+          // 诊断用：把不一致的电路摊开 —— 让人一眼看出是"真回归"还是"有意的器件行为改动"
+          if (detail.length < 2) {
+            const rows = [];
+            for (let i = 0; i < Math.min(w.snap.length, h.snap.length); i++) {
+              for (const k of ['I', 'U', 'P', 'R']) {
+                if (!Object.is(w.snap[i][k], h.snap[i][k])) rows.push(`${i}:${w.snap[i].type}.${k} 被测=${w.snap[i][k]} 基准=${h.snap[i][k]}`);
+              }
+            }
+            detail.push(`[${q}${extraR ? '+1kΩ' : ''} 支路数 ${w.n}vs${h.n}] ${rows.slice(0, 6).join(' ｜ ')}`);
+          }
+        }
       }
     }
     ok('S9.bit', mism.length === 0,
-      `既有器材 ${headTypes.length - 1} 件、每件 2 种接线（裸接 / 串 1 kΩ）⇒ 实际建成 ${pairs} 个电路${skipped.length ? `（${skipped.join('/')} 的 wire 口不足 2 个 ⇒ 跳过，未计入）` : ''}，逐件 Object.is 对比 I/U/P/R 与支路数：${mism.length ? '不一致 → ' + mism.join(' ') : '全部逐位相同'}${bothThrew ? `（另有 ${bothThrew} 个电路两棵树都抛异常、判为等价）` : ''}`);
-    info(`既有器材清单：${headTypes.filter((q) => q !== 'battery').join(' ')}`);
+      `既有器材 ${baseTypes.length - 1} 件、每件 2 种接线（裸接 / 串 1 kΩ）⇒ 实际建成 ${pairs} 个电路${skipped.length ? `（${skipped.join('/')} 的 wire 口不足 2 个 ⇒ 跳过，未计入）` : ''}，逐件 Object.is 对比 I/U/P/R 与支路数：${mism.length ? '不一致 → ' + mism.join(' ') : '全部逐位相同'}${bothThrew ? `（另有 ${bothThrew} 个电路两棵树都抛异常、判为等价）` : ''}`);
+    for (const d of detail) info('S9.bit 不一致明细：' + d);
+    info(`既有器材清单（基准 ${BASE_COMMIT}）：${baseTypes.filter((q) => q !== 'battery').join(' ')}`);
   });
 }
 
@@ -722,12 +805,18 @@ function scGeneric(T, type, extraR) {
 // ══════════════════════════════════════════════════════════
 // 镜像 / 变异体基础设施
 //   · 每棵镜像 = %TEMP% 里 src 的一份完整拷贝（相对 import 照样成立），仓库**零字节副作用**
-//   · HEAD 镜像：把 electronics.js 换成 `git show HEAD:` 的字节 ⇒ 改动前的真身
+//   · 基准镜像：把 electronics.js 换成 `git show <冻结基准>:` 的字节 ⇒ "改动前的真身"
+//     （只换这一个文件是刻意的：两侧于是共享被测树的其余文件 ⇒ 差异只能来自 electronics.js，
+//      对并发合法编辑免疫，同时保住"既有器材的解变了就红"的敏感度）
 //   · 变异体镜像：把锚点行替换掉，其余照旧 ⇒ 同一套断言重跑一遍，看它是否变红
 // ══════════════════════════════════════════════════════════
 const TMP_ROOT = path.join(os.tmpdir(), 'xm-transistor-probe');
-function gitShow(rel) {
-  return execFileSync('git', ['show', 'HEAD:' + rel], { cwd: ROOT_DIR, maxBuffer: 1 << 26 });
+function gitShow(rel, rev = BASE_COMMIT) {
+  return execFileSync('git', ['show', rev + ':' + rel], { cwd: ROOT_DIR, maxBuffer: 1 << 26 });
+}
+/** git 只读查询（返回 utf8 文本；失败抛异常 ⇒ 调用方负责降级） */
+function gitOut(args) {
+  return execFileSync('git', args, { cwd: ROOT_DIR, maxBuffer: 1 << 26 }).toString('utf8');
 }
 function mirrorSrc(name, patches) {
   const dir = path.join(TMP_ROOT, name);
@@ -737,16 +826,13 @@ function mirrorSrc(name, patches) {
   for (const [rel, body] of Object.entries(patches || {})) writeFileSync(path.join(dir, 'src', rel), body);
   return path.join(dir, 'src');
 }
-/** 静默跑一遍整套断言，返回变红的 id 列表 */
-async function runSilent(T, withHead) {
+/** 静默跑一遍整套断言，返回变红的 id 列表（§9 在 MUTATE 模式自己跳过 ⇒ 对照组只统计与变异有关的断言） */
+async function runSilent(T) {
   RESULTS.length = 0;
   const keep = VERBOSE;
   VERBOSE = false;
   pass = 0; fail = 0;
-  const saved = HEAD;
-  if (!withHead) HEAD = null;
   await runSuite(T);
-  HEAD = saved;
   VERBOSE = keep;
   return RESULTS.filter((r) => !r.ok).map((r) => r.id);
 }
@@ -806,26 +892,74 @@ const MUTANTS = [
 // main
 // ══════════════════════════════════════════════════════════
 try {
-  HEAD = await loadTree(mirrorSrc('head', { 'equipment/electronics.js': gitShow('src/equipment/electronics.js') }), 'HEAD');
-} catch (err) { HEAD_ERR = (err && err.message) || String(err); }
+  BASE = await loadTree(mirrorSrc('base', { 'equipment/electronics.js': gitShow('src/equipment/electronics.js') }), 'BASE');
+} catch (err) { BASE_ERR = (err && err.message) || String(err); }
 
-if (!MUTATE) {
+if (SELFCHECK) {
+  head(`§11 --self-check：§9 的敏感度自证（差分法：同一棵树只做一处破坏 ⇒ 对应断言必须翻转）`);
+  // ① 干净镜像（工作区一字不改）：§9 应当全绿 —— 若非绿，说明"工作区相对基准真的动过既有解"，如实报告
+  const clean = await loadTree(mirrorSrc('sc-clean', null), 'sc-clean');
+  const cleanRed = await runSilent(clean);
+  const cleanS9 = cleanRed.filter((id) => id.startsWith('S9.'));
+  // ② 破坏 A：把一件**既有器材**的支路换成常数电阻。刻意用运行时替换工厂、不依赖任何源码行
+  //    （electronics.js 正在被队友并发编辑，写死的源码锚点会被他们的编辑漂移掉 —— 本次实测就撞到了）
+  const target = ['resistorcap', 'inductorcoil', 'photoresistor', 'diode', 'acsource'].find((t) => clean.byType.has(t));
+  const bad = await loadTree(mirrorSrc('sc-bad', null), 'sc-bad');
+  const def = bad.byType.get(target);
+  const origCreate = def.create;
+  def.create = (x, y) => {
+    const e = origCreate(x, y);
+    e.circuitBranch = () => ({ type: 'R', r: 137 });
+    if (typeof e.circuitBranches === 'function') e.circuitBranches = undefined;  // 保证走回落支路
+    return e;
+  };
+  const scOne = scGeneric(clean, target, 0);
+  const runOne = (T) => {
+    const b = scene(T, scOne);
+    b.run(30);
+    const e = b.ents.find((q) => q.type === target);
+    return { n: b.last().branches.size, I: e.state.I, U: e.state.U, P: e.state.P, R: e.state.R };
+  };
+  const c1 = runOne(clean), c2 = runOne(bad);
+  const moved = !Object.is(c1.I, c2.I) || !Object.is(c1.U, c2.U) || !Object.is(c1.R, c2.R);
+  ok('S11.sabotage', moved,
+    `破坏真的改了行为（既有器材 ${target} 的支路被换成 137 Ω）：I ${c1.I} → ${c2.I}；U ${c1.U} → ${c2.U}；R ${c1.R} → ${c2.R}（支路数 ${c1.n} → ${c2.n}）`);
+  const badRed = await runSilent(bad);
+  const badS9 = badRed.filter((id) => id.startsWith('S9.'));
+  const bitFlipped = !cleanRed.includes('S9.bit') && badRed.includes('S9.bit');
+  ok('S11.bitFlip', bitFlipped,
+    `差分：干净镜像 §9 红 ${cleanS9.length ? cleanS9.join(' ') : '0 条'}；只把那件既有器材的支路换成 137 Ω 后 §9 红 ${badS9.length ? badS9.join(' ') : '0 条'}（S9.bit ${badRed.includes('S9.bit') ? '红' : '没红'}）⇒ ${bitFlipped ? '这个翻转可归因于"既有器材的解变了" ⇒ §9.bit 真的能红' : '无法做差分自证：干净树自己就把 S9.bit 打红了 ⇒ 工作区相对基准已经动过既有解，这是真红，得先查是谁动的'}`);
+  // ③ 破坏 B：把一个新器材的类型名塞进**另一个** src 文件（新写一个文件，不碰任何现有文件）⇒ S9.live.owner 必须红
+  const dup = await loadTree(mirrorSrc('sc-dup', { 'equipment/zzz-selfcheck-dup.js': `export const NAME = 'npn';\n` }), 'sc-dup');
+  const dupRed = await runSilent(dup);
+  const dupS9 = dupRed.filter((id) => id.startsWith('S9.'));
+  const ownerCaught = !cleanRed.includes('S9.live.owner') && dupRed.includes('S9.live.owner');
+  ok('S11.owner', ownerCaught,
+    `差分：多出一个"别处也声明 'npn' 的文件"后 §9 红 ${dupS9.length ? dupS9.join(' ') : '0 条'}（S9.live.owner ${dupRed.includes('S9.live.owner') ? '红' : '没红'}）⇒ 活口径真的能抓到"新器材溜到别的文件里去"（这条接管的正是 S9.untouched.* 的本意）`);
+  const okAll = moved && bitFlipped && ownerCaught;
+  console.log('\n\x1b[1mTRANSISTOR_SELFCHECK_JSON\x1b[0m ' + JSON.stringify({
+    target, cleanS9Red: cleanS9, sabotageS9Red: badS9, dupS9Red: dupS9,
+    behaviorChanged: moved, bitFlipped, ownerCaught, ok: okAll,
+  }));
+  if (!okAll) process.exit(1);
+} else if (!MUTATE) {
   const T0 = await loadTree(SRC_DIR, 'work');
   await runSuite(T0);
   const reds = RESULTS.filter((r) => !r.ok).map((r) => r.id);
   console.log('\n\x1b[1mTRANSISTOR_JSON\x1b[0m ' + JSON.stringify({
-    items: pass + fail, pass, fail, mutate: false, headMirror: !!HEAD, redIds: reds,
+    items: pass + fail, pass, fail, mutate: false, baseCommit: BASE_COMMIT, baseMirror: !!BASE, redIds: reds,
   }));
   if (fail) process.exit(1);
 } else {
   head('§10 --mutate：每条新断言配一个变异体（变异体只写进 %TEMP% 的 src 镜像，仓库零字节副作用）');
-  const ctrlRed = await runSilent(await loadTree(mirrorSrc('ctrl', null), 'ctrl'), true);
+  const ctrlRed = await runSilent(await loadTree(mirrorSrc('ctrl', null), 'ctrl'));
   ok('S10.ctrl', ctrlRed.length === 0,
     `对照组（镜像但一字不改）红 ${ctrlRed.length} 条${ctrlRed.length ? '：' + ctrlRed.join(' ') : ''} ⇒ 断言本身不存在"见谁都红"的假阳性`);
   let expectedRed = 0, observedRed = 0, landed = 0;
   const rows = [];
   for (const mu of MUTANTS) {
-    const raw = readRaw(mu.old.includes('\n') ? 'equipment/electronics.js' : 'equipment/electronics.js');
+    const rel = mu.file || 'equipment/electronics.js';
+    const raw = readRaw(rel);
     const code = stripComments(raw);
     const nRaw = raw.split(mu.old).length - 1;
     const nCode = code.split(mu.old).length - 1;
@@ -837,8 +971,8 @@ if (!MUTATE) {
       if (!appliedClean) red = ['（替换没生效）'];
       else {
         landed++;
-        const t = await loadTree(mirrorSrc('m-' + landed, { 'equipment/electronics.js': mutated }), 'mut');
-        red = await runSilent(t, false);
+        const t = await loadTree(mirrorSrc('m-' + landed, { [rel]: mutated }), 'mut');
+        red = await runSilent(t);
       }
     }
     const caught = mu.expect.filter((id) => red.includes(id));
