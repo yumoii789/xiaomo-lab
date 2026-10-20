@@ -6,6 +6,7 @@
 
 import { fmtA, fmtV, fmtW, fmtR } from '../physics/circuit.js';
 import { SP } from '../chemistry/species.js';
+import { menuCaps } from '../equipment/caps.js';
 
 export class Inspector {
   constructor(rootEl, app) {
@@ -101,13 +102,18 @@ export class Inspector {
     this.updatePosition();
 
     // ── 操作 ──
+    // 菜单项由**器材自己的能力位**决定（三层优先：def.caps → 中央表 src/equipment/caps.js →
+    // 兜底，见 caps.js）。改前是 UI 按特征猜（`e.type === 'switch'` / `e.flame` / `e.vessel`），
+    // 那三个判断现在退到兜底层：任何没声明能力位的器材（含用户器材包）行为逐位不变
+    // ——证据是 tools/inspector-caps-probe.mjs §① 的全量逐件对照。
+    const caps = menuCaps(e);
     const btns = h('div', 'btns');
-    if (e.type === 'switch') {
+    if (caps.toggle) {
       btns.appendChild(btn('切换通断', 'acc', () => {
         e.toggle(); this.render(); this.app.markDirty();
       }));
     }
-    if (e.flame) {
+    if (caps.ignite) {
       // flame 是「热源」标记：加热板 / 水浴也带它，统一写「酒精灯」会让用户拿酒精灯的字样去点加热板。
       // 文案按器材自己的名字取词；名字里带「灯」的仍是点燃/熄灭（酒精灯本身逐字不变）。
       const noun = e.name || '加热器';
@@ -118,13 +124,13 @@ export class Inspector {
         e.props.lit = !e.props.lit; this.render(); this.app.markDirty();
       }));
     }
-    if (e.vessel) {
+    if (caps.empty) {
       btns.appendChild(btn('倒空容器', '', () => {
         e.vessel.empty(); this.render(); this.app.markDirty();
       }));
     }
-    btns.appendChild(btn('复制', '', () => this.app.duplicate(e)));
-    btns.appendChild(btn('删除', 'dgr', () => this.app.removeEntity(e)));
+    if (caps.duplicate) btns.appendChild(btn('复制', '', () => this.app.duplicate(e)));
+    if (caps.remove) btns.appendChild(btn('删除', 'dgr', () => this.app.removeEntity(e)));
     frag.appendChild(btns);
 
     this.root.replaceChildren(frag);
