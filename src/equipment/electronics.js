@@ -1,10 +1,10 @@
 const DEFS = [];
 // ══════════════════════════════════════════════════════════
-// 物理域 · 电学增量器材（12 件）
+// 物理域 · 电学增量器材（14 件）
 //
 // 与既有的 src/equipment/electrical.js（10 件：干电池 / 开关 / 小灯泡 /
 // 定值电阻 / 滑动变阻器 / 电流表 / 电压表 / 热敏电阻 / 电热丝 / 电动机）
-// 的分工——这 12 件专门补「交流、暂态、半导体、三端器件」四块，**逐件不与上面重叠**：
+// 的分工——这 14 件专门补「交流、暂态、半导体、三端器件」四块，**逐件不与上面重叠**：
 //
 //   resistorcap  电容     —— 暂态 RC（既有 10 件全是纯电阻直流）
 //   inductorcoil 电感     —— 暂态 RL + 断电自感尖峰（既有没有储能元件）
@@ -16,6 +16,8 @@ const DEFS = [];
 //   photodiode   光敏二极管 —— 照度≥阈值 ⇒ 光生载流子导通（开关型光电元件）
 //   npn / pnp    三极管   —— 电流放大 I_C = β·I_B + 截止/放大/饱和三区（既有没有三端放大器件）
 //   nmos / pmos  MOSFET   —— 电压控流 + 截止/可变电阻/恒流三区、跨导 g_m（既有没有场效应器件）
+//   spdt         单刀双掷开关 —— 三端换向：COM 每帧只通一个掷、另一掷真开路（既有没有换向开关）
+//   led          发光二极管 —— 单向导电 + 按正向电流 4 档发光（既有没有能自报发光强度的光电器件）
 //
 // 三条工程约定写在这里，全文件遵守：
 //
@@ -1497,6 +1499,250 @@ DEFS.push(() => define(nmosDef));
 DEFS.push(() => define(pmosDef));
 
 // ══════════════════════════════════════════════════════════
+// 九、器材 13：单刀双掷开关（换向 / 逻辑门）
+// ══════════════════════════════════════════════════════════
+class Spdt extends Entity {
+  /** 选中的那个掷的端口下标：1 = 左(L)、2 = 右(R) */
+  sel() { return this.props.pos === 'R' ? 2 : 1; }
+  /** 未选中的那个掷 */
+  other() { return this.props.pos === 'R' ? 1 : 2; }
+
+  /**
+   * 两端口回退语义：**公共 COM ↔ 当前选中的那个掷**，等价于一只理想单刀单掷开关。
+   * ⚠ 求解器**不会**走到这里（`circuitBranches()` 恒返回两条支路）—— 它只服务
+   *   「只想拿一条支路」的调用点。语义写在这里，免得下一个人把它当死代码删掉。
+   */
+  circuitBranch() {
+    return { type: 'R', r: Math.max(1e-4, this.props.ron), a: 0, b: this.sel() };
+  }
+
+  /**
+   * ⚠ **每帧必须返回两条支路，未选中那一路是 `{type:'open'}`**。三条逐字引自 circuit.js 的依据：
+   *
+   * 1) 省掉未选中路 ⇒ 每帧 `port-ignored` 告警。circuit.js:138
+   *      `const orphan = wp.filter((i) => wired(i) && !used.has(i));`
+   *    判据只看「接线柱有没有出现在某条**合法**支路里」（:130 `used.add(ia); used.add(ib);`），
+   *    **与 `br.type` 无关** ⇒ 未选中路只要以 `{a:0,b:2}` 出现就进 `used`。
+   * 2) `open` 在求解器里是**一等公民**、不是"缺失"：:185 不参与连通性合并、:250 不盖章、
+   *    :310 `else if (br.type === 'open') { I = 0; R = Infinity; }` ⇒ 不导通也不告警。
+   *    ⚠ 绝不要为了让告警消失假借一条大电阻 `R` 支路 —— 那是**真的漏电**（1 MΩ 在 6 V 下 6 µA），
+   *      「假警报」和「假导通」都违背本仓红线。
+   * 3) **选中的那一路必须放第 0 条**：:327 `const primary = !b.bi;`、
+   *    :329 `if (primary) Object.assign(b.ent.state, { I, U, P, R });`
+   *    —— 实体级 `state.U/I/P/R` 由 `bi === 0` 那条**独占**；非主边只写进支路对象自己的
+   *    `state` 盒子（:333）。**把 open 放第 0 条 ⇒ 面板永远显示 0 V / 0 A**，而且电路
+   *    照样导通（所以只有对照读数才抓得到这个错）。`bi` 就是本数组的下标，见 :151 `bi: r.k`。
+   */
+  circuitBranches() {
+    return [
+      { type: 'R', r: Math.max(1e-4, this.props.ron), a: 0, b: this.sel() },  // 第 0 条 = 选中路（独占实体级 state）
+      { type: 'open', a: 0, b: this.other() },                                // 第 1 条 = 未选中路（只占住接线柱）
+    ];
+  }
+
+  /** 自报量只读 props ⇒ 与 circuitBranches() 同一真源，不存在两处漂移 */
+  step() {
+    this.state.thru = this.props.pos === 'R' ? 'R' : 'L';
+    this.state.sel = this.sel();
+  }
+
+  render(g) {
+    const { w, h } = this;
+    shell(g, w, h, '单刀双掷开关');
+    const s = this.sel();
+    const on = Math.abs(this.state.I || 0) > 1e-4;
+    const ty = s === 2 ? 24 : -24;
+    // 三个真接线柱（COM 在左、两个掷在右）
+    dot(g, -w / 2 + 3, 0); dot(g, w / 2 - 3, -24); dot(g, w / 2 - 3, 24);
+    gfx.text(g, 'L', w / 2 - 12, -30, { color: DIM, size: 8.5 });
+    gfx.text(g, 'R', w / 2 - 12, 34, { color: DIM, size: 8.5 });
+    gfx.text(g, 'COM', -w / 2 + 4, -10, { color: DIM, size: 8.5, align: 'left' });
+    // 刀：从公共端画到选中的那个掷
+    g.strokeStyle = on ? OK : TXT; g.lineWidth = 3; g.lineCap = 'round';
+    g.beginPath(); g.moveTo(-6, 0); g.lineTo(w / 2 - 14, ty); g.stroke();
+    g.strokeStyle = on ? OK : WIRE; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(-w / 2 + 3, 0); g.lineTo(-6, 0); g.stroke();
+    g.beginPath(); g.moveTo(w / 2 - 14, ty); g.lineTo(w / 2 - 3, ty); g.stroke();
+    // 未选中那个掷画成悬空的短脚（视觉上就"没接上"）
+    g.strokeStyle = DIM; g.lineWidth = 1.6;
+    g.beginPath(); g.moveTo(w / 2 - 22, s === 2 ? -24 : 24); g.lineTo(w / 2 - 3, s === 2 ? -24 : 24); g.stroke();
+    gfx.text(g, (on ? '导通：' : '') + 'COM → ' + (s === 2 ? 'R' : 'L'), 0, -h / 2 + 12, { color: on ? OK : DIM, size: 9.5 });
+    gfx.text(g, `U=${(this.state.U || 0).toFixed(3)}V  I=${((this.state.I || 0) * 1000).toFixed(2)}mA`,
+      0, h / 2 - 10, { color: DIM, size: 9 });
+  }
+}
+const spdtDef = {
+  type: 'spdt', name: '单刀双掷开关', domain: PH, cat: CAT, icon: '⇄',
+  desc: '三端换向开关：公共端 COM 每帧只与一个掷接通，另一掷是**真开路**（不导通、不泄流、不告警）——用于换向电路与二极管或门/与门',
+  w: 110, h: 84,
+  ports: [
+    { x: -52, y: 0, kind: 'wire', label: 'COM' },
+    { x: 52, y: -24, kind: 'wire', label: 'L' },
+    { x: 52, y: 24, kind: 'wire', label: 'R' },
+  ],
+  defaults: { pos: 'L', ron: 0.05 },
+  state: { thru: 'L', sel: 1 },
+  stats: [
+    { label: '掷向（公共端接哪一掷）', read: (e) => (e.props.pos === 'R' ? 'COM → R（右）' : 'COM → L（左）') },
+    { label: '导通电阻', read: (e) => e.props.ron, digits: 3, unit: 'Ω' },
+    { label: '两端电压 U', read: (e) => e.state.U || 0, fmt: fmtV },
+    { label: '电流 I', read: (e) => e.state.I || 0, fmt: fmtA },
+  ],
+  tags: ['开关', '换向', '单刀双掷', '转换开关', '三端', '逻辑门'],
+  fields: [
+    { k: 'pos', label: '掷向', type: 'select', options: [['L', '公共 → 左 (L)'], ['R', '公共 → 右 (R)']] },
+    { k: 'ron', label: '导通电阻', type: 'range', min: 0.001, max: 5, step: 0.001, unit: 'Ω' },
+  ],
+  create: (x, y) => new Spdt(spdtDef, x, y),
+};
+DEFS.push(() => define(spdtDef));
+
+// ══════════════════════════════════════════════════════════
+// 十、器材 14：发光二极管（LED）
+// ══════════════════════════════════════════════════════════
+
+/** 发光色 ↔ 典型正向压降 Vf。真 LED 的 Vf 由**半导体带隙（发光色）**决定，不是自由旋钮。 */
+export const LED_COLORS = [
+  { k: 'red', label: '红', vf: 1.8, hex: '#ff4d4d' },
+  { k: 'yellow', label: '黄', vf: 2.1, hex: '#ffd166' },
+  { k: 'green', label: '绿', vf: 2.2, hex: '#4ade80' },
+  { k: 'blue', label: '蓝', vf: 3.2, hex: '#5aa9ff' },
+  { k: 'white', label: '白', vf: 3.4, hex: '#e6edf3' },
+];
+/** 色档查表：未知色回落到红（不抛错 —— 面板上永远画得出来） */
+export const ledColor = (k) => LED_COLORS.find((c) => c.k === k) || LED_COLORS[0];
+
+/**
+ * 亮度档：按**正向电流幅值**（A）分档 —— 4 个发光档 + 1 个灭档。
+ * 阈值取真实 LED 的典型工作点：0.5 mA 起微亮、5 mA 暗、20 mA 标称亮、50 mA 刺眼。
+ */
+export const LED_LEVELS = [
+  { min: 0.0005, label: '微亮', glow: 0.18 },
+  { min: 0.005, label: '暗', glow: 0.42 },
+  { min: 0.02, label: '亮', glow: 0.75 },
+  { min: 0.05, label: '刺眼', glow: 1 },
+];
+
+/**
+ * 亮度档序号（0 = 灭，1..LED_LEVELS.length = 发光档）。
+ * **关于 absI 单调不减** —— 探针沿电流轴扫一遍断言这条（分档函数最经典的错法就是阈值写反）。
+ * 非有限值一律按灭处理：屏幕上宁可显示"灭"，也不许因为一个 NaN 让整个面板出现 NaN。
+ */
+export function ledTier(absI) {
+  if (!Number.isFinite(absI) || absI <= 0) return 0;
+  let t = 0;
+  for (let i = 0; i < LED_LEVELS.length; i++) if (absI >= LED_LEVELS[i].min) t = i + 1;
+  return t;
+}
+export function ledLevel(absI) { return ledTier(absI) ? LED_LEVELS[ledTier(absI) - 1] : null; }
+export function ledLabel(absI) { const l = ledLevel(absI); return l ? l.label : '灭'; }
+export function ledGlow(absI) { const l = ledLevel(absI); return l ? l.glow : 0; }
+
+class Led extends Entity {
+  /** 方向：+1 正接（A→K 导通），−1 反接 */
+  sgn() { return this.props.dir === 'rev' ? -1 : 1; }
+  /** 当前色档的 Vf（可由 vfTrim 微调 —— 真实器件有批次离散） */
+  vf() { return Math.max(0, ledColor(this.props.color).vf + (this.props.vfTrim || 0)); }
+
+  /**
+   * 与既有 `diode` **同型但不同件**（并存不合并：diode 的 Vf 是整流用的连续旋钮、面板读数是
+   * 导通占空比与可整流平均值；led 的 Vf 由**发光色**决定、面板读数是亮度档与正向电流）：
+   *   导通 → { type:'V', emf: sgn·Vf, r: ron }   —— Vf 恒压降 + ron 斜率
+   *   截止 → { type:'R', r: roff·MΩ }
+   *
+   * ⚠ 开关判决用 `state.U * sgn() > vf`（**U 判据**），与既有 diode 同型 —— 这样绕开了
+   *   circuit.js:308 的符号坑：`I = si ? -x[n + si.idx] : 0;` 对 V 支路**带负号**，
+   *   与 R 支路的 I 取向相反（实测：同一插槽里真电阻报 −0.923 A、emf=0 的 V 支路报 +0.923 A，
+   *   两者 |I| 相同）。用 I 判通断会得到"电流越大越截止"的荒谬结论。
+   * ⚠ 亮度一律取 `Math.abs(state.I)` ⇒ 与上述口径无关（见 step()）。
+   * ⚠ V 支路 ON 态自洽：U = Vf + I·ron ≥ Vf，所以判据不会自我否定地来回抖（文件头 ① 的实测教训）。
+   */
+  circuitBranch() {
+    const s = this.sgn();
+    return this.state.on
+      ? { type: 'V', emf: s * this.vf(), r: Math.max(1e-4, this.props.ron) }
+      : { type: 'R', r: Math.max(1, this.props.roff * 1e6) };
+  }
+
+  step() {
+    const s = this.sgn();
+    this.state.vf = this.vf();
+    this.state.on = (this.state.U || 0) * s > this.vf();
+    const Ib = Math.abs(this.state.I || 0);
+    this.state.ifwd = Ib;                     // 正向电流幅值（取向无关）
+    this.state.tier = ledTier(Ib);
+    this.state.level = ledLabel(Ib);
+    this.state.glow = ledGlow(Ib);
+  }
+
+  render(g) {
+    const { w, h } = this;
+    const col = ledColor(this.props.color);
+    const on = !!this.state.on;
+    const glow = this.state.glow || 0;
+    shell(g, w, h, '发光二极管');
+    const cy = -h / 2 + 18;
+    // 光晕：亮度档越高越亮越大。纯装饰（无头 ctx 上是空操作），不参与任何判据。
+    if (glow > 0) {
+      g.save();
+      g.fillStyle = col.hex;
+      g.globalAlpha = glow * 0.3;
+      g.beginPath(); g.arc(0, cy, 15, 0, TAU); g.fill();
+      g.globalAlpha = glow * 0.16;
+      g.beginPath(); g.arc(0, cy, 24, 0, TAU); g.fill();
+      g.restore();
+    }
+    // 二极管符号（三角形 + 竖线 = 单向导电）
+    g.fillStyle = on ? col.hex : DIM;
+    g.beginPath(); g.moveTo(-8, cy - 8); g.lineTo(-8, cy + 8); g.lineTo(6, cy); g.closePath(); g.fill();
+    g.strokeStyle = on ? col.hex : DIM; g.lineWidth = 2.2;
+    g.beginPath(); g.moveTo(6, cy - 9); g.lineTo(6, cy + 9); g.stroke();
+    // 两支射出箭头 = 发光
+    g.lineWidth = 1.4;
+    for (const d of [0, 6]) {
+      g.beginPath(); g.moveTo(11 + d, cy - 11 - d); g.lineTo(17 + d, cy - 17 - d); g.stroke();
+    }
+    g.strokeStyle = WIRE; g.lineWidth = 1.6;
+    g.beginPath(); g.moveTo(-w / 2 + 4, cy); g.lineTo(-8, cy); g.stroke();
+    g.beginPath(); g.moveTo(6, cy); g.lineTo(w / 2 - 4, cy); g.stroke();
+    dot(g, -w / 2 + 3, 0); dot(g, w / 2 - 3, 0);
+    gfx.text(g, this.state.broken ? '已停用' : (on ? col.label + '光 ' + this.state.level : '截止'),
+      0, 8, { color: this.state.broken ? BAD : (on ? col.hex : BAD), size: 9.5 });
+    gfx.text(g, `U=${(this.state.U || 0).toFixed(3)}V  I=${((this.state.ifwd || 0) * 1000).toFixed(2)}mA`,
+      0, 19, { color: DIM, size: 9 });
+    gfx.text(g, `Vf=${(this.state.vf || 0).toFixed(2)}V  亮度档 ${this.state.tier || 0}/${LED_LEVELS.length}`,
+      0, 30, { color: on ? HOT : DIM, size: 8.5 });
+  }
+}
+const ledDef = {
+  type: 'led', name: '发光二极管', domain: PH, cat: CAT, icon: '💡',
+  desc: '单向导电 + 发光：正向电流越大越亮（4 档：微亮/暗/亮/刺眼），反向阻断不发光；Vf 由发光色决定，可停用（烧毁后从电路里彻底消失）',
+  w: 76, h: 64,
+  ports: [{ x: -38, y: 0, kind: 'wire', label: 'A' }, { x: 38, y: 0, kind: 'wire', label: 'K' }],
+  defaults: { color: 'red', vfTrim: 0, ron: 0.5, roff: 1, dir: 'fwd' },
+  state: { on: false, vf: 1.8, ifwd: 0, tier: 0, level: '灭', glow: 0 },
+  stats: [
+    { label: '状态', read: (e) => (e.state.broken ? '已停用（烧毁）⇒ 从电路里彻底消失' : (e.state.on ? '正向导通·发光' : '截止（反向阻断 / 电压不足）')) },
+    { label: '端子极性（自报）', read: (e) => (e.props.dir === 'rev' ? '受 props.dir=rev：A(0) 反接为阴极' : 'A(0) = 阳极（长脚）、K(1) = 阴极（短脚）') },
+    { label: '正向压降 Vf（随发光色）', read: (e) => e.state.vf || 0, fmt: fmtV },
+    { label: '正向电流 I_f', read: (e) => e.state.ifwd || 0, fmt: fmtA },
+    { label: '亮度档', read: (e) => `${e.state.level || '灭'}（${e.state.tier || 0} / ${LED_LEVELS.length}）` },
+    { label: '发光色', read: (e) => ledColor(e.props.color).label },
+    { label: '两端电压 U', read: (e) => e.state.U || 0, fmt: fmtV },
+  ],
+  tags: ['发光二极管', 'LED', '单向导电', '发光', '指示', '非线性', '半导体', '逻辑门'],
+  fields: [
+    { k: 'color', label: '发光色（决定 Vf）', type: 'select', options: LED_COLORS.map((c) => [c.k, `${c.label}（Vf ≈ ${c.vf} V）`]) },
+    { k: 'vfTrim', label: 'Vf 微调（批次离散）', type: 'range', min: -0.3, max: 0.3, step: 0.05, unit: 'V' },
+    { k: 'ron', label: '导通电阻', type: 'range', min: 0.1, max: 50, step: 0.1, unit: 'Ω' },
+    { k: 'roff', label: '反向电阻', type: 'range', min: 0.1, max: 50, step: 0.1, unit: 'MΩ' },
+    { k: 'dir', label: '接法', type: 'select', options: [['fwd', '正接（A→K 导通）'], ['rev', '反接（A→K 截止）']] },
+  ],
+  create: (x, y) => new Led(ledDef, x, y),
+};
+DEFS.push(() => define(ledDef));
+
+// ══════════════════════════════════════════════════════════
 // 插件
 // ══════════════════════════════════════════════════════════
 export default {
@@ -1506,7 +1752,7 @@ export default {
   kind: 'equipment',
   domain: PH,
   order: 32,
-  desc: '交流 / 暂态 / 半导体 / 三端器件：电容、电感、交流电源、示波器、变压器、二极管、光敏电阻、光敏二极管、NPN/PNP 三极管、N 沟道/P 沟道 MOSFET（12 件，接进真电路）',
+  desc: '交流 / 暂态 / 半导体 / 三端器件：电容、电感、交流电源、示波器、变压器、二极管、光敏电阻、光敏二极管、NPN/PNP 三极管、N 沟道/P 沟道 MOSFET、单刀双掷开关、发光二极管（14 件，接进真电路）',
   author: '小墨实验室',
   builtin: true,
   tags: ['电学', '交流', '暂态', '器材'],

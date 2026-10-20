@@ -502,6 +502,12 @@ head('⑧ 变异证明：放宽成「旧行逐字为新行前缀」之后，判�
   const sha256 = (s) => createHash('sha256').update(s).digest('hex');
   const SRC = readFileSync(inspectorPath, 'utf8');
   const shaBefore = sha256(SRC);
+  // ── 匹配/替换专用视图（归一换行）────────────────────────────────────────────
+  // 本仓 core.autocrlf=true 且 .gitattributes 只钉 market/* ⇒ **全新 Windows 检出时** src/**、tools/**
+  // 都是 CRLF，而下面几条多行锚点（from 里含 \n）在 CRLF 文本上命中 0 次 ⇒ 两条断言**永久假红**
+  // （「永远不可能绿的断言比没有更坏」：它会长期产生噪声并掩盖真正的回归）。
+  // ⚠ 只归一「匹配与替换」这一路：sha256 必须继续读**原始字节**（shaBefore 与 D43 的逐字节比对）。
+  const SRCm = SRC.replace(/\r\n/g, '\n');
   const MUT_DIR = 'C:\\Users\\Admin\\AppData\\Local\\Temp\\nb-re\\mutants';
   mkdirSync(MUT_DIR, { recursive: true });
   const uiDir = dirname(inspectorPath);
@@ -601,10 +607,10 @@ head('⑧ 变异证明：放宽成「旧行逐字为新行前缀」之后，判�
     },
   ];
   for (const m of MUTS) {
-    const hits = SRC.split(m.from).length - 1;
+    const hits = SRCm.split(m.from).length - 1;
     ok(hits === 1, `${m.name}：靶点文本在源码里唯一命中（命中 ${hits} 次，必须恰好 1 次）`);
     if (hits !== 1) continue;
-    const rowsOf = await mutantRows(SRC.replace(m.from, m.to), m.tag);
+    const rowsOf = await mutantRows(SRCm.replace(m.from, m.to), m.tag);
     const w = byType(m.wType);
     ok(!!w && m.wPred(rowsOf(w)), `D47 桩生效：${m.why}（先证这一处，再看判据）`);
     const bad = failsUnder(rowsOf);
@@ -691,6 +697,8 @@ head('⑩ plans/10 §4 的 B2 / B3 / B5：新增行 + 每条的能红证明');
   const sha256 = (s) => createHash('sha256').update(s).digest('hex');
   const ip = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'ui', 'inspector.js');
   const SRC0 = readFileSync(ip, 'utf8'), sha0 = sha256(SRC0);
+  // 同 SRCm：只归一匹配/替换这一路；sha0 必须来自原始字节（:1357 的 D43 会重新读盘逐字节比）。
+  const SRC0m = SRC0.replace(/\r\n/g, '\n');
   const MDIR = 'C:\\Users\\Admin\\AppData\\Local\\Temp\\nb-re\\mutants';
   mkdirSync(MDIR, { recursive: true });
   const ud = dirname(ip);
@@ -782,9 +790,9 @@ head('⑩ plans/10 §4 的 B2 / B3 / B5：新增行 + 每条的能红证明');
     { item: 'B2电流', from: "rows.push(['瞬时电流 i(t)'", to: "rows.push(['瞬时电流X'", key: '瞬时电流 i(t)' },
   ];
   for (const m of mutations) {
-    const hits = SRC0.split(m.from).length - 1;
+    const hits = SRC0m.split(m.from).length - 1;
     ok(hits === 1, `${m.item} 变异靶点在源码里唯一命中（命中 ${hits} 次，必须恰好 1 次）`);
-    const mm = SRC0.replace(m.from, m.to);
+    const mm = SRC0m.replace(m.from, m.to);
     const target = m.item === 'B3' ? lamp0 : m.item === 'B5' ? lamp5 : ac;
     const app = m.item.startsWith('B2') ? app2 : stubWorld;
     const got = get(await rowsWith(app, target, mm), m.key);
@@ -835,10 +843,10 @@ head('⑩ plans/10 §4 的 B2 / B3 / B5：新增行 + 每条的能红证明');
       '⑪戊 取不到（NaN）⇒ **整行不出现**（不占位、不造幻影值）');
     // 能红：掐掉追加逻辑 ⇒ 该行消失
     const mHall = "for (const s of (e.def && e.def.stats) || []) {";
-    const hitsH = SRC0.split(mHall).length - 1;
+    const hitsH = SRC0m.split(mHall).length - 1;
     ok(hitsH === 1, `⑪己 变异靶点唯一命中（命中 ${hitsH} 次，必须恰好 1 次）`);
     acS.def.stats = statList;
-    const gotH = get(await rowsWith(appS, acS, SRC0.replace(mHall, 'for (const s of []) {')), '自报甲');
+    const gotH = get(await rowsWith(appS, acS, SRC0m.replace(mHall, 'for (const s of []) {')), '自报甲');
     ok(gotH === null, `⑪庚 能红：掐掉追加逻辑 ⇒ 该行消失、对应断言必红（变异体实得 [${gotH}]）`);
   } finally {
     if (statsBak === undefined) delete acS.def.stats; else acS.def.stats = statsBak;
@@ -861,8 +869,8 @@ head('⑩ plans/10 §4 的 B2 / B3 / B5：新增行 + 每条的能红证明');
     const appM = { world: { get: () => null, wires: [] }, markDirty() {} };
     // 靶点 = stats 循环那一行（与 ⑪己 同一个接口点；两组测的是不同的事，共用可接受）
     const kill = { from: 'for (const s of (e.def && e.def.stats) || []) {', to: 'for (const s of [] || []) {' };
-    ok(SRC0.split(kill.from).length - 1 === 1, '⑬甲 stats 循环的变异靶点唯一命中（恰好 1 次）');
-    const srcNoStats = SRC0.replace(kill.from, kill.to);
+    ok(SRC0m.split(kill.from).length - 1 === 1, '⑬甲 stats 循环的变异靶点唯一命中（恰好 1 次）');
+    const srcNoStats = SRC0m.replace(kill.from, kill.to);
     const bakM = al.def.stats;
     try {
       al.def.stats = [{ label: '测试行', read: () => '测试' }];
@@ -1321,14 +1329,14 @@ head('⑩ plans/10 §4 的 B2 / B3 / B5：新增行 + 每条的能红证明');
       ok(get(r1, '取不到') === null, '⑫己 read() 给 undefined ⇒ 整行不出现');
       // 靶点锚在「digits 真正生效」那一句上（fmtBy 现在是多行实现，锚点跟着更新）
       const mDigits = 'return digits === 0 ? String(Math.round(v)) : v.toFixed(digits);';
-      const hitsD2 = SRC0.split(mDigits).length - 1;
+      const hitsD2 = SRC0m.split(mDigits).length - 1;
       ok(hitsD2 === 1, `⑫庚 变异靶点唯一命中（命中 ${hitsD2} 次，必须恰好 1 次）`);
       acT.def.stats = [{ label: '定点2', unit: 'V', digits: 2, read: (e) => e.state.probeN }];
-      const gotD = get(await rowsWith(appT, acT, SRC0.replace(mDigits, 'return fmtLive(v);')), '定点2');
+      const gotD = get(await rowsWith(appT, acT, SRC0m.replace(mDigits, 'return fmtLive(v);')), '定点2');
       ok(gotD === fmtLiveSrc(0.03125) + ' V',
         `⑫辛 能红：掐掉 digits ⇒ 精度回落到 fmtLive、⑫甲 必红（变异体实得 [${gotD}]）`);
       const mText = "if (typeof v === 'string') { rows.push([s.label, v]); continue; }";
-      const hitsT = SRC0.split(mText).length - 1;
+      const hitsT = SRC0m.split(mText).length - 1;
       ok(hitsT === 1, `⑫壬 文本分支变异靶点唯一命中（命中 ${hitsT} 次）`);
     } finally {
       if (bakT === undefined) delete acT.def.stats; else acT.def.stats = bakT;

@@ -43,8 +43,24 @@ function place(parent, node, prev) {
  *  （我第一版自作主张写了 180ms，正好落在它明文排除的那一档里。） */
 export const LONG_PRESS_MS = 550;
 /** 长按判定之前允许的抖动（px）：超过它就认定「用户在滑列表」，把手势还给浏览器。
- *  同样与 src/ui/touch.js 的 LONG_PRESS_SLOP 对齐（10）。 */
+ *  同样与 src/ui/touch.js 的 LONG_PRESS_SLOP 对齐（10）。
+ *  ⚠ 这个数**不许**跟着 AXIS_SLOP 一起缩小 —— 它同时是长按的抖动容差，
+ *  手指按住 550ms 难免漂移 5~8px，用 4px 判「你在滚列表」会把长按入口一起掐死。 */
 export const SLOP = 10;
+/** 触屏**横向成立**阈值（px）：横向占优且位移超过它 ⇒ 立刻进入拖拽，不等长按。
+ *
+ *  为什么它必须比 SLOP 小：这两个数在跟**两个不同的东西**赛跑。
+ *  · 这个数是跟**浏览器**赛跑。横向一旦被判定，palette.js 就用非被动 touchmove
+ *    的 preventDefault 接管**本次**手势（全仓唯一那条）；而浏览器只要自己认领了
+ *    纵向滚动，就会对我发 pointercancel，后续事件我再也收不到。
+ *    所以它必须压在浏览器手势 slop 之下。
+ *    浏览器侧的具体数值**我没有实测**（拿不到可引用来源），但结论不依赖它：
+ *    横向占优 ⇒ adx > ady，此刻 far > 4 ⇒ adx² + ady² > 16 且 ady < adx
+ *    ⇒ 2·ady² < 16 ⇒ **ady < 2.83px**。任何「还能滚动的」浏览器，其滚动 slop
+ *    都不可能小到 3px（否则 3px 的轻抖就开滚），所以在真实手指的 1px 级事件流下
+ *    横向占优的起手**必然是我先下判断**。
+ *  · 取 4 也顺带与 DRAG_SLOP 同值同义：「指针确实动了，不是抖动」。 */
+export const AXIS_SLOP = 4;
 /** 鼠标/笔的拖拽启动阈值（px）。**必须有这个阈值**：鼠标没有滚动冲突，
  *  但若按下即进入拖拽，一次普通单击会变成「拖到光标处放手」，
  *  点击落位（freeSpot 避让）这条既有语义会当场被改掉。 */
@@ -250,11 +266,17 @@ export class Palette {
     st.x = ev.clientX; st.y = ev.clientY;
     const dx = ev.clientX - st.x0, dy = ev.clientY - st.y0;
     const far = Math.hypot(dx, dy);
+    // 记住「这次手势**有没有离开过器材栏**」。它比「走了多远」更贴语义，松手时用它分两类：
+    // 从没离开过 ⇒ 一次点击（**抖动多大都算点击**）；离开过又回来 ⇒ 才是 cancelToast 的场景。
+    // 用既有判据 overPalette（落点环与放手判定共用的那条判据的器材栏半边），不另造一条距离线。
+    // 只算到第一次离开为止：既省掉后续每帧一次 getBoundingClientRect，
+    // 又天然就是「曾经离开过」这个事实本身。
+    if (!st.leftPalette && !this.overPalette(ev.clientX, ev.clientY)) st.leftPalette = true;
     if (!st.armed) {
       if (st.touch) {
         // 触屏有**两条**入口，都在回答同一个问题：「这一下是要滚列表，还是要拖器材？」
         //
-        // 1) **轴向意图（即时）**：位移超过 SLOP 且 |dx| > |dy| ⇒ 立刻成立，不用等。
+        // 1) **轴向意图（即时）**：横向占优且位移超过 AXIS_SLOP ⇒ 立刻成立，不用等。
         //    依据：器材栏是**纵向**滚动列表，横向位移**不可能**是滚列表 ——
         //    这就是浏览器/移动端标准的轴向锁定。用户要的「像 nb 那样直接把物品拖出来」
         //    靠它拿掉等待。真机代价是量出来的：3840×2160@3x 的一体机上，
@@ -264,16 +286,22 @@ export class Palette {
         //    它成立之后**不再看轴向**（见函数末的 moveGhost 分支），否则按住后只能横着
         //    拖，长按这条入口就废了 —— 而纵向落位恰恰是桌面/竖屏最常见的用法。
         //
+        // ⚠ 这里两个阈值**故意不同**，理由见 AXIS_SLOP / SLOP 各自的声明注释：
+        //    AXIS_SLOP(4) 是跟**浏览器**赛跑（必须抢在它认领纵向滚动、发 pointercancel 之前），
+        //    SLOP(10) 是给**手指**留抖动容差（同时保证长按这条入口不被掐死）。
         // ⚠ 轴向锁定**只给触屏**。鼠标/笔没有「滚列表 vs 拖器材」这个歧义，
         //    给它加轴向锁定只会**弄坏**已经能用的桌面档：桌面用户会**纵向**把器材拖到
         //    画布上（画布就在列表右侧偏下），要求横向占优会当场把那条路关掉。
-        if (far > SLOP) {
-          const adx = Math.abs(dx), ady = Math.abs(dy);
-          if (adx > ady) this.armDrag(st);        // 横向 ⇒ 只可能是拖器材
-          else if (ady > adx) this.endDrag();     // 纵向 ⇒ 只可能是滚列表，整条还给浏览器
-          // 恰好 45° 谁也不占：方向真的模糊，不猜（猜哪边都有一半是错的），
-          // 保持待定 —— 上面那条长按入口仍然可以成立。
+        const adx = Math.abs(dx), ady = Math.abs(dy);
+        if (adx > ady && far > AXIS_SLOP) {
+          this.armDrag(st);            // 横向占优 ⇒ 只可能是拖器材，**立刻**成立
+        } else if (ady > adx && far > SLOP) {
+          this.endDrag();              // 纵向占优且已明确走远 ⇒ 只可能是滚列表，整条还给浏览器
         }
+        // 恰好 45°（adx == ady）谁也不占：方向真的模糊，不猜（猜哪边都有一半是错的），
+        // 保持待定 —— 上面那条长按入口仍然可以成立。
+        // 纵向占优但还没走远（AXIS_SLOP < far ≤ SLOP）也**故意不取消**：
+        // 那是长按前的正常漂移，取消它等于把长按门槛又抬回 4px。
       } else if (far > DRAG_SLOP) {
         this.armDrag(st);
       }
@@ -304,14 +332,32 @@ export class Palette {
     this.suppressClick = true;
     setTimeout(() => { this.suppressClick = false; }, 0);
     if (w) { this.dropAt(st.d, w.x, w.y); return; }
-    // 取消也要**说出来**。这条规则是新的、而且看不见：桌面档「拖回器材栏 = 取消」
-    // 是用户已经学会的手势，窄屏档「拖到器材栏上也算取消」却是没学过的新规则，
-    // 不解释的话表现就是「拖了半天什么都没发生」= 看起来拖放坏了。
-    // 用户眼里「什么都没发生」是最坏的反馈 —— 与「静默挪位」同一条原则。
-    this.cancelToast(
-      ev && ev.clientX !== undefined ? ev.clientX : st.x,
-      ev && ev.clientY !== undefined ? ev.clientY : st.y,
-    );
+    // 走到这里 = `dropWorld` 给了空。而空有**两个完全不同的原因**，必须分开对待，
+    // 不能合并成一个「没落下去」：
+    //   ① 松手点**还在器材栏上** ⇒ 落在 dropTargetOK 的「不在器材栏上」那一半上；
+    //   ② 松手点**在画布之外**（甩出去了）⇒ 落在 dropTargetOK 的「在画布矩形内」那一半上。
+    // 判据是**松手时刻的那个点**（下面复用 overPalette），不能只看 leftPalette 闩锁：
+    // 只看闩锁会把②也当成点击 ⇒「甩出画布反而落了一件」。
+    const upX = ev && ev.clientX !== undefined ? ev.clientX : st.x;
+    const upY = ev && ev.clientY !== undefined ? ev.clientY : st.y;
+    if (this.overPalette(upX, upY) && !st.leftPalette) {
+      // ① 松手还在器材栏上、而且这趟手势**从没离开过**器材栏 ⇒ 那本来就是一次点击
+      //   （与抖动多大无关：手指抖 12~20px 是常事，只要没出栏就只能是点击）。
+      //   （判定放在这里而不是入口处：入口必须先成立拖拽，才抢得过浏览器认领纵向滚动。）
+      //   走点击自己那条路 —— this.place(st.d) 与行内 click 处理器**是同一个调用**，
+      //   所以 freeSpot 避让等点击语义逐字不变，恰好落 1 件。
+      //   上面已经把 suppressClick 置上 ⇒ 补发的那次 click 会被吃掉；但触屏上
+      //   preventDefault 过 touchmove、兼容 click 可能压根不会来 ⇒ 必须自己落这一件。
+      this.place(st.d);
+      return;
+    }
+    // ②（离开过又拖回器材栏）与 ③（甩出画布）都是**真拖拽放错了地方** ⇒ 取消，而且必须
+    // **说出来**。这条规则是新的、而且看不见：桌面档「拖回器材栏 = 取消」是用户已经学会的
+    // 手势，窄屏档「拖到器材栏上也算取消」却是没学过的新规则，不解释的话表现就是
+    // 「拖了半天什么都没发生」= 看起来拖放坏了。用户眼里「什么都没发生」是最坏的反馈。
+    // 弹哪一条由 cancelToast 按**松手点**自己分（「落在器材栏上」/「画布之外」两条文案
+    // 不许互换：换错了就是判据选错舞台）。
+    this.cancelToast(upX, upY);
   }
 
   /** 取消时给一句人能读的理由；两种原因分开说，不混成一句含糊的话 */

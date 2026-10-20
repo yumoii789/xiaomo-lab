@@ -11,14 +11,19 @@
 //   逐字副本）与 BEFORE_RAW 再对拍一次 —— 读数与算法互相钉住，任一条链被手抄改动都会红。
 //   ⚠ 基线不许「跑一遍新代码重新生成」：要更新它，先得证明菜单项**本来就该变**。
 //
-// ⚠ 件数口径：本探针**不写死数字**，一律按注册表实测（当前 117 件；四种装载集合 —— 器材单独装、
-//   加主题与规则、加预设、加器材包 —— 实测都是 117，PluginHost.stats.equipment=117）。
-//   task-17 任务书写的是 118，差的那 1 件口径见 §⑥ 的 info 行（本探针只报实测，不猜）。
+// ⚠ 件数口径：本探针**不写死数字**，一律按注册表实测。task-17 当时四种装载集合（器材单独装、加主题
+//   与规则、加预设、加器材包）都是 117；此后树里其他写者的在途改动又加过器材 ⇒ 同一份探针今天实测
+//   119 件（§① 对新增件**白名单显式点名**：名单外多一件就红；§⑦ 直接按当次的实测件数铺开）。任务书写的是 118，
+//   那 1 件的口径见 §⑥ 的 info 行（本探针只报实测，不猜）。
 //
 // ⚠ 为什么「中央表生效」要靠**注入表**才测得到：今天中央表的内容与兜底特征**逐件等价**
 //   （这正是零行为变化的原因），所以中央表被整条忽略时，真实器材的菜单项**一点都不变** ✗。
 //   要让那一层能红，唯一的办法是注入一张与兜底故意不同的小表（menuCaps(e, { table })，
 //   与 engine 的 __XM_PAN_OFF__ 同一手法：只判据用，生产调用不传第二个参数）。
+//
+// task-21 追加：§⑦ applyCap ≡ 改动前五个内联闭包（逐件逐位：动作/顺序/次数/状态）+ 非空转对照，
+//   §⑧ 五个位各一条（位为真时调用的就是它自己的原语），§⑨ 边界（位为假 / 已删除 / 二次调用）。
+//   ⚠ 条目数会因此上升：零回归清单里这一条的 expect 需要同步（清单是 Lead 的写域，本探针不改它）。
 //
 // 绿：全部通过：N 项（exit 0）／红：合计 N 项，失败 M 项（exit 1）
 // ══════════════════════════════════════════════════════════
@@ -246,6 +251,85 @@ function standIn(T, type, opts) {
 }
 
 /** 整段注释行剥离（与仓库其他探针同款：只剥**整行**注释） */
+/**
+ * 冻结：改动前 src/ui/inspector.js 里五个内联闭包的**逐字副本**（只把 `this.render()` 抽成
+ * refresh 参数，其余一字不改）—— §⑦ 拿它与 caps.applyCap 逐件逐位对拍。读数与算法互钉：
+ * 一边是今天的真实现，一边是这段冻结的历史，任一边被改动都会红。
+ */
+const OLD_ACTIONS = {
+  toggle: (app, e, refresh) => { e.toggle(); refresh(); app.markDirty(); },
+  ignite: (app, e, refresh) => { e.props.lit = !e.props.lit; refresh(); app.markDirty(); },
+  empty: (app, e, refresh) => { e.vessel.empty(); refresh(); app.markDirty(); },
+  duplicate: (app, e) => app.duplicate(e),
+  remove: (app, e) => app.removeEntity(e),
+};
+
+/**
+ * 记录型宿主：谁被调用、调了几次、作用在谁身上全记下来。world 用真查找表
+ * （applyCap 用 `world.get(ent.id)` 判断「这件器材还在不在台面上」）。
+ */
+function recApp(ents) {
+  const log = [];
+  const list = ents || [];
+  return {
+    log,
+    world: { entities: list, get: (id) => list.find((x) => x.id === id) || null },
+    markDirty() { log.push('app.markDirty'); },
+    duplicate(e) { log.push('app.duplicate:' + e.type); },
+    removeEntity(e) { log.push('app.removeEntity:' + e.type); },
+  };
+}
+
+/**
+ * state 里**天生不确定**的键：同型两件新器材的初值就不一样的那些（如酒精灯/加热板的 flick 随机数）。
+ * 不写死键名 —— 判据自己测量：动作对它们的**数值**没有可比较的语义，只有「被改没被改」才有。
+ */
+const VOLATILE = new Map();
+function volatileKeys(T, type) {
+  if (!VOLATILE.has(type)) {
+    const a = T.create(type, 0, 0), b = T.create(type, 0, 0);
+    const ks = [...new Set([...Object.keys(a.state), ...Object.keys(b.state)])];
+    VOLATILE.set(type, ks.filter((k) => JSON.stringify(a.state[k]) !== JSON.stringify(b.state[k])));
+  }
+  return VOLATILE.get(type);
+}
+
+/** 可观察状态：props 逐字节 + state（天生不确定的键只留结构，不留数值；id 这类每次新建都不同的字段本就不在快照里） */
+function snapE(T, e) {
+  const vol = volatileKeys(T, e.type);
+  const state = {};
+  for (const k of Object.keys(e.state).sort()) state[k] = vol.indexOf(k) >= 0 ? '<volatile>' : e.state[k];
+  return JSON.stringify({ props: e.props, state });
+}
+
+/**
+ * 跑一次「位 → 动作」，返回可观察结果：原语调用轨迹 + props/state 快照。
+ *   opts.useNew=true  用 caps.applyCap；false 用上面那段冻结的旧闭包
+ *   opts.act          直接指定动作者（§⑦ 的非空转对照用：故意接错的那一个）
+ *   opts.lit          设 props.lit 初值；opts.times 连按几次（§⑨ 的不叠副作用）
+ */
+function traceAction(T, type, key, opts) {
+  const o = opts || {};
+  const e = T.create(type, 0, 0);
+  const app = recApp([e]);
+  const log = app.log;
+  if (o.lit !== undefined) e.props.lit = o.lit;
+  if (typeof e.toggle === 'function') { const f = e.toggle; e.toggle = () => { log.push('ent.toggle'); return f.call(e); }; }
+  // this 必须绑到 vessel 本身（VesselModel 的方法），绑到实体上会读不到内容物
+  if (e.vessel && typeof e.vessel.empty === 'function') {
+    const f = e.vessel.empty;
+    e.vessel.empty = () => { log.push('ent.vessel.empty'); return f.call(e.vessel); };
+  }
+  const refresh = () => log.push('view.render');
+  const act = o.act || (o.useNew
+    ? ((a, x, r) => T.caps.applyCap(a, x, key, r))
+    : OLD_ACTIONS[key]);
+  const before = snapE(T, e);
+  let ret;
+  for (let i = 0; i < (o.times || 1); i++) ret = act(app, e, refresh);
+  return { log: log.join(' | '), before, after: snapE(T, e), ret };
+}
+
 const stripComments = (s) => s.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
 
 // ══════════════════════════════════════════════════════════
@@ -267,6 +351,10 @@ async function runSuite(T, opt) {
 
   const ALL = T.list();                            // 注册表实测（不写死件数）；必须在注册替身**之前**取
   const CAP_KEYS = Object.keys(T.caps.CAP_KEYS);
+
+  // ⚠ 整段断言区包在 try 里：变异体可能把前置假设破坏到「直接抛错」（例如撤掉空引用守卫后
+  //   menuCaps(null) 会抛）。抛错也要落成**当前那一节的一条红**，否则整份套件中止、没有对齐判据。
+  try {
 
   // ── ① 全量逐件对照 ──────────────────────────────────────────
   head('① 全量逐件对照：改后真实 render() ≡ 改动前冻结读数（菜单项一个都不许变）');
@@ -299,7 +387,20 @@ async function runSuite(T, opt) {
     ok(missing.length === 0,
       '基线的 ' + BEFORE.size + ' 件器材今天都还在注册表里'
       + (missing.length ? '；缺 ' + missing.length + ' 件：' + missing.slice(0, 6).join(' ') : ''));
-    if (added.length) info('基线之外的新增器材 ' + added.length + ' 件（不在本轮对照范围，按 §⑤ 的新口径判）：' + added.join(' '));
+    // 新增件必须**显式点名**：既不许「静默跳过」，也不许「默默多出来」。
+    // 名单外多一件就红 —— 谁加器材谁在这里登记一次，「老器材一件没被顺手改坏」与「新增是故意的」各得一条判据。
+    const NEW_OK = ['spdt', 'led'];   // task-21 期间另一位写者落的两件：单刀双掷开关 / 发光二极管
+    const unexpected = added.filter((t) => NEW_OK.indexOf(t) < 0);
+    const notYet = NEW_OK.filter((t) => !ALL.some((d) => d.type === t));
+    ok(unexpected.length === 0 && notYet.length === 0,
+      '新增件只在白名单里：注册表比冻结基线多的 ' + added.length + ' 件 = 名单 ' + NEW_OK.join(' ')
+      + (unexpected.length ? '；✗ 名单外的：' + unexpected.slice(0, 6).join(' ') : '')
+      + (notYet.length ? '；✗ 名单里还没注册的：' + notYet.join(' ') : ''));
+    ok(added.length === NEW_OK.length,
+      '除白名单 ' + NEW_OK.length + ' 件外，其余 ' + BEFORE.size + ' 件逐件都有冻结基线（' + rows + ' 次对照不是「跳过新件」换来的）'
+      + (added.length !== NEW_OK.length ? '；实测新增 ' + added.length + ' 件：' + added.join(' ') : ''));
+    info('白名单新增件的菜单项（本阶段不纳入冻结基线，按 §⑤/§⑥ 口径判）：'
+      + added.map((t) => t + ' → ' + buttons(T, T.create(t, 0, 0)).join(',')).join(' '));
     // 非空转对照：比较器真的会判「不同」吗 —— 当场把基线改一个按钮，同一比较必须不成立
     const d0 = ALL.find((d) => BEFORE.has(d.type));
     const e0 = T.create(d0.type, 0, 0);
@@ -395,6 +496,104 @@ async function runSuite(T, opt) {
     info('兜底（' + viaFallback.length + ' 件：菜单项 = 默认位 + 三个特征位，全靠 legacyCaps 兜着）');
   }
 
+  // ── ⑦ 位 → 动作：applyCap ≡ 改动前五个内联闭包 ──────────────
+  head('⑦ applyCap ≡ 改动前五个内联闭包（逐件逐位：动作 / 顺序 / 次数 / 状态变化）');
+  {
+    const KEYS = Object.keys(T.caps.CAP_KEYS);
+    const mism = [];
+    let rows = 0;
+    for (const d of ALL) {
+      const bits = T.caps.menuCaps(T.create(d.type, 0, 0));
+      for (const key of KEYS) {
+        if (!bits[key]) continue;
+        for (const lit of (key === 'ignite' ? [false, true] : [undefined])) {
+          const a = traceAction(T, d.type, key, { lit, useNew: false });
+          const b = traceAction(T, d.type, key, { lit, useNew: true });
+          rows++;
+          if (a.log !== b.log || a.before !== b.before || a.after !== b.after) {
+            // 报「哪一项不同 + 从第几个字符开始不同」，否则 3KB 的状态串没法读
+            const at = (x, y) => { const m = Math.min(x.length, y.length); for (let i = 0; i < m; i++) if (x[i] !== y[i]) return i; return m; };
+            const which = a.log !== b.log ? 'log' : (a.before !== b.before ? 'before' : 'after');
+            const x = which === 'log' ? a.log : (which === 'before' ? a.before : a.after);
+            const y = which === 'log' ? b.log : (which === 'before' ? b.before : b.after);
+            const k = at(x, y);
+            mism.push(d.type + '.' + key + (lit === undefined ? '' : ' lit=' + lit) + ' 差在 ' + which + '@' + k
+              + ' 旧…' + x.slice(Math.max(0, k - 40), k + 60) + ' 新…' + y.slice(Math.max(0, k - 40), k + 60));
+          }
+        }
+      }
+    }
+    ok(mism.length === 0,
+      '逐位对照：' + rows + ' 次（' + ALL.length + ' 件器材 × 它真有的位 × 点火两态）—— 调用顺序、刷新/markDirty 次数、props+state 变化全部与改动前的内联闭包相同'
+      + (mism.length ? '；不符 ' + mism.length + ' 处，第一处：' + mism[0].slice(0, 220) : ''));
+    const volTypes = ALL.filter((d) => volatileKeys(T, d.type).length > 0);
+    info('state 天生不确定的器材 ' + volTypes.length + ' 件（同型两件新器材就不同的键，只比对「结构」不比对数值）：'
+      + volTypes.map((d) => d.type + ':' + volatileKeys(T, d.type).join('+')).join(' '));
+    const d0 = ALL.find((d) => T.caps.menuCaps(T.create(d.type, 0, 0)).toggle);
+    const w = traceAction(T, d0.type, 'toggle', { act: (app, e) => { app.duplicate(e); } });
+    const n0 = traceAction(T, d0.type, 'toggle', { useNew: true });
+    ok(w.log !== n0.log || w.after !== n0.after,
+      '对拍有鉴别力（非空转对照）：把「切换」接到复制上，同一比较立刻判为不同（' + d0.type + '：错 ' + w.log + ' vs 对 ' + n0.log + '）');
+  }
+
+  // ── ⑧ 五个位各一条：位为真 ⇒ 调用的就是它自己的原语 ──────────
+  head('⑧ 五个能力位各一条：位为真时调用的**就是它自己的原语**');
+  {
+    const t1 = traceAction(T, 'switch', 'toggle', { useNew: true });
+    ok(t1.log.indexOf('ent.toggle') === 0 && t1.before !== t1.after && t1.ret === true,
+      'toggle ⇒ ent.toggle()（状态真的变了）实测 ' + t1.log);
+    const t2 = traceAction(T, 'alcohollamp', 'ignite', { lit: false, useNew: true });
+    const t2b = traceAction(T, 'alcohollamp', 'ignite', { lit: true, useNew: true });
+    const b2 = JSON.parse(t2.before).props.lit;
+    const a2 = JSON.parse(t2.after).props.lit;
+    const a2b = JSON.parse(t2b.after).props.lit;
+    // 两个方向都要断言：只写「false → true」的话，把点燃实现成「只置真」的缺陷**看不见**
+    ok(a2 === !b2 && a2b === false && t2.before !== t2.after,
+      'ignite ⇒ props.lit 取反，两个方向都成立（' + b2 + ' → ' + a2 + '；true → ' + a2b + '）');
+    const t3 = traceAction(T, 'beaker', 'empty', { useNew: true });
+    ok(t3.log.indexOf('ent.vessel.empty') === 0 && t3.ret === true,
+      'empty ⇒ ent.vessel.empty() 实测 ' + t3.log);
+    const t4 = traceAction(T, 'battery', 'duplicate', { useNew: true });
+    ok(t4.log === 'app.duplicate:battery',
+      'duplicate ⇒ app.duplicate(ent)，**不**刷新、**不** markDirty（与改前逐字相同）实测 ' + t4.log);
+    const t5 = traceAction(T, 'battery', 'remove', { useNew: true });
+    ok(t5.log === 'app.removeEntity:battery',
+      'remove ⇒ app.removeEntity(ent)，同样不刷新 / 不 markDirty 实测 ' + t5.log);
+  }
+
+  // ── ⑨ 边界：位为假 / 已删除 / 二次调用 ───────────────────────
+  head('⑨ 边界：位为假无动作、已删除不抛错、二次调用不叠副作用');
+  {
+    const cnt = (x, pat) => x.split(pat).length - 1;
+    const q = traceAction(T, 'battery', 'toggle', { useNew: true });
+    ok(q.ret === false && q.log === '' && q.before === q.after,
+      '位为假 ⇒ 无动作、无刷新、无 markDirty、状态不变，返回 false（干电池 × toggle）');
+    const live = traceAction(T, 'beaker', 'ignite', { useNew: true });
+    ok(live.ret === false && live.log === '' && live.before === live.after,
+      '位为假但器材身上那套原语是活的（烧杯 × ignite）⇒ 依然一个动作都不做：位是唯一的开关');
+    ok(T.caps.applyCap(recApp([]), null, 'toggle') === false, '空引用 ⇒ 返回 false（不抛错）');
+    const app = recApp([]);
+    const goneE = T.create('battery', 0, 0);
+    const gb = snapE(T, goneE);
+    let rets = null, threw = null, refreshed = 0;
+    try { rets = ['toggle', 'ignite', 'empty', 'duplicate', 'remove'].map((k) => T.caps.applyCap(app, goneE, k, () => { refreshed++; })); }
+    catch (err) { threw = String(err && err.message); }
+    ok(threw === null && rets.every((r) => r === false) && app.log.length === 0 && refreshed === 0 && snapE(T, goneE) === gb,
+      '已删除（不在台面上）⇒ 五个位全部返回 false、不抛错、宿主与刷新一次都没被调用'
+      + (threw ? '；抛错：' + threw : '；返回 ' + JSON.stringify(rets)));
+    const once = traceAction(T, 'switch', 'toggle', { useNew: true });
+    const twice = traceAction(T, 'switch', 'toggle', { useNew: true, times: 2 });
+    ok(twice.after === once.before && cnt(twice.log, 'ent.toggle') === 2
+      && cnt(twice.log, 'view.render') === 2 && cnt(twice.log, 'app.markDirty') === 2,
+      'toggle 连按两次：每次调用恰好 1 次原语 + 1 次刷新 + 1 次 markDirty，两次后回到初始状态（' + twice.log + '）');
+    const dup2 = traceAction(T, 'battery', 'duplicate', { useNew: true, times: 2 });
+    ok(cnt(dup2.log, 'app.duplicate:battery') === 2 && cnt(dup2.log, 'view.render') === 0
+      && cnt(dup2.log, 'app.markDirty') === 0,
+      'duplicate 连按两次：恰好两次 app.duplicate，一次多余的刷新 / markDirty 都没有（' + dup2.log + '）');
+  }
+  } catch (err) {
+    ok(false, '套件在 ' + curSec + ' 节被抛错中断：' + String(err && err.message) + '（这一节算红）');
+  }
   return S;
 }
 
@@ -435,6 +634,38 @@ function mutateCases() {
       red: ['①'],
       note: '中央表里给开关多写一位 remove:false ⇒ 只有 §① 该红（开关的菜单里少一个「删除」）。这条用来证明全量对照**有鉴别力**：它不是对着一份自己生成的基线空转',
     },
+    {
+      tag: 'caps-apply-toggle-miswire',
+      file: 'src/equipment/caps.js',
+      old: '      ent.toggle(); after(); return true;',
+      new: '      app.duplicate(ent); return true;   // MUTANT：切换接成了复制',
+      red: ['⑦', '⑧', '⑨'],
+      note: '把「切换通断」接到 app.duplicate 上 ⇒ §⑦ 的逐位对照、§⑧ 的 toggle 那条、以及 §⑨ 的「连按两次」（它消费的也是切换这个动作）都该红 —— 后一条是真实耦合，不是夹具缺陷',
+    },
+    {
+      tag: 'caps-apply-ignite-set',
+      file: 'src/equipment/caps.js',
+      old: '      ent.props.lit = !ent.props.lit; after(); return true;',
+      new: '      ent.props.lit = true; after(); return true;   // MUTANT：点燃只能开不能关',
+      red: ['⑦', '⑧'],
+      note: '热源位改成「只置真」⇒ §⑦（ignite 的 lit=true 那一态）与 §⑧ 的 ignite 那条都该红',
+    },
+    {
+      tag: 'caps-apply-bit-guard-off',
+      file: 'src/equipment/caps.js',
+      old: '  if (!menuCaps(ent)[key]) return false;',
+      new: '  if (false && !menuCaps(ent)[key]) return false;   // MUTANT：位为假也照做',
+      red: ['⑨'],
+      note: '撤掉「位为假不做」的守卫 ⇒ 只有 §⑨ 该红（§⑦ 只跑真位，碰不到这条；烧杯 × ignite 那条就是为它准备的：位为假而原语活着）',
+    },
+    {
+      tag: 'caps-apply-gone-guard-off',
+      file: 'src/equipment/caps.js',
+      old: '  if (gone(app, ent)) return false;',
+      new: '  if (false && gone(app, ent)) return false;   // MUTANT：已删除的实体也照做',
+      red: ['⑨'],
+      note: '撤掉「不在台面上不做」的守卫 ⇒ 只有 §⑨ 该红（干电池的复制/删除两个位是真的，于是宿主会被调用）',
+    },
   ];
 }
 
@@ -449,7 +680,9 @@ try {
     const results = [];
     let allOk = true;
     for (const c of cases) {
-      const srcRaw = readFileSync(join(ROOT, c.file), 'utf8');
+      // ⚠ 匹配前先归一换行：本仓 core.autocrlf=true ⇒ 全新 Windows 检出拿到的是 CRLF，
+      //   多行锚点会 0 命中（假红）。判据按 LF 语义写，就先把磁盘字节归一成 LF。
+      const srcRaw = readFileSync(join(ROOT, c.file), 'utf8').replace(/\r\n/g, '\n');
       const hits = srcRaw.split(c.old).length - 1;
       const hitsCode = stripComments(srcRaw).split(c.old).length - 1;
       const mutated = srcRaw.replace(c.old, c.new);

@@ -1,4 +1,5 @@
 import { Interaction } from '../ui/interact.js';
+import { EquipBar } from '../ui/equipbar.js';
 
 export default {
   id: 'xiaomo.ui.interaction',
@@ -15,6 +16,20 @@ export default {
     app.interaction = it;
     app.engine.overlays.push((g, eng) => it.drawOverlay(g, eng));
     app.setTool('select');
+
+    // ── 选中器材的就地控制条（实现见 src/ui/equipbar.js）──
+    // 为什么宿主是这里：本插件已经持有「选中」这条链路的装配（`Interaction` → `app.select`），
+    // 控制条是同一件事的**呈现**，不需要再开一个插件（UI 插件数必须仍是 32：
+    // tools/guard-plugins.mjs 数的是 plugins/index.js 的 ALL_PLUGINS.length）。
+    // 拆除必须进处置栈：漏了它，reload / disable 之后会残留一层 `app.select` 包装
+    // 指向已销毁的浮层，而且下次 setup 会叠成「一次选中通知两次」。
+    const equipbar = new EquipBar(app);
+    equipbar.mount();
+    app.equipbar = equipbar;
+    ctx.onDispose(() => {
+      equipbar.dispose();
+      if (app.equipbar === equipbar) app.equipbar = null;
+    });
 
     // ── 点击涟漪 + 拖动拖尾 ──────────────────────────────
     // 反馈类动效，只动 transform / opacity；减少动态效果时整体关闭。

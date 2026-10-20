@@ -222,11 +222,34 @@ const SUITE = [
     note: 'task-12（触控视口：两指平移/捏合缩放 + 桌面滚轮缩放）',
   },
   {
+    id: 'port-affordance-probe',
+    cmd: ['tools/port-affordance-probe.mjs'],
+    expect: 'PORT_AFFORDANCE_JSON {"items":63,"pass":63,"fail":0',
+    label: '接线柱可见化+吸附 63 项（命中 26 / 吸附 30 两侧夹取 + 重叠次序唯一 + 细指针逐位不变 + 两笔不同源绘制）',
+    layer: 'node',
+    note: 'task-18（e-transistor）：端口视觉档位读 (pointer: coarse)；视觉尺寸只在 engine.js 的 PORT_R_FINE/COARSE 声明一处。',
+  },
+  {
+    id: 'equipbar-probe',
+    cmd: ['tools/equipbar-probe.mjs'],
+    expect: 'EQUIPBAR_JSON {"total":61,"pass":61,"fail":0',
+    label: '就地浮出控制条 61 项（幂等往返 + 反串台 + 捕获时器材 + 锚点四式两尺寸 + 引擎往返 + 单层结构断言 + 变异体自指元判据 + 位真原语缺契约）',
+    layer: 'node',
+    note: 'task-19（e-state）：可点浮层必须是 DOM（engine.overlays 只画不点）。数值断言杀不死「第二真相源」，只有结构断言能。',
+  },
+  {
     id: 'palette-dnd-probe',
     cmd: ['tools/palette-dnd-probe.mjs'],
-    expect: '"items":44,"pass":44,"fail":0',
-    label: '器材栏拖出 44 项（轴向即时成立 + 长按成立 → 放手即落位 = 放手点）',
+    expect: '"items":54,"pass":54,"fail":0',
+    label: '器材栏拖出 54 项（轴向即时成立 + 长按成立 → 放手即落位 = 放手点；含三角度/纵向/鼠标对照）',
     layer: 'node',
+    // ★ task-16 新增 10 条（G7/G7b/G8/G9/G10/G13/G14 + O6；G11/G12 补 fire('click') 修掉一条假绿）。
+    //   红档 24 个变异体：expectedRed 64 ≡ observedRed 64、ctrlBad 0、landInCode/redsAligned 全 true。
+    //   ⚠ owner 自己单列了 7 条「浏览器仲裁层测不到」：手势 slop 实际数值、pointercancel 与第一个
+    //   合格 pointermove 的真实先后（「第 5px 成立」只证明判据层下判断，不证明浏览器没动手）、
+    //   pan-y 对 30° 判给哪条轴、真机是否补发兼容 click、真机长按上下文菜单、命中测试来自夹具
+    //   getBoundingClientRect（证明的是分支与文案，不是真实布局）、A2 是去注释后的静态检查。
+    //   ⇒ 前五项归 Lead 层无头浏览器验证。
     // ★ task-13 新增。⚠ 它第一版有一条**假红**：methodBody() 用 indexOf(name+'(') 锚到的
     //   是**调用点**而不是定义点（本仓元教训 AV），切出来的「函数体」自然不含
     //   screenToWorld( ⇒ 断言红、实现却是对的。修法不是改断言，而是把「取到的是不是定义」
@@ -240,8 +263,8 @@ const SUITE = [
   {
     id: 'inspector-caps-probe',
     cmd: ['tools/inspector-caps-probe.mjs'],
-    expect: '"items":20,"pass":20,"fail":0',
-    label: '能力位表 20 项（def.caps → 中央表 → 兜底三层优先 + 117 件菜单项逐件不变）',
+    expect: '"items":35,"pass":35,"fail":0',
+    label: '能力位表 35 项（applyCap 单一动作定义 + 256 次逐位等价 + 白名单外逐件不变）',
     layer: 'node',
     // ★ task-17 新增。菜单项过去是 UI 按特征猜（e.type==='switch' / e.flame / e.vessel），
     //   现在由**器材自己的能力位**决定，那三个判断退到兜底层 ⇒ 任何没声明能力位的器材
@@ -253,9 +276,32 @@ const SUITE = [
     //   ⚠ 件数口径：注册表实测 **117**（器材单装/加主题规则/加预设/加器材包四种集合一致，
     //   与 guard-plugins 的 stats.equipment 互相印证）。**118** 是浏览器 profile 里装了
     //   器材包/market 派生件时的数，不是固有件数 ⇒ 探针一律按注册表实测，不写死数字。
+    //   ⚠ 2026-10-20 追记：注册表实测已到 **119**（新增 spdt/led）。本条断言与件数**解耦**
+    //   （只钉 items/pass/fail），所以期望值一个字没改 —— 这正是「断言不与它测的常量耦合」的样子。
     //   ⚠ 作者自己抓住了自己第一版的**死代码**：menuCaps 漏掉兜底层 ⇒ 用户器材包派生的
     //   type 不在中央表里会**整类掉按钮**；是探针 §④ 当场红 3 条才暴露的（不是靠评审）。
     note: 'task-17（能力位表：菜单项由器材声明 + 三层兜底，行为逐位不变）',
+  },
+  {
+    id: 'spdt-led-probe',
+    cmd: ['tools/spdt-led-probe.mjs'],
+    // ⚠ expect 必须**从 `{` 开始**：探针把 `SPDT_LED_JSON` 这个标签包在 ANSI 粗体转义里
+    //   （`\x1b[1mSPDT_LED_JSON\x1b[0m {...}`）⇒ 带标签的子串永不匹配。这不是探针的错，
+    //   是本文件既有条目的共同约定（对照 inspector-caps-probe 那条）。
+    expect: '"mode":"green","items":33,"pass":33,"fail":0',
+    label: '单刀双掷开关 + 发光二极管 33 项（真值表真跑求解器 + 与既有 diode 逐位同解 + 损坏器材 + 端子自报）',
+    layer: 'node',
+    // ★ task-20 新增：两件 NB 有而本仓没有的器材，加进**既有** electronics 插件 ⇒ UI 插件数仍 32。
+    //   最值钱的一条：`orTable` 的四个 out **不是写死的期望值**，是真跑 circuit.js 得到的节点电压
+    //   （5.999e-10 / 4.1564 / 4.1564 / 4.1677 V ⇒ 布尔 0111）；`diodeEquivalence` 把同一张网表里的
+    //   led 换成既有 diode（同 vf/ron/roff）⇒ uLed == uDio **逐位相同**，不是近似。
+    //   ⚠ 未选中那一掷必须是**真开路**（假开路会漏掉孤立支路告警）⇒ M1 与 M5 分工：M1 报
+    //   port-ignored、M5 真缺失；选中支路必须在**索引 0**（`circuit.js` 里 `const primary = !b.bi`）。
+    //   ⚠ 容差口径来自求解器的**节点电压**收敛界 `maxDelta < 1e-5`，不是随手放宽（两处都复核过源码）：
+    //   SPDT-BRANCH0 实测差 2.83e-14 ⇒ near(1e-9)；LED-IFWD-CROSSCHECK 小电流档实测相对差 1.0e-6 ⇒ 1e-4。
+    //   ⚠ `uncovered` 台账只剩 10 条，且**多一条就判红**（strayUncovered 非空 ⇒ 红档判红）：
+    //   控制组/形状组归 guard-plugins 等；损坏器材整件跳过是 `circuit.js` 的跨文件契约、不在写域。
+    note: 'task-20（spdt 单刀双掷 + led 发光二极管；器材自 117 增至 119）',
   },
   {
     id: 'publish-gate',

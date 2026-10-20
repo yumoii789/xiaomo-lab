@@ -38,6 +38,30 @@ import { C } from '../core/theme.js';
 import { canFeed } from '../equipment/lab.js';
 
 const HIT_PORT = 13;
+/**
+ * 触屏（粗指针）的接线柱命中半径。用户原话：「端口不好看见、不好对准」—— 手指接触面
+ * 约 8~10 mm，`HIT_PORT` 那 13 个世界 px 在真机上就是「看得见、点不中」。
+ *
+ * ⚠ 细指针那 13 px **一个字都不许动**：桌面鼠标的手感与今天逐位相同
+ *   （`tools/port-affordance-probe.mjs` 直接钉住「d=13 命中、d=13.0001 不命中」）。
+ * 取 26（2×）而不是随便一个大数：26 仍小于常见两个接线柱的间距，不会互相抢；
+ *   再放大就变成「点一个中了旁边那个」，那是把「不准」换成另一种「不准」。
+ * ⚠ 它与 `PORT_SNAP_COARSE` 是**两个不同的半径**，故意分开写死，分工见那边的注释。
+ */
+const HIT_PORT_COARSE = 26;
+/**
+ * 触屏的**吸附**半径（世界 px）：手指落在接线柱附近就吸到它。
+ *
+ * 为什么光放大命中半径不够：命中半径只回答「这一下算不算点到端口」，而用户抱怨的是
+ * 「不好对准」—— 差几个 px 落空时，连线会画到器材旁边的空气里，手指还得再来一次。
+ * 吸附把「差不多对准了」变成「就是它」，这才是触屏上真正省事的那一步。
+ *
+ * 边界（与 `HIT_PORT_COARSE` 一起定死，探针两侧对照）：`d ≤ PORT_SNAP_COARSE` 吸附；
+ * `d > PORT_SNAP_COARSE` 就是自由连线（不吸、不猜）。30 > 26 是**有意的**：
+ * 先按 26 问「算不算点到」，没答上才按 30 问「手指想落哪一个」，次序见 `wirePortAt`。
+ * 只在粗指针启用 —— 鼠标档位下 `snapPortAt()` 直接返回 null，桌面行为与今天逐位相同。
+ */
+const PORT_SNAP_COARSE = 30;
 /** 鼠标的拖动起步阈值（px）：位移不超过它就仍算单击，不写回坐标（B4） */
 const DRAG_SLOP = 3;
 /** 手指/触控笔的起步阈值：手指按下的抖动远大于鼠标，3px 会把轻点误判成拖拽 */
@@ -196,6 +220,52 @@ export class Interaction {
   /** 世界坐标下的指针位置 —— 叠层（连线预览）画在世界空间，必须减 pan */
   worldMouse() { return this.toWorld(this.mouse); }
 
+  /**
+   * 指针档位 → 接线柱命中半径。**唯一的档位出口**（`engine.drawPorts` 的视觉档位
+   * 读同一条媒体查询，见那边的 `COARSE_MQ`）。
+   */
+  portTol() { return coarsePointer() ? HIT_PORT_COARSE : HIT_PORT; }
+
+  /**
+   * 命中接线柱的**唯一判据**：`onDown` 的两条分支（点选 / 起线）与 `onMove` 的高亮
+   * 全走这里。口径仍是 `world.pickPort` 的**顶层优先** —— 点选必须尊重叠放次序，
+   * 否则上层器材的端口会被压在下面的器材抢走。
+   *
+   * ⚠ 不许在别处再写一份 `world.pickPort(...)`：两份判据必然漂移。
+   *   `tools/port-affordance-probe.mjs` 直接数本文件里 `world.pickPort(` 的出现次数 == 1。
+   */
+  pickPortAt(w) { return this.app.world.pickPort(w.x, w.y, this.portTol()); }
+
+  /**
+   * 吸附：粗指针下把手指落点吸到**半径内最近**的那个接线柱；超出半径返回 null（自由连线）。
+   *
+   * ⚠ 与 `pickPortAt` 的分工与**重叠次序**（只允许一个答案，由 `wirePortAt` 一处实现）：
+   *   1) 先按命中半径问 `pickPortAt`（顶层优先）—— 它答了就用它，与桌面是同一条判据；
+   *   2) 它没答，才按吸附半径取**几何最近**的那个 —— 这一步才是「不好对准」的正解。
+   * ⚠ `kind !== 'wire'` 的端口（各容器的「插入口」，只读）不参与电路吸附：语义不同，
+   *   把只读口吸成导线端点，用户会以为插上了一个电插头。
+   */
+  snapPortAt(w) {
+    if (!coarsePointer()) return null;          // 鼠标档位：不吸附，桌面行为逐位不变
+    const world = this.app.world;
+    const r2 = PORT_SNAP_COARSE * PORT_SNAP_COARSE;
+    let best = null, bd = Infinity;
+    for (let ei = world.entities.length - 1; ei >= 0; ei--) {
+      const e = world.entities[ei];
+      for (let i = 0; i < e.ports.length; i++) {
+        if (e.ports[i].kind !== 'wire') continue;
+        const at = e.portWorldAt(i);
+        const d = (at.x - w.x) ** 2 + (at.y - w.y) ** 2;
+        // `d < bd`（严格更近才换人）：完全平局时留在先遍历到的那个 ⇒ 与 pickPort 同向（上层优先）
+        if (d <= r2 && d < bd) { bd = d; best = { ent: e, port: i, x: at.x, y: at.y }; }
+      }
+    }
+    return best;
+  }
+
+  /** 连线落点：**先精确命中、再吸附**。次序只有这一处，别处不许再写一份 */
+  wirePortAt(w) { return this.pickPortAt(w) || this.snapPortAt(w); }
+
   bind() {
     const cv = this.canvas;
     cv.addEventListener('pointerdown', (e) => this.onDown(e));
@@ -339,7 +409,7 @@ export class Interaction {
 
     if (this.tool === 'select') {
       // 1) 先看接线柱（方便接线/拖动）
-      const port = world.pickPort(w.x, w.y, HIT_PORT);
+      const port = this.pickPortAt(w);
       if (port && ev.shiftKey) { this.startWire(port); return; }
 
       // 2) 选中器材并开始拖动
@@ -391,7 +461,7 @@ export class Interaction {
     }
 
     if (this.tool === 'wire') {
-      const port = world.pickPort(w.x, w.y, HIT_PORT);
+      const port = this.wirePortAt(w);
       if (!port) { this.app.toast('请点击器材上的接线柱（小圆点）', 'warn'); return; }
       this.startWire(port);
       return;
@@ -600,7 +670,8 @@ export class Interaction {
     }
 
     // 端口高亮（只在真的换了目标时置脏，暂停时别被无意义的鼠标移动拖着重绘）
-    const port = world.pickPort(w.x, w.y, HIT_PORT);
+    // 正在连线时走 `wirePortAt`：高亮要跟着**吸附**走，否则用户看不见"会连到哪一个"
+    const port = this.wireFrom ? this.wirePortAt(w) : this.pickPortAt(w);
     const hot = port ? { ent: port.ent, port: port.port } : null;
     const prevHot = this.app.engine.hotPort;
     const hotChanged = !!prevHot !== !!hot ||
@@ -856,9 +927,19 @@ export class Interaction {
         g.setLineDash([6, 5]);
         g.beginPath();
         const m = this.worldMouse();
+        // 吸附生效时预览线直接画到「会连上的那个」接线柱上，并套一圈高亮 ——
+        // 手指要**看见**"就是它"，否则"吸到了"和"没吸到"在画面上没有区别。
+        // ⚠ 只在粗指针算：鼠标档位下 `win` 恒为 null ⇒ 预览线与今天逐位相同。
+        const win = coarsePointer() ? this.wirePortAt(m) : null;
+        const tip = win ? { x: win.x, y: win.y } : m;
         g.moveTo(p1.x, p1.y);
-        g.lineTo(m.x, m.y);
+        g.lineTo(tip.x, tip.y);
         g.stroke();
+        if (win) {
+          g.setLineDash([]);
+          g.strokeStyle = C.portHot;
+          g.beginPath(); g.arc(win.x, win.y, 11, 0, Math.PI * 2); g.stroke();
+        }
         g.restore();
       }
     }

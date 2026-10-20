@@ -6,7 +6,7 @@
 
 import { fmtA, fmtV, fmtW, fmtR } from '../physics/circuit.js';
 import { SP } from '../chemistry/species.js';
-import { menuCaps } from '../equipment/caps.js';
+import { menuCaps, applyCap } from '../equipment/caps.js';
 
 export class Inspector {
   constructor(rootEl, app) {
@@ -108,11 +108,10 @@ export class Inspector {
     // ——证据是 tools/inspector-caps-probe.mjs §① 的全量逐件对照。
     const caps = menuCaps(e);
     const btns = h('div', 'btns');
-    if (caps.toggle) {
-      btns.appendChild(btn('切换通断', 'acc', () => {
-        e.toggle(); this.render(); this.app.markDirty();
-      }));
-    }
+    // 「位 → 动作」的唯一定义处是 caps.js 的 applyCap（浮出控制条也调它）。第二个参数是本面板
+    // 自己的重绘：旧内联闭包里的 this.render() 原样传进去 —— 动作本身不再在这里定义一份。
+    const act = (key) => () => applyCap(this.app, e, key, () => this.render());
+    if (caps.toggle) btns.appendChild(btn('切换通断', 'acc', act('toggle')));
     if (caps.ignite) {
       // flame 是「热源」标记：加热板 / 水浴也带它，统一写「酒精灯」会让用户拿酒精灯的字样去点加热板。
       // 文案按器材自己的名字取词；名字里带「灯」的仍是点燃/熄灭（酒精灯本身逐字不变）。
@@ -120,17 +119,11 @@ export class Inspector {
       const verb = /灯/.test(noun)
         ? (e.props.lit ? '熄灭' : '点燃')
         : (e.props.lit ? '关闭' : '开启');
-      btns.appendChild(btn(verb + noun, 'chem', () => {
-        e.props.lit = !e.props.lit; this.render(); this.app.markDirty();
-      }));
+      btns.appendChild(btn(verb + noun, 'chem', act('ignite')));
     }
-    if (caps.empty) {
-      btns.appendChild(btn('倒空容器', '', () => {
-        e.vessel.empty(); this.render(); this.app.markDirty();
-      }));
-    }
-    if (caps.duplicate) btns.appendChild(btn('复制', '', () => this.app.duplicate(e)));
-    if (caps.remove) btns.appendChild(btn('删除', 'dgr', () => this.app.removeEntity(e)));
+    if (caps.empty) btns.appendChild(btn('倒空容器', '', act('empty')));
+    if (caps.duplicate) btns.appendChild(btn('复制', '', act('duplicate')));
+    if (caps.remove) btns.appendChild(btn('删除', 'dgr', act('remove')));
     frag.appendChild(btns);
 
     this.root.replaceChildren(frag);

@@ -282,7 +282,8 @@ const MUTANTS = [
     old: '    const ent = this.place(d, x, y);',
     neu: '    const ent = this.place(d);',
     // O2b（宽屏落位）与 O4（窄屏可见条落位）都在数「落在了算出来的那个点上」，跟着红是**应该**红的
-    breaks: ['W1', 'W2', 'O2b', 'O4'],
+    // G7/G8/G14 也断言「落点与松手点逐位相同」⇒ 坐标被毁时它们**必须**一起红（task-16 补声明）。
+    breaks: ['W1', 'W2', 'O2b', 'O4', 'G7', 'G8', 'G14'],
   },
   {
     // 第一版我写成 `if (false)`，方向搞反了：那等于**彻底不装长按**，
@@ -290,16 +291,19 @@ const MUTANTS = [
     // 所以改成把「滑动列表」的取消动作换成「进入拖拽」。
     id: 'M3-swipe-arms',
     why: '触屏纵向滑动也进拖拽（滑列表被误判成拖出 —— 这个闸门存在的全部理由）',
-    old: 'else if (ady > adx) this.endDrag();',
-    neu: 'else if (ady > adx) this.armDrag(st);',
-    breaks: ['G1', 'G4'],
+    // ⓘ task-16 重锚：纵向分支被改写成带位移条件的 `} else if (ady > adx && far > SLOP) {`
+    //   （旧锚 `else if (ady > adx) this.endDrag();` 已不存在）。语义没变：仍然只改「取消」这一个动作。
+    old: '        } else if (ady > adx && far > SLOP) {\n          this.endDrag();',
+    neu: '        } else if (ady > adx && far > SLOP) {\n          this.armDrag(st);',
+    breaks: ['G1', 'G4', 'G9', 'G10'],
   },
   {
     id: 'M4-ghost-leak',
     why: 'pointercancel 后不收幽灵（屏幕上留一个永远挂着的影子）',
     old: '    if (this.ghost) { this.ghost.remove(); this.ghost = null; }',
     neu: '',
-    breaks: ['C2', 'O1', 'O3b'],   // O1 与 O3b 的判据里都含「收干净」，它们跟着红是**应该**红的
+    // task-16 补声明：G11/G12 的判据里也含「无残留」（ghost/halo/drag 全清）⇒ 必须一起红。
+    breaks: ['C2', 'O1', 'O3b', 'G11', 'G12'],   // O1 与 O3b 的判据里都含「收干净」，它们跟着红是**应该**红的
   },
   {
     id: 'M5-ignore-pref',
@@ -313,7 +317,8 @@ const MUTANTS = [
     why: '不判「松手在不在画布上」，拖回器材栏也照样投放',
     old: '    if (!(cx >= r.left && cy >= r.top && cx <= r.left + r.width && cy <= r.top + r.height)) return false;',
     neu: '',
-    breaks: ['O1'],
+    // task-16 补声明：去掉画布矩形这道界之后，「甩出画布」也成了合法落点 ⇒ O6 的③ 没有 toast 了，必须红。
+    breaks: ['O1', 'O6'],
   },
   {
     // 与 M6 分开：M6 只拆「画布边界」这一半，这条只拆「被器材栏盖住」那一半。
@@ -324,14 +329,18 @@ const MUTANTS = [
     old: '    return !this.overPalette(cx, cy);',
     neu: '    return true;',
     // O5 也跟着红是**应该**的：环与投放共用判据，判据被拆掉后环也不再区分抽屉/画布
-    breaks: ['O2', 'O3', 'O5'],
+    // task-16 补声明：器材栏那一半判据没了 ⇒ ②（拖回器材栏）不再取消、也不再说话 ⇒ O6 必须红。
+    breaks: ['O2', 'O3', 'O5', 'O6'],
   },
   {
     id: 'M7-double-add',
     why: '拖出后不吃掉那次 click（一次拖动落两件器材）',
     old: '    this.suppressClick = true;',
     neu: '',
-    breaks: ['D2'],
+    // task-16 补声明：suppressClick 失效 ⇒ 松手后浏览器补发的那次 click 会**多放一件**，
+    // 而 G11/G12/G13 现在都会模拟那次 click 并断言「恰好 1 件」⇒ 它们必须一起红。
+    //（这正是把「补发 click」补进测例换来的收益：以前这几条只断言「有落件」，多放一件照样绿。）
+    breaks: ['D2', 'G11', 'G12', 'G13'],
   },
   {
     // 拆成两条，因为「挡住浏览器滚动」这件事有两个独立的失败面：
@@ -363,9 +372,12 @@ const MUTANTS = [
     // 单独断言、而不是混进 O2 的原因。
     id: 'M11-no-cancel-toast',
     why: '取消时不说话了（取消本身仍然生效，但用户看到的是「拖了半天什么都没发生」）',
-    old: '    this.cancelToast(\n      ev && ev.clientX !== undefined ? ev.clientX : st.x,\n      ev && ev.clientY !== undefined ? ev.clientY : st.y,\n    );',
+    // ⓘ task-16 重锚：取消分支重写成三分语义后，松手点先算进 upX/upY，调用变成一行
+    //   `this.cancelToast(upX, upY);`（旧的三行锚已不存在）。
+    //   O6 也跟着红是**应该**的：②③ 两条文案都靠这个调用发出去，删掉它等于「取消又变回静默」。
+    old: '    this.cancelToast(upX, upY);',
     neu: '',
-    breaks: ['O3'],
+    breaks: ['O3', 'O6'],
   },
   {
     // 真机症状的直接回归点：横向即时入口被删掉 ⇒ 退回「长按唯一入口」，
@@ -374,16 +386,20 @@ const MUTANTS = [
     //   所以用 `if (false)` 而不是删除整行。
     id: 'M12-no-horizontal-entry',
     why: '横向意图不再即时成立（退回长按唯一入口）—— 真机上用户看到的就是「仍然无法拖出」',
-    old: '          if (adx > ady) this.armDrag(st);',
-    neu: '          if (false) this.armDrag(st);',
-    breaks: ['G3', 'G3b'],
+    // ⓘ task-16 重锚：横向分支的条件变成了 `adx > ady && far > AXIS_SLOP`（旧锚已不存在）。
+    //   `neu` 仍写成 `if (false) {` 以保住 if/else 骨架（置空会让后面的 `else if` 变成语法错误）。
+    old: '        if (adx > ady && far > AXIS_SLOP) {',
+    neu: '        if (false) {',
+    breaks: ['G3', 'G3b', 'G7', 'G7b', 'G8'],
   },
   {
     id: 'M13-axis-applies-to-mouse',
     why: '把轴向锁定也加到鼠标/笔上（桌面**纵向**拖出被关掉，而画布就在列表右下）',
     old: '      } else if (far > DRAG_SLOP) {\n        this.armDrag(st);\n      }',
     neu: '      } else if (far > DRAG_SLOP && Math.abs(dx) > Math.abs(dy)) {\n        this.armDrag(st);\n      }',
-    breaks: ['G5'],
+    // G13 也跟着红是**应该**的：它就是为「鼠标分支有没有被套上轴向规则」立的**对照**断言
+    //（触屏纵向 5px 不成立、鼠标纵向 5px 必须成立）⇒ 轴向规则一旦扩到鼠标，它必须红。
+    breaks: ['G5', 'G13'],
   },
   {
     id: 'M14-open-drawer-cancels-all',
@@ -394,7 +410,8 @@ const MUTANTS = [
     // S2 也跟着红同样是**应该**的，而且是个独立佐证：S2 那条（抽屉开着、鼠标拖到
     // x=360 的可见条上）本来就是「抽屉模式可见条要能落位」的测例 —— 它先于今天这条判据存在，
     // 说明这条性质**早就是承重的**，不是我今天新加的口径。
-    breaks: ['O4', 'O5', 'S2'],
+    // task-16 补声明：抽屉开着就一律判成「落在器材栏上」⇒ ②不再说话、③文案也跟着错 ⇒ O6 必须红。
+    breaks: ['O4', 'O5', 'S2', 'O6'],
   },
   {
     id: 'M15-halo-canvas-only',
@@ -408,7 +425,59 @@ const MUTANTS = [
     why: '长按 550ms 这条入口被删掉（「按住再慢慢拖」的人拖不出来）',
     old: '        if (this.drag === st && !st.armed) this.armDrag(st);',
     neu: '        if (false && this.drag === st && !st.armed) this.armDrag(st);',
-    breaks: ['G1b', 'G6'],
+    // task-16 补声明：G14 断言「45° 只有长按这一条路」⇒ 长按入口被删它必须红。
+    breaks: ['G1b', 'G6', 'G14'],
+  },
+  {
+    id: 'M17-axis-slop-back-to-10',
+    why: '横向成立阈值放宽回 SLOP(10)：抢不到浏览器认领纵向滚动之前，斜向起手在真机上又会丢',
+    old: 'export const AXIS_SLOP = 4;',
+    neu: 'export const AXIS_SLOP = 10;',
+    // G7/G8/G9/G10/G13/G14 用的都是**单次大位移**，阈值改成 10 照样成立 ⇒ 它们**量不出阈值本身**；
+    // 只有 G3b（两侧夹取）与 G7b（逐 1px 步进量出第几 px）能把 4 与 10 分开。这正是那两条存在的理由。
+    breaks: ['G3b', 'G7b'],
+  },
+  {
+    id: 'M19-vertical-threshold-shrunk',
+    why: '纵向取消阈值压到 AXIS_SLOP(4)：按住长按时那 5~8px 的自然漂移会被当成「在滑列表」，长按入口被掐死',
+    old: '        } else if (ady > adx && far > SLOP) {',
+    neu: '        } else if (ady > adx && far > AXIS_SLOP) {',
+    breaks: ['G10'],
+  },
+  {
+    id: 'M20-no-retreat-for-in-place-release',
+    why: '原地抖动松手不给退路（点一下变成「什么都没发生 + 一条误报 toast」—— task-16 修掉的那个真回归）',
+    // ⓘ task-16：锚只能取**第一行** —— 那条 if 与 `this.place(st.d);` 之间隔着解释性注释，
+    //   三行连续文本在 raw 里根本不存在（夹具按 raw 计数 ⇒ raw=0 判「没落到代码行上」）。
+    old: '    if (this.overPalette(upX, upY) && !st.leftPalette) {',
+    neu: '    if (false) {',
+    // 它该点名的是「**从没离开过**器材栏」那一类：G11/G12（抖动点击）与 O6 的①。
+    // 而 O2/O3 那条「离开又回来」**不该**红 —— 它们的 leftPalette 早已是 true，根本不走这个分支。
+    // task-16 补声明：G13 那条鼠标对照也走这条退路（鼠标 5px 成立拖拽、松手仍在器材栏内）⇒ 退路没了它也红。
+    breaks: ['G11', 'G12', 'O6', 'G13'],
+  },
+  {
+    id: 'M23-retreat-ungated',
+    why: '退路不设条件（任何没落下去的松手都静默落一件）⇒「拖出去又拖回来」不再取消、也不再说出来',
+    old: '    if (this.overPalette(upX, upY) && !st.leftPalette) {',
+    neu: '    if (true) {',
+    // 与 M20 正好是**这道闸门的两侧**：M20 关掉退路（原地抖动那类红），M23 让退路失效条件（取消语义那类红）。
+    breaks: ['O1', 'O2', 'O3', 'O6'],
+  },
+  {
+    id: 'M21-conflate-the-two-empty-causes',
+    why: '把 `w` 为空的两种原因合并（只看 leftPalette 闩锁）⇒「甩出画布」被当成点击、反而落一件',
+    old: '    if (this.overPalette(upX, upY) && !st.leftPalette) {',
+    neu: '    if (!st.leftPalette) {',
+    // O1 是唯一一条「全程没离开器材栏、但松手在画布外」的测例 ⇒ 它必须红；O6 的③同理（那条 toast 消失了）。
+    breaks: ['O1', 'O6'],
+  },
+  {
+    id: 'M22-swap-cancel-toast-wording',
+    why: '两条取消文案互换（「甩出画布」说成「落在器材栏上」）—— 有 toast 但说错了是哪一条，只数条数的测例看不出来',
+    old: '    this.app.toast(this.overPalette(cx, cy)',
+    neu: '    this.app.toast(true',
+    breaks: ['O6'],
   },
 ];
 
@@ -691,17 +760,22 @@ async function runAll(PaletteClass, api, srcText) {
     ok('G3', armedFast && s3.calls.addEntity.length === 1 && waited < api.LONG_PRESS_MS,
       `横向划走 ⇒ **不等长按**（只等了 ${waited}ms，长按阈值 ${api.LONG_PRESS_MS}ms）就进入拖拽并落位（armed=${armedFast}，addEntity ${s3.calls.addEntity.length} 次）`);
 
-    // 4-5 横向阈值就是 SLOP：9px 不成立、12px 成立（既不许放宽，也不许收紧）
+    // 4-5 横向成立阈值 = AXIS_SLOP(4)，两侧夹取：3px 不成立、5px 成立（既不许放宽，也不许收紧）
+    // ⚠ 这条断言**本轮被改写过**，理由是它钉的正是本任务要改的那个数：
+    //   旧版写「横移 9px 不成立 / 12px 成立」，钉的是 SLOP(10)；task-16 把横向成立阈值压到
+    //   AXIS_SLOP(4)（理由：必须抢在浏览器认领纵向滚动、发 pointercancel 之前下判断），
+    //   于是 9px 已经成立、旧版必红。改它是让它继续钉住**当前**那个数，
+    //   不是为了让红的变绿 —— 它现在两侧夹住 4，照样不许任何人放宽或收紧。
     const s4 = mkScene(PaletteClass);
     const row4 = firstRow(s4.list);
     row4.fire('pointerdown', pev('pointerdown', { x: 100, y: 300, pt: 'touch' }));
-    row4.fire('pointermove', pev('pointermove', { x: 109, y: 300, pt: 'touch' }));   // 9px < SLOP
-    const armed9 = !!(s4.pal.drag && s4.pal.drag.armed);
-    row4.fire('pointermove', pev('pointermove', { x: 112, y: 300, pt: 'touch' }));   // 12px > SLOP
-    const armed12 = !!(s4.pal.drag && s4.pal.drag.armed);
-    row4.fire('pointercancel', pev('pointercancel', { x: 112, y: 300, pt: 'touch' }));
-    ok('G3b', !armed9 && armed12,
-      `横向阈值 = SLOP(${api.SLOP}px)：横移 9px 不成立（armed=${armed9}）、12px 成立（armed=${armed12}）`);
+    row4.fire('pointermove', pev('pointermove', { x: 103, y: 300, pt: 'touch' }));   // 3px < AXIS_SLOP
+    const armed3 = !!(s4.pal.drag && s4.pal.drag.armed);
+    row4.fire('pointermove', pev('pointermove', { x: 105, y: 300, pt: 'touch' }));   // 5px > AXIS_SLOP
+    const armed5 = !!(s4.pal.drag && s4.pal.drag.armed);
+    row4.fire('pointercancel', pev('pointercancel', { x: 105, y: 300, pt: 'touch' }));
+    ok('G3b', !armed3 && armed5,
+      `横向成立阈值 = AXIS_SLOP(${api.AXIS_SLOP}px)：横移 3px 不成立（armed=${armed3}）、5px 成立（armed=${armed5}）`);
 
     // 4-6 纵向滑动 ⇒ 待定被**取消**（不只是「没成立」）：手势整条还给列表。
     // 这是这个闸门存在的全部理由，变异体 M3 把它钉死。
@@ -736,6 +810,131 @@ async function runAll(PaletteClass, api, srcText) {
     row7.fire('pointerup', pev('pointerup', { x: 200, y: 560, pt: 'touch' }));
     ok('G6', armedHold7 && s7.calls.addEntity.length === 1,
       `长按 ${api.LONG_PRESS_MS}ms 成立后再**纵向**拖（横 100/纵 260）⇒ 仍然落位（armed=${armedHold7}，addEntity ${s7.calls.addEntity.length} 次）—— 长按入口没被轴向规则吃掉`);
+
+    // ──────────────────────────────────────────────────────────────
+    // 4-9 ⚠ task-16 的核心：**斜向起手不能被浏览器抢走手势**。
+    //   浏览器只要认领了纵向滚动就会对页面发 pointercancel，之后一个 pointermove 都收不到；
+    //   它认领的**时机**由它自己的手势 slop 决定（那个数值我**没有实测**，也不好在真机上量）。
+    //   所以判据层必须**抢在它之前**下判断 —— 这就是 AXIS_SLOP(4) 比 SLOP(10) 小的唯一理由：
+    //   SLOP 大是为了**长按**（手指按住 550ms 难免漂 5~8px，收紧它就把长按入口掐死了），
+    //   轴向起手要抢在浏览器之前，就必须小。两个数赛的是两个不同的东西，不是同一个数的手松手紧。
+    //   G7 用**时间口径**、G7b 用**距离口径**，各自把「先手」钉住一遍。
+
+    // 4-9a 用户那条路线：30° 斜向（adx:ady = 1.73:1）单次位移、只等 30ms ⇒ 成立并落位。
+    //   30ms 远小于长按 ${api.LONG_PRESS_MS}ms ⇒ 这一件**只可能**是轴向判据落下的，不可能是长按。
+    const s8 = mkScene(PaletteClass);
+    const row8 = firstRow(s8.list);
+    row8.fire('pointerdown', pev('pointerdown', { x: 100, y: 200, pt: 'touch' }));
+    await sleep(30);
+    row8.fire('pointermove', pev('pointermove', { x: 340, y: 339, pt: 'touch' }));   // 横 240 / 纵 139 = 1.73:1
+    const armedDiag = !!(s8.pal.drag && s8.pal.drag.armed);
+    row8.fire('pointerup', pev('pointerup', { x: 340, y: 339, pt: 'touch' }));
+    const c8 = s8.calls.addEntity[s8.calls.addEntity.length - 1];
+    ok('G7', armedDiag && s8.calls.addEntity.length === 1 && !!c8 && c8.x === snap(340) && c8.y === snap(339),
+      `斜向 30°（横 240/纵 139 = 1.73:1）起手，只等 30ms（长按要 ${api.LONG_PRESS_MS}ms）⇒ 成立（armed=${armedDiag}）并落位到 (${c8 && c8.x},${c8 && c8.y})`);
+
+    // 4-9b **距离口径**：沿同一条 30° 射线按总位移 1px 一级步进，量「成立发生在第几 px」。
+    //   真实手指的事件流本来就是 1~3px 一级（60~120Hz），所以这比「一次大跳」更贴近真机。
+    //   ⚠ 上限写**字面 6**，绝不写成 AXIS_SLOP+2：那样就成了用被测常量推导自己的判据，
+    //   阈值被改成 10 时上限跟着变成 12，断言反而全绿、量不出任何东西。
+    //   这个数就是「先手余量」：它必须明显小于浏览器的手势 slop（约 8px 量级）才抢得到。
+    const s9 = mkScene(PaletteClass);
+    const row9 = firstRow(s9.list);
+    row9.fire('pointerdown', pev('pointerdown', { x: 100, y: 200, pt: 'touch' }));
+    let armAt = 0;
+    for (let t = 1; t <= 24 && !armAt; t++) {
+      const px = 100 + t * Math.cos(Math.PI / 6);
+      const py = 200 + t * Math.sin(Math.PI / 6);
+      row9.fire('pointermove', pev('pointermove', { x: px, y: py, pt: 'touch' }));
+      if (s9.pal.drag && s9.pal.drag.armed) armAt = t;      // 步长就是总位移（cos²+sin²=1）
+    }
+    row9.fire('pointercancel', pev('pointercancel', { x: 100, y: 200, pt: 'touch' }));
+    ok('G7b', armAt > 0 && armAt <= 6,
+      `30° 射线逐 1px 步进 ⇒ 成立发生在第 **${armAt}px**（阈值 AXIS_SLOP=${api.AXIS_SLOP}，上限取字面 6）—— 这就是抢在浏览器认领之前的余量`);
+
+    // 4-9c 三组角度对照：分界在 1:1 那条线上，横向侧全部成立并落位。
+    //   1.05:1 离分界线最近（43.6°）、1.73:1 是用户那条 30°、5:1 几乎纯横向（78.7°）。
+    const ANG = [[250, 238, '1.05:1'], [240, 139, '1.73:1'], [300, 60, '5:1']];
+    const angRead = [];
+    let angAll = true;
+    for (const [ddx, ddy, tag] of ANG) {
+      const sa = mkScene(PaletteClass);
+      const ra = firstRow(sa.list);
+      ra.fire('pointerdown', pev('pointerdown', { x: 100, y: 200, pt: 'touch' }));
+      ra.fire('pointermove', pev('pointermove', { x: 100 + ddx, y: 200 + ddy, pt: 'touch' }));
+      const armA = !!(sa.pal.drag && sa.pal.drag.armed);
+      ra.fire('pointerup', pev('pointerup', { x: 100 + ddx, y: 200 + ddy, pt: 'touch' }));
+      const ca = sa.calls.addEntity[sa.calls.addEntity.length - 1];
+      const goodA = armA && sa.calls.addEntity.length === 1 && !!ca
+        && ca.x === snap(100 + ddx) && ca.y === snap(200 + ddy);
+      angAll = angAll && goodA;
+      angRead.push(`${tag}⇒${armA ? '成立' : '未成立'}/落${sa.calls.addEntity.length}件(${ca && ca.x},${ca && ca.y})`);
+    }
+    ok('G8', angAll, `三组角度对照（横向侧）全部成立并落位：${angRead.join('  ')}`);
+
+    // 4-9d 分界的**另一侧**：纵向 1:1.73（横 100/纵 173）⇒ 不成立、待定被取消、一件都不落。
+    //   与 4-9c 合起来才是「分界在哪一侧」的完整证明（只证一侧等于没证）。
+    const s10 = mkScene(PaletteClass);
+    const row10 = firstRow(s10.list);
+    row10.fire('pointerdown', pev('pointerdown', { x: 100, y: 200, pt: 'touch' }));
+    row10.fire('pointermove', pev('pointermove', { x: 200, y: 373, pt: 'touch' }));   // 横 100 / 纵 173
+    const armedV2 = !!(s10.pal.drag && s10.pal.drag.armed);
+    const clearedV2 = s10.pal.drag === null;
+    row10.fire('pointerup', pev('pointerup', { x: 200, y: 373, pt: 'touch' }));
+    ok('G9', !armedV2 && clearedV2 && s10.calls.addEntity.length === 0,
+      `纵向 1:1.73（横 100/纵 173）⇒ 未成立（armed=${armedV2}）、待定被取消（drag ${clearedV2 ? '= null ✓' : '还在 ✗'}）、一件都没落（${s10.calls.addEntity.length} 件）—— 分界在 1:1 那条线上`);
+
+    // 4-9e 纵向漂移必须**宽容**：`AXIS_SLOP < far ≤ SLOP` 之间**不取消**待定。
+    //   否则按住 550ms 那条入口会被一起掐死（手指按住难免漂 5~8px）。
+    //   7px 落在 (4,10] 里 ⇒ 待定还在；12px > SLOP ⇒ 才取消。变异体把纵向阈值改成 AXIS_SLOP 会让这条红。
+    const s11 = mkScene(PaletteClass);
+    const row11 = firstRow(s11.list);
+    row11.fire('pointerdown', pev('pointerdown', { x: 100, y: 200, pt: 'touch' }));
+    row11.fire('pointermove', pev('pointermove', { x: 100, y: 207, pt: 'touch' }));   // 纵 7px：> AXIS_SLOP，≤ SLOP
+    const pending7 = s11.pal.drag !== null && !(s11.pal.drag && s11.pal.drag.armed);
+    row11.fire('pointermove', pev('pointermove', { x: 100, y: 212, pt: 'touch' }));   // 纵 12px：> SLOP
+    const cleared12 = s11.pal.drag === null;
+    row11.fire('pointercancel', pev('pointercancel', { x: 100, y: 212, pt: 'touch' }));
+    ok('G10', pending7 && cleared12,
+      `纵向漂移 7px（AXIS_SLOP=${api.AXIS_SLOP} < 7 ≤ SLOP=${api.SLOP}）时待定**还在**（pending=${pending7}）；漂到 12px（> SLOP）才取消（drag ${cleared12 ? '= null ✓' : '还在 ✗'}）`);
+
+    // 4-9f **鼠标分支的对照断言**（不许靠「我没动它」这句话）：轴向锁定只作用于触屏，
+    //   桌面用户本来就会**纵向**把器材拖到画布（画布在器材栏的右下方），所以鼠标必须照旧。
+    //   这里用**最小的对照位移 5px** 去问两条方向：都成立，才说明鼠标走的是它自己那条
+    //   DRAG_SLOP(4) 判据、没被套上触屏的轴向规则（触屏下纵向 5px 是**不成立**的 —— 见 G10）。
+    const mouseRead = [];
+    let mouseAll = true;
+    for (const [mdx, mdy] of [[5, 0], [0, 5]]) {
+      const sm = mkScene(PaletteClass);
+      const rm = firstRow(sm.list);
+      rm.fire('pointerdown', pev('pointerdown', { x: 100, y: 200, pt: 'mouse' }));
+      rm.fire('pointermove', pev('pointermove', { x: 100 + mdx, y: 200 + mdy, pt: 'mouse' }));
+      const armM = !!(sm.pal.drag && sm.pal.drag.armed);
+      rm.fire('pointerup', pev('pointerup', { x: 100 + mdx, y: 200 + mdy, pt: 'mouse' }));
+      rm.fire('click', {});
+      const nm = sm.calls.addEntity.length;
+      mouseAll = mouseAll && armM && nm === 1;
+      mouseRead.push(`横${mdx}/纵${mdy}⇒armed=${armM}/${nm}件`);
+    }
+    ok('G13', mouseAll,
+      `鼠标对照：5px 小位移**两个方向都成立**（${mouseRead.join('，')}）⇒ 鼠标仍走自己的 DRAG_SLOP 判据、没被套上触屏轴向规则；且各自恰好落 1 件`);
+
+    // 4-9g 恰好 45°（adx == ady）**两条分支都不进** ⇒ 不猜方向、待定；长按 550ms 是它唯一的路。
+    //   这条同时钉住三件事：45° 不成立轴向拖拽、待定不被误取消、长按入口逐字未变（成立后照旧落位）。
+    const s12 = mkScene(PaletteClass);
+    const row12 = firstRow(s12.list);
+    row12.fire('pointerdown', pev('pointerdown', { x: 100, y: 200, pt: 'touch' }));
+    row12.fire('pointermove', pev('pointermove', { x: 106, y: 206, pt: 'touch' }));   // 恰好 45°，总位移 8.49px
+    const armed45 = !!(s12.pal.drag && s12.pal.drag.armed);
+    const pending45 = s12.pal.drag !== null;
+    await sleep(api.LONG_PRESS_MS + 60);
+    const armedHold45 = !!(s12.pal.drag && s12.pal.drag.armed);
+    row12.fire('pointermove', pev('pointermove', { x: 400, y: 300, pt: 'touch' }));  // 成立后拖到画布上
+    row12.fire('pointerup', pev('pointerup', { x: 400, y: 300, pt: 'touch' }));
+    const c12 = s12.calls.addEntity[s12.calls.addEntity.length - 1];
+    ok('G14', !armed45 && pending45 && armedHold45 && s12.calls.addEntity.length === 1
+        && !!c12 && c12.x === snap(400) && c12.y === snap(300),
+      `恰好 45°（6/6）⇒ 轴向判据不猜方向（armed=${armed45}）、待定仍在（pending=${pending45}）；按住 ${api.LONG_PRESS_MS}ms ⇒ 成立（armed=${armedHold45}）并落位到 (${c12 && c12.x},${c12 && c12.y})`);
   }
 
   // ── ⑤ 收尾：pointercancel / 画布之外放手 ──
@@ -757,6 +956,10 @@ async function runAll(PaletteClass, api, srcText) {
     const s2 = mkScene(PaletteClass);
     const row2 = firstRow(s2.list);
     row2.fire('pointerdown', pev('pointerdown', { x: 100, y: 200, pt: 'mouse' }));
+    // 松手点在 (900,700) = **画布之外**，注意它**不是**「落在器材栏上」那一种：
+    // 全程都没离开过器材栏（150,220 落在默认 320×500 矩形内）⇒ 只看 leftPalette 闩锁
+    // 会把它误判成点击、反而落一件。所以判据必须是**松手时刻那个点**：
+    // overPalette(up) 为假 ⇒ 走「画布之外」那条文案、照旧取消。这条测例就是为这个洞存在的。
     row2.fire('pointermove', pev('pointermove', { x: 150, y: 220, pt: 'mouse' }));
     row2.fire('pointerup', pev('pointerup', { x: 900, y: 700, pt: 'mouse' }));   // 画布 (800×600) 之外
     ok('O1', s2.calls.addEntity.length === 0 && !s2.pal.drag && !s2.pal.ghost,
@@ -856,7 +1059,12 @@ async function runAll(PaletteClass, api, srcText) {
     narrow.palHost.setAttribute('data-open', '');   // 抽屉模式 = 抽屉是开着的
     const rn = firstRow(narrow.list);
     rn.fire('pointerdown', pev('pointerdown', { x: 100, y: 300, pt: 'mouse' }));
-    rn.fire('pointermove', pev('pointermove', { x: PX, y: PY, pt: 'mouse' }));
+    // ⚠ 本轮把判据改成「这趟手势有没有**离开过**器材栏」（而不是走了多远）：
+    //   从没离开过 ⇒ 那是点击（落 1 件、不弹 toast，与抖动多大无关）；
+    //   离开过又回来 ⇒ 才是 cancelToast 该管的场景。所以这个测例必须先**离开**抽屉再拖回来，
+    //   否则它描述的本来就是一次点击。松手点与期望值（0 件 + 1 条 toast）一个字没改。
+    rn.fire('pointermove', pev('pointermove', { x: 350, y: 300, pt: 'mouse' }));   // 离开抽屉（落在右侧可见条上）
+    rn.fire('pointermove', pev('pointermove', { x: PX, y: PY, pt: 'mouse' }));     // 再拖回来
     rn.fire('pointerup', pev('pointerup', { x: PX, y: PY, pt: 'mouse' }));
     ok('O2', narrow.calls.addEntity.length === 0,
       `松手在器材栏矩形内（(${PX},${PY}) 落在 320 宽的抽屉上）⇒ 取消，一件都没落（addEntity ${narrow.calls.addEntity.length} 次）`);
@@ -865,6 +1073,87 @@ async function runAll(PaletteClass, api, srcText) {
       `取消时**说出来**了（toast ${narrow.calls.toast.length} 条：${tt || '（无）'}）`);
     ok('O3b', !narrow.pal.ghost && !narrow.pal.halo && !narrow.pal.drag,
       `取消后幽灵/环/拖拽态全清（ghost=${!!narrow.pal.ghost} halo=${!!narrow.pal.halo} drag=${!!narrow.pal.drag}）`);
+
+    // 9-1c ⚠ 本轮回归的守卫：**点一下时手指横向抖 5~20px 必须仍然恰好落 1 件、0 条 toast**。
+    //   把横向成立阈值从 SLOP(10) 压到 AXIS_SLOP(4) 之后，这些抖动会**走进拖拽路径**
+    //   （旧阈值下它们压根不成立），而松手点仍在器材栏内 ⇒ 若 onRowUp 里没有那条退路，
+    //   表现就是「点了一下、什么都没发生、还弹一条 warn」——
+    //   这正是这条判据要防的病，也是本轮唯一一个**真回归**。
+    //   断言只看**最终结果**（几件、几条 toast、有无残留），不看走了哪条路径：
+    //   用户不关心路径，而且「判据换舞台」恰好是这条要防的病 ⇒ armed 只作读数印在消息里。
+    const DRIFT = [5, 9, 14, 20];            // 两侧都覆盖：5/9 在旧阈值 10 以下、14/20 在它以上
+    const driftRead = [];
+    let driftAll = true;
+    for (const j of DRIFT) {
+      const sj = mkScene(PaletteClass);
+      const rj = firstRow(sj.list);
+      rj.fire('pointerdown', pev('pointerdown', { x: 100, y: 200, pt: 'touch' }));
+      rj.fire('pointermove', pev('pointermove', { x: 100 + j, y: 200, pt: 'touch' }));   // 纯横向抖动
+      const armedJ = !!(sj.pal.drag && sj.pal.drag.armed);
+      rj.fire('pointerup', pev('pointerup', { x: 100 + j, y: 200, pt: 'touch' }));
+      // 松手后浏览器会补发一次 click（真实行为）：成立过拖拽的那条路由 suppressClick 吃掉它，
+      // 没成立拖拽的那条路则靠它落件。补上这一下，断言才同时守住「少落一件」与「多落一件」。
+      rj.fire('click', {});
+      const nj = sj.calls.addEntity.length, tj = sj.calls.toast.length;
+      const cleanJ = !sj.pal.ghost && !sj.pal.halo && !sj.pal.drag;
+      driftAll = driftAll && nj === 1 && tj === 0 && cleanJ;
+      driftRead.push(`${j}px⇒${nj}件/${tj}toast/${armedJ ? '走过拖拽' : '未成立拖拽'}`);
+    }
+    ok('G11', driftAll, `横向抖动点击只准落 1 件、0 条 toast、无残留（${driftRead.join('，')}）`);
+
+    // 9-1d 对角抖动（adx≈ady）：三种分类各一组 —— 恰好相等(两条分支都不进)、略横向(走拖拽)、
+    //   略纵向(取消待定)。三组的**结果必须完全一样**：恰好 1 件、0 条 toast。
+    //   这是「无论走哪条路径都只准落 1 件」的正面证明，也钉住「恰好 45° 不猜方向」没被顺手改掉。
+    const DIAG = [[6, 6], [7, 6], [6, 7], [12, 12]];
+    const diagRead = [];
+    let diagAll = true;
+    for (const [jx, jy] of DIAG) {
+      const sd = mkScene(PaletteClass);
+      const rd = firstRow(sd.list);
+      rd.fire('pointerdown', pev('pointerdown', { x: 100, y: 200, pt: 'touch' }));
+      rd.fire('pointermove', pev('pointermove', { x: 100 + jx, y: 200 + jy, pt: 'touch' }));
+      const armD = !!(sd.pal.drag && sd.pal.drag.armed);
+      rd.fire('pointerup', pev('pointerup', { x: 100 + jx, y: 200 + jy, pt: 'touch' }));
+      rd.fire('click', {});     // 同 9-1c：浏览器补发的 click 也要模拟，否则「从没成立拖拽」那几组等于没测
+      const nd = sd.calls.addEntity.length, td = sd.calls.toast.length;
+      diagAll = diagAll && nd === 1 && td === 0 && !sd.pal.ghost && !sd.pal.drag;
+      diagRead.push(`${jx}:${jy}⇒${nd}件/${td}toast/${armD ? '走拖拽' : '未成立'}`);
+    }
+    ok('G12', diagAll, `对角抖动点击（adx≈ady）同样只准落 1 件、0 条 toast（${diagRead.join('，')}）`);
+
+    // 9-1e 三种情况的 toast **文案各不相同**，必须逐条钉住。
+    //   只断言「有 toast」是不够的：②（拖回器材栏）与③（甩出画布）的文案可以互换而全绿 ——
+    //   那正是「判据选错舞台」。注意②的文案里**也有「画布」二字**，所以只能按前缀区分。
+    //   变异体「把③的文案换成器材栏那条」会让这条红，而 O1/O3 照样绿 —— 正是它存在的理由。
+    const t1 = (() => {                     // ① 在栏上松手 + 从没离开过 ⇒ 一次点击，不该有 toast
+      const s = mkScene(PaletteClass);
+      const r = firstRow(s.list);
+      r.fire('pointerdown', pev('pointerdown', { x: 100, y: 200, pt: 'touch' }));
+      r.fire('pointermove', pev('pointermove', { x: 116, y: 200, pt: 'touch' }));
+      r.fire('pointerup', pev('pointerup', { x: 116, y: 200, pt: 'touch' }));
+      return s.calls.toast.slice();
+    })();
+    const t2 = (() => {                     // ② 出去再回来、在器材栏上松手 ⇒ 「落在器材栏上」
+      const s = mkScene(PaletteClass, { paletteRect: { left: 0, top: 0, width: 320, height: 600 } });
+      const r = firstRow(s.list);
+      r.fire('pointerdown', pev('pointerdown', { x: 100, y: 300, pt: 'mouse' }));
+      r.fire('pointermove', pev('pointermove', { x: 350, y: 300, pt: 'mouse' }));
+      r.fire('pointermove', pev('pointermove', { x: 300, y: 250, pt: 'mouse' }));
+      r.fire('pointerup', pev('pointerup', { x: 300, y: 250, pt: 'mouse' }));
+      return s.calls.toast.slice();
+    })();
+    const t3 = (() => {                     // ③ 甩出画布（不在栏上、也不在画布上）⇒ 「画布之外」
+      const s = mkScene(PaletteClass);
+      const r = firstRow(s.list);
+      r.fire('pointerdown', pev('pointerdown', { x: 100, y: 200, pt: 'mouse' }));
+      r.fire('pointermove', pev('pointermove', { x: 150, y: 220, pt: 'mouse' }));
+      r.fire('pointerup', pev('pointerup', { x: 900, y: 700, pt: 'mouse' }));
+      return s.calls.toast.slice();
+    })();
+    const w2 = t2[0] || '（无）', w3 = t3[0] || '（无）';
+    ok('O6', t1.length === 0 && t2.length === 1 && t3.length === 1
+        && w2.startsWith('落在器材栏上') && w3.startsWith('松手点不在画布上'),
+      `三种情况各弹哪条 toast：①原地抖动⇒${t1.length} 条${t1[0] ? `「${t1[0]}」` : '（无）'}；②拖回器材栏⇒「${w2}」；③甩出画布⇒「${w3}」`);
 
     // 9-1b 窄屏抽屉模式下，右侧那条**可见画布条**必须仍然能落位。
     //      几何取自真机：视口 390 宽、抽屉占 0–320 ⇒ 可见条只剩 70px（x ∈ (320,390]）。
@@ -921,7 +1210,7 @@ async function runAll(PaletteClass, api, srcText) {
 
 const real = await loadPalette(srcRaw, 'real');
 const api = {
-  SNAP: real.SNAP, LONG_PRESS_MS: real.LONG_PRESS_MS, SLOP: real.SLOP,
+  SNAP: real.SNAP, LONG_PRESS_MS: real.LONG_PRESS_MS, SLOP: real.SLOP, AXIS_SLOP: real.AXIS_SLOP,
   DROP_COLLAPSE_KEY: real.DROP_COLLAPSE_KEY,
   readDropCollapse: real.readDropCollapse,
 };
@@ -955,7 +1244,7 @@ for (const m of MUTANTS) {
   try {
     const mod = await loadPalette(a.mutated, m.id);
     r = await runAll(mod.Palette, {
-      SNAP: mod.SNAP, LONG_PRESS_MS: mod.LONG_PRESS_MS, SLOP: mod.SLOP,
+      SNAP: mod.SNAP, LONG_PRESS_MS: mod.LONG_PRESS_MS, SLOP: mod.SLOP, AXIS_SLOP: mod.AXIS_SLOP,
       DROP_COLLAPSE_KEY: mod.DROP_COLLAPSE_KEY, readDropCollapse: mod.readDropCollapse,
     }, a.mutated);
   } catch (e) {

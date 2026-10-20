@@ -32,6 +32,27 @@ function hexRGB(h) {
 }
 
 /**
+ * 粗指针（手指）判据 —— 与 `src/ui/interact.js` 的 `coarsePointer()` 读**同一条**媒体查询。
+ * 引擎不 import UI 层（依赖方向是 ui → core），所以两边各读一次，靠探针钉住两条查询串一致。
+ * ⚠ 命中半径的档位在交互层（`Interaction.portTol()`），这里只管**画多大**；
+ *   两侧必须同源，否则会出现「画得大、点不中」这种最难查的错位。
+ */
+const COARSE_MQ = '(pointer: coarse)';
+const _mqCache = new Map();
+function mqMatches(q) {
+  if (typeof window === 'undefined' || !window.matchMedia) return false;
+  let m = _mqCache.get(q);
+  if (!m) { try { m = window.matchMedia(q); } catch (err) { m = null; } _mqCache.set(q, m); }
+  return !!(m && m.matches);        // 每次读 .matches：接上外接键鼠后媒体查询会当场变
+}
+const coarsePointer = () => mqMatches(COARSE_MQ);
+
+/** 端口视觉半径（世界 px）。⚠ 细指针这一组是**既有值**：改动即回归（探针逐位钉 3.4 / 5 / 10） */
+const PORT_R_FINE = { wire: 3.4, probe: 3.2, hot: 5, halo: 10, label: 11 };
+/** 粗指针整体放大一档：手指要看得见，才谈得上点得准 */
+const PORT_R_COARSE = { wire: 4.8, probe: 4.6, hot: 6.6, halo: 15, label: 12 };
+
+/**
  * 全局实验速度档（B1）。
  *
  * ⚠ **档位数值是我方自定的**：NB 的 min/max/step 序列化值在 `data.unity3d` 的 LZ4 块里、
@@ -517,8 +538,25 @@ export class Engine {
   }
 
 
+  /**
+   * 接线柱的**唯一**语义渲染处（`tools/port-affordance-probe.mjs` 的渲染类断言都打在这里）。
+   *
+   * 谁画、谁不画：插件的 `dot()`（`src/equipment/electronics.js` 的美工端子）画的是**器材外观**
+   *   —— 固定半径 2.6、没有热态、也不知道 `kind`；交互标记（半径随档位、热态光环、标签、
+   *   `kind` 区分）**只由这里画**。两者的关系由探针钉住：同一器材渲染一次，
+   *   美工端子那笔（2.6）与交互标记那笔（`PORT_R_FINE.wire`/`hot`）是**两笔不同的绘制**，
+   *   而且 `hotPort` 只影响后者（前者逐位不变）。
+   *
+   * `kind` 分两种语义：`wire` 能接线；其余（各容器的「插入口」）是**只读**的。画成同一种圆点，
+   *   用户会以为插入口也是电接线柱 ⇒ 这里用**实心圆 / 空心方**把两类分开。
+   */
   drawPorts(g, world) {
     const hot = this.hotPort;
+    // ⚠ 视觉档位与交互层的**命中**档位读同一条媒体查询（`COARSE_MQ`）。取 `(pointer: coarse)`
+    //   而不是 `(any-pointer: coarse)`：这里改的是**看得见的外观**（半径/光环/标签）——
+    //   `styles/touch.css` 与 `plans/07-触控适配.md` 立的分类是「不可见改动挂 any-pointer、
+    //   看得见改动挂 pointer」；细指针那一档与改动前逐位相同（放大的只有手指那一档）。
+    const R = coarsePointer() ? PORT_R_COARSE : PORT_R_FINE;
     // B3：渲染前一次性收集"已被占用的端口"，循环内只查表
     //（原来是每个端口都扫一遍全部导线，O(器材 × 端口 × 导线)）
     const usedBy = new Map();
@@ -533,22 +571,57 @@ export class Engine {
     for (const e of world.entities) {
       const usedEnt = usedBy.get(e.id);
       for (let i = 0; i < e.ports.length; i++) {
+        const port = e.ports[i];
         const wpt = e.portWorldAt(i);
         const isHot = hot && hot.ent === e && hot.port === i;
         const used = !!usedEnt && usedEnt.has(i);
+        const isWire = (port.kind || 'wire') === 'wire';
+        const r = isHot ? R.hot : (isWire ? R.wire : R.probe);
 
-        const r = isHot ? 5 : 3.4;
-        g.beginPath();
-        g.arc(wpt.x, wpt.y, r, 0, Math.PI * 2);
-        g.fillStyle = isHot ? C.portHot : (used ? '#5a6672' : C.port);
-        g.fill();
+        if (isWire) {
+          g.beginPath();
+          g.arc(wpt.x, wpt.y, r, 0, Math.PI * 2);
+          g.fillStyle = isHot ? C.portHot : (used ? '#5a6672' : C.port);
+          g.fill();
+        } else {
+          // 只读端口（插入口 / 管口 / 瓶口）：空心方，一眼与电路接线柱区分
+          g.beginPath();
+          g.rect(wpt.x - r, wpt.y - r, r * 2, r * 2);
+          g.strokeStyle = isHot ? C.portHot : '#8d96a0';
+          g.lineWidth = 1.4;
+          g.stroke();
+        }
         if (isHot) {
-          g.strokeStyle = 'rgba(45,212,191,.45)';
+          g.strokeStyle = isWire ? 'rgba(45,212,191,.45)' : 'rgba(255,209,102,.5)';
           g.lineWidth = 2;
-          g.beginPath(); g.arc(wpt.x, wpt.y, 10, 0, Math.PI * 2); g.stroke();
+          g.beginPath(); g.arc(wpt.x, wpt.y, R.halo, 0, Math.PI * 2); g.stroke();
+        }
+        // 标签：高亮的那一个一定画（用户正在选它）；粗指针下"选中的器材"把接线柱标签全亮出来
+        // —— 手指看不见标签就只能靠试，这是「不好对准」的另一半。
+        if (port.label && (isHot || (R === PORT_R_COARSE && isWire && e.selected))) {
+          this.drawPortLabel(g, wpt, port.label, isHot, R.label);
         }
       }
     }
+  }
+
+  /**
+   * 端口标签（高亮 / 粗指针可见化用）。
+   * ⚠ **不许用 `measureText`**：探针的假 ctx 把它做成空实现（返回 undefined），
+   *   取 `.width` 会当场抛异常 —— 一个"只是画个标签"的改动会让整套探针崩在渲染里。
+   *   所以宽度按定值估：汉字约 1em、拉丁约 0.6em，这里取偏宽的一档。
+   */
+  drawPortLabel(g, at, text, isHot, size) {
+    const w = text.length * size * 0.78 + 6;
+    const h = size + 4;
+    const top = at.y - size * 1.6 - h;
+    g.fillStyle = 'rgba(13,17,23,.78)';
+    g.fillRect(at.x - w / 2, top, w, h);
+    g.fillStyle = isHot ? C.portHot : '#c9d4de';
+    g.font = size + 'px ui-sans-serif, system-ui, sans-serif';
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    g.fillText(text, at.x, top + h / 2);
   }
 
   drawSelection(g, world) {

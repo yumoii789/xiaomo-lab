@@ -88,3 +88,66 @@ export function menuCaps(e, opts) {
   // （中央表按 type 查，派生出的新 type 查不到）。这条是被探针 §④ 的红测逼出来的，不是推测。
   return { ...DEFAULT_CAPS, ...legacyCaps(e), ...(central || {}), ...(own || {}) };
 }
+
+/**
+ * 「这件器材还在台面上吗」—— 删除后的残留引用（面板还挂着刚被删掉的那一件）不该再动它。
+ * `world.remove()` 只是把它从 entities / byId 里摘掉（**不置标志位**），所以判据只能是
+ * 「台面上现在这一件还是不是它」。没有 world / 没有查找接口时**不拦**：判据只按能证明的来。
+ */
+function gone(app, ent) {
+  if (!ent) return true;
+  if (ent.alive === false) return true;
+  const w = app && app.world;
+  if (w && typeof w.get === 'function' && w.get(ent.id) !== ent) return true;
+  return false;
+}
+
+/**
+ * 能力位 → 动作的**唯一定义处**。
+ *
+ * 为什么要有它：这五个动作原本是 `src/ui/inspector.js` 里的五个内联闭包（一个都没导出），
+ * 于是「就地浮出控制条」（src/ui/equipbar.js）只能把同一套原语再抄一遍 —— 两个 UI 面各有一份
+ * 「位 → 动作」的定义，同一个按钮在两处迟早做不同的事（第一份实测差异：浮出条对复制/删除
+ * 额外 markDirty，而面板侧改前不 markDirty —— 抄一份就漂一格）。
+ *
+ * 语义与改前那五个内联闭包**逐位相同**（全量逐件、逐位对照见
+ * tools/inspector-caps-probe.mjs §⑦），差别只有一处：视图重绘由调用方经第四个参数传进来
+ * （旧闭包里的 `this.render()`），动作本身不带视图依赖 —— 面板与浮出条各有各的刷新方式。
+ *
+ *   · 先看位：`menuCaps(ent)[key]` 为假 ⇒ 什么都不做，返回 false（这件器材没有这个动作）
+ *   · 位为真 ⇒ 调**同一个原语**，刷新与 markDirty 的**次数与顺序**都与改前一致：
+ *     切换 / 点燃 / 倒空 = 原语 → refresh() → app.markDirty()
+ *     复制 / 删除 = 只调 app（**不**刷新、**不** markDirty：世界的 add/remove 自己 emit SCENE_DIRTY）
+ *   · 已删除的实体：不动、不抛错，返回 false
+ *
+ * @param {object} app    宿主（用到 app.duplicate / app.removeEntity / app.markDirty / app.world）
+ * @param {object} ent    器材实体
+ * @param {string} key    能力位键名（见 CAP_KEYS）
+ * @param {Function} [refresh] 视图重绘回调（面板传 () => this.render()）
+ * @returns {boolean} 是否真的执行了动作
+ */
+export function applyCap(app, ent, key, refresh) {
+  if (gone(app, ent)) return false;
+  if (!menuCaps(ent)[key]) return false;
+  const view = typeof refresh === 'function' ? refresh : null;
+  const after = () => { if (view) view(); if (app && typeof app.markDirty === 'function') app.markDirty(); };
+  switch (key) {
+    case 'toggle':
+      if (typeof ent.toggle !== 'function') return false;
+      ent.toggle(); after(); return true;
+    case 'ignite':
+      if (!ent.props) return false;
+      ent.props.lit = !ent.props.lit; after(); return true;
+    case 'empty':
+      if (!ent.vessel || typeof ent.vessel.empty !== 'function') return false;
+      ent.vessel.empty(); after(); return true;
+    case 'duplicate':
+      if (!app || typeof app.duplicate !== 'function') return false;
+      app.duplicate(ent); return true;
+    case 'remove':
+      if (!app || typeof app.removeEntity !== 'function') return false;
+      app.removeEntity(ent); return true;
+    default:
+      return false;
+  }
+}
