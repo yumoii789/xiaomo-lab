@@ -17,6 +17,46 @@ const RHO_WATER = 1.0;       // g/mL
 // 电极极性契约的「无电流」阈值：溶液支路 U / I 的绝对值低于它就当没通电（含求解器浮点残差）
 const POLARITY_EPS = 1e-6;
 
+// ══════════════════════════════════════════════════════════
+// P1 电化学：离子迁移 / 电流—离子通量口径 / 电导率分解
+//
+// 口径（谁按什么算）写在这里、代码按它实现、探针按它断言：
+//   · 驱动量：**电流幅度** `electricCurrent`（bridge.distribute 每帧先清后写 ⇒ 必是当帧值）；
+//     方向**不读** currentSigned / currentU —— 那两只在 cell: 支路上是上一帧的陈旧值（见 polarityOf 的注释）。
+//   · 方向：阴极在哪一侧直接问 `polarityOf()`（task-37 冻结的契约）⇒ 迁移与极性同源，不另造判据。
+//   · 迁移数：按**迁移率加权** t_i = c_i·u_i / Σ c_j·u_j，u = |z|·Λ⁰ ⇒ t⁺ + t⁻ = 1（恒等式）。
+//   · 搬运量：n_i = Q·t_i / (|z_i|·F)，Q = I·dt（法拉第量级）；源半区不够就夹紧（记 clamped）。
+//   · 守恒：迁移只搬不造 ⇒ 逐离子总量守恒、两半区电荷变化互补（Δq_a + Δq_b = 0）。
+// ══════════════════════════════════════════════════════════
+const F_FARADAY = 96485.33212;   // C/mol
+const K_MOLAR = 9.0;             // 既有电导率式子的整体系数 —— 分解时**不改**它
+const K_TEMP = 0.02;             // 电导率温度系数 1/K（室温附近 ≈2%/K）
+const T_REF = 25;                // ℃，模型读数的参考温度
+
+/**
+ * 离子表：电荷 z 与**当量摩尔电导率** Λ⁰（S·cm²/mol，25 ℃，按 1 当量电荷计）。
+ *
+ * ⚠ 为什么不从名字推 z：本库写法里数字既可能是下标也可能是电荷（`MnO4-` 的 4 是下标、
+ *   `Ca2+` 的 2 是电荷），语法上分不开 ⇒ **显式表才是真值**；表外只兜底解析并标 assumed。
+ */
+const ION = {
+  'H+': [1, 350], 'OH-': [-1, 198], 'Na+': [1, 50.1], 'K+': [1, 73.5], 'NH4+': [1, 73.4],
+  'Ag+': [1, 61.9], 'Ca2+': [2, 59.5], 'Mg2+': [2, 53.1], 'Cu2+': [2, 53.6], 'Fe2+': [2, 54.0],
+  'Fe3+': [3, 68.0], 'Zn2+': [2, 52.8], 'Ba2+': [2, 63.6], 'MnO4-': [-1, 61.3],
+  'Cl-': [-1, 76.3], 'NO3-': [-1, 71.4], 'HCO3-': [-1, 44.5], 'CH3COO-': [-1, 40.9],
+  'SO4^2-': [-2, 80.0], 'CO3^2-': [-2, 69.3],
+};
+
+/** 查表；表外按名字兜底（电荷解析不出 ⇒ null；Λ 用中位数 60 并标 assumed） */
+function ionInfo(name) {
+  const row = ION[name];
+  if (row) return { z: row[0], lambda: row[1], u: Math.abs(row[0]) * row[1], assumed: false };
+  const m = /(?:\^(\d+))?(\d*)([+-])$/.exec(String(name));
+  if (!m) return null;
+  const mag = Number(m[1] || m[2] || 1);
+  return { z: m[3] === '+' ? mag : -mag, lambda: 60, u: mag * 60, assumed: true };
+}
+
 export class VesselModel {
   constructor(ent, capacity = 250) {
     this.ent = ent;
@@ -37,6 +77,15 @@ export class VesselModel {
     this.currentSigned = 0;        // 带符号电流（+ 正向 / − 反向），只给化学层定电解方向 A
     this.currentU = 0;             // 带符号电压（与 currentSigned 同参考方向），供面板出「瞬间电压」V
     this.electrodes = [];          // 插入的电极（**实体 id 列表**，由 coupling/bridge.js 每帧用 `electrodes.map(e => e.id)` 重写）
+    // ── P1 电化学 ──
+    // 两半区离子账本（**只记离子**的摩尔数）；null == 均匀/整杯混匀（不是「没有数据」）。
+    // 两半区按世界顺序：a 区 = electrodes[0] 那一侧，b 区 = electrodes[1] 那一侧。
+    this.half = null;
+    // 迁移驱动的显式覆盖（null ⇒ 用当帧 electricCurrent）。
+    // 为什么留这个口子：原电池容器上 electricCurrent 恒为 0（bridge 只在 sol: 支路写它）
+    // ⇒ 纯原电池上迁移不会启动；要补需要耦合层写一行，而 bridge 不在本任务写域。
+    this.ionicOverride = null;
+    this.lastMigration = null;
     this.heatIn = 0;               // 本帧接收的热功率 W（瞬时）
 
     this.color = null;
@@ -189,6 +238,224 @@ export class VesselModel {
     if (k < 1e-4) return Infinity;
     return (0.03) / (k * 4e-4);
   }
+  // ══════════ P1 电化学：离子账本 / 迁移 / 电导率分解 ══════════
+
+  /** 离子账：离子 → 摩尔数（与 ionConc 同源：按 species.ions 的系数折算溶解态） */
+  ionMoles() {
+    const out = new Map();
+    for (const [id, q] of this.mol) {
+      const s = SP[id];
+      if (!s || !s.ions) continue;
+      for (const [ion, k] of s.ions) out.set(ion, (out.get(ion) || 0) + q * k);
+    }
+    return out;
+  }
+
+  /** 溶解态贡献的离子总浓度 mol/L（ionConc 里未溶固体那 30% 的口径单列，好做分解） */
+  ionConcDissolved() {
+    if (!(this.volume > 0)) return 0;
+    let n = 0;
+    for (const [, q] of this.ionMoles()) n += q;
+    return n / (this.volume / 1000);
+  }
+
+  /** 迁移率加权份额（＝迁移数）：t_i = c_i·u_i / Σ c_j·u_j，u = |z|·Λ⁰；Σ t_i = 1 */
+  ionShares() {
+    const w = new Map();
+    let sum = 0;
+    for (const [ion, n] of this.ionMoles()) {
+      const it = ionInfo(ion);
+      const u = it ? it.u : 0;
+      const x = u > 0 ? n * u : 0;
+      w.set(ion, x);
+      sum += x;
+    }
+    const out = new Map();
+    for (const [ion, x] of w) out.set(ion, sum > 0 ? x / sum : 0);
+    return out;
+  }
+
+  /** 迁移数（按符号归并）：t⁺ + t⁻ = 1（恒等式） */
+  transportNumbers() {
+    const shares = this.ionShares();
+    let tPlus = 0, tMinus = 0;
+    const byIon = [];
+    for (const [ion, t] of shares) {
+      const it = ionInfo(ion);
+      if (it && it.z > 0) tPlus += t;
+      else if (it && it.z < 0) tMinus += t;
+      byIon.push({ ion, z: it ? it.z : null, t });
+    }
+    return { tPlus, tMinus, byIon };
+  }
+
+  /** 离子强度 mol/L（Σ c·z²/2）—— 「这杯溶液有多导电」的可读分解项之一 */
+  ionicStrength() {
+    if (!(this.volume > 0)) return 0;
+    let s = 0;
+    for (const [ion, n] of this.ionMoles()) {
+      const it = ionInfo(ion);
+      if (!it) continue;
+      s += n * it.z * it.z;
+    }
+    return s / 2 / (this.volume / 1000);
+  }
+
+  /** 电导率的温度因子（1 + 0.02·(T−25)）；模型读数仍按 25 ℃ 参考值，**不因此改变** */
+  tempFactor(tempC) {
+    const T = Number.isFinite(tempC) ? tempC : this.temp;
+    return 1 + K_TEMP * (T - T_REF);
+  }
+
+  /** 温度修正后的电导率 S/m（新 API；模型自己的 conductivity() 一字未改） */
+  conductivityAt(tempC) {
+    return this.conductivity() * this.tempFactor(tempC);
+  }
+
+  /**
+   * 电导率分解：把**模型当前读数**按迁移率份额摊到每种离子上 ⇒ 每项可读数。
+   * 恒等式：Σ terms.kappa === conductivity()（同一份读数只做分摊，不另算一套）。
+   * 未溶固体那 30% 的口径不是可迁移离子 ⇒ 单列一项 fixed，不参与迁移数。
+   */
+  conductivityTerms() {
+    const total = this.conductivity();
+    const kDissolved = K_MOLAR * this.ionConcDissolved();
+    const kSolid = total - kDissolved;
+    const shares = this.ionShares();
+    const terms = [];
+    for (const [ion, sh] of shares) {
+      const it = ionInfo(ion);
+      terms.push({
+        ion, z: it ? it.z : null, assumed: !!(it && it.assumed),
+        mobility: it ? it.u : null, share: sh, kappa: kDissolved * sh,
+      });
+    }
+    if (kSolid > 1e-15) terms.push({ ion: '(未溶固体)', z: 0, mobility: null, share: 0, kappa: kSolid, fixed: true });
+    let sum = 0;
+    for (const t of terms) sum += t.kappa;
+    return { terms, sum, total, kDissolved, kSolid, tempFactor: this.tempFactor(), basis: 'K_MOLAR 归一，按迁移率份额' };
+  }
+
+  /** 量纲式电导率 S/m：κ = Σ c·|z|·Λ(T)/10 —— 只做**对照**，不改模型读数 */
+  conductivityModel(tempC) {
+    if (!(this.volume > 0)) return 0;
+    const f = this.tempFactor(tempC);
+    let k = 0;
+    for (const [ion, n] of this.ionMoles()) {
+      const it = ionInfo(ion);
+      if (!it) continue;
+      k += (n / (this.volume / 1000)) * Math.abs(it.z) * it.lambda * f / 10;
+    }
+    return k;
+  }
+
+  /** 迁移驱动电流 A（当帧 electricCurrent；可被 ionicOverride 显式覆盖） */
+  migrationDrive() {
+    const raw = (this.ionicOverride === null || this.ionicOverride === undefined) ? this.electricCurrent : this.ionicOverride;
+    const I = Math.abs(Number(raw));
+    return Number.isFinite(I) ? I : 0;
+  }
+
+  /** 给耦合层留的一行口子：显式指定迁移驱动电流（原电池容器上 electricCurrent 恒为 0） */
+  setIonicCurrent(I) { this.ionicOverride = (I === null || I === undefined) ? null : Number(I); return this; }
+
+  /** 阴极在哪一侧：直接问极性契约（task-37），不另造判据；给不出 ⇒ null（**宁可不迁移**） */
+  polaritySides() {
+    const ids = Array.isArray(this.electrodes) ? this.electrodes : [];
+    if (ids.length < 2) return null;
+    const ra = this.polarityOf(ids[0]), rb = this.polarityOf(ids[1]);
+    if (ra === 'cathode' && rb === 'anode') return { cathode: 'a', anode: 'b', contract: 'ok' };
+    if (ra === 'anode' && rb === 'cathode') return { cathode: 'b', anode: 'a', contract: 'ok' };
+    return null;
+  }
+
+  /** 剖面复位：两半区回到「整杯混匀」 */
+  resetSplit() { this.half = null; }
+
+  /** 两半区账本与整杯总量对齐（缺项按均匀补、总量变了按比例缩放）—— 守恒由此保证 */
+  syncSplit() {
+    if (!(this.volume > 0)) { this.half = null; return null; }
+    const tot = this.ionMoles();
+    if (tot.size === 0) { this.half = null; return null; }
+    if (!this.half) {
+      const a = new Map(), b = new Map();
+      for (const [ion, n] of tot) { a.set(ion, n / 2); b.set(ion, n / 2); }
+      this.half = { a, b };
+      return this.half;
+    }
+    for (const side of ['a', 'b']) {
+      const m = this.half[side];
+      for (const [ion] of [...m]) if (!tot.has(ion)) m.delete(ion);
+      for (const [ion, n] of tot) if (!m.has(ion)) m.set(ion, n / 2);
+    }
+    for (const [ion, n] of tot) {
+      const sa = this.half.a.get(ion) || 0, sb = this.half.b.get(ion) || 0;
+      const sum = sa + sb;
+      if (sum <= 1e-18) { this.half.a.set(ion, n / 2); this.half.b.set(ion, n / 2); continue; }
+      const f = n / sum;
+      this.half.a.set(ion, sa * f);
+      this.half.b.set(ion, sb * f);
+    }
+    return this.half;
+  }
+
+  /**
+   * 一次迁移步（法拉第量级）。返回值就是读数：I / Q / 每种离子搬了多少 / 是否夹紧 / 为什么没搬。
+   * 「无电流就不迁移」不是额外判断：Q = I·dt = 0 ⇒ 搬运量 0。
+   */
+  migrate(dt) {
+    const info = { I: this.migrationDrive(), Q: 0, transported: 0, chargeMoved: 0, moved: [], clamped: false, sides: null, reason: 'ok', dt: 0 };
+    if (!(this.volume > 0)) { info.reason = 'no-liquid'; this.lastMigration = info; return info; }
+    if (!(info.I > POLARITY_EPS)) { info.reason = 'no-current'; this.lastMigration = info; return info; }
+    const sides = this.polaritySides();
+    if (!sides) { info.reason = 'no-polarity'; this.lastMigration = info; return info; }
+    info.sides = sides;
+    const half = this.syncSplit();
+    if (!half) { info.reason = 'no-ions'; this.lastMigration = info; return info; }
+    const d = Math.max(0, Number(dt) || 0);
+    info.dt = d;
+    info.Q = info.I * d;
+    const Q = info.Q;
+    const shares = this.ionShares();
+    for (const [ion, t] of shares) {
+      const it = ionInfo(ion);
+      if (!it || !it.z || !(t > 0)) continue;
+      const want = Q * t / (Math.abs(it.z) * F_FARADAY);       // mol
+      if (!(want > 0)) continue;
+      const from = it.z > 0 ? sides.anode : sides.cathode;      // 阳离子自阳极区 → 阴极区
+      const to = it.z > 0 ? sides.cathode : sides.anode;
+      const have = half[from].get(ion) || 0;
+      const moved = Math.min(want, have);
+      if (!(moved > 0)) { info.clamped = true; continue; }
+      if (moved < want - 1e-18) info.clamped = true;
+      half[from].set(ion, have - moved);
+      half[to].set(ion, (half[to].get(ion) || 0) + moved);
+      info.transported += moved;
+      info.chargeMoved += Math.abs(it.z) * moved;               // mol 当量电荷
+      info.moved.push({ ion, z: it.z, t, want, moved, from, to });
+    }
+    this.lastMigration = info;
+    return info;
+  }
+
+  /** 可读的两半区读数（面板 / 台账 / 探针都用它）：离子、z、总量、两半区摩尔数与浓度 */
+  ionProfile() {
+    const tot = this.ionMoles();
+    const half = this.half ? this.syncSplit() : null;
+    const sides = this.polaritySides();
+    const Vh = Math.max(0, this.volume) / 2;
+    const rows = [];
+    for (const [ion, n] of tot) {
+      const it = ionInfo(ion);
+      const a = half ? (half.a.get(ion) || 0) : n / 2;
+      const b = half ? (half.b.get(ion) || 0) : n / 2;
+      rows.push({
+        ion, z: it ? it.z : null, assumed: !!(it && it.assumed), n, nA: a, nB: b,
+        cA: Vh > 0 ? a / (Vh / 1000) : 0, cB: Vh > 0 ? b / (Vh / 1000) : 0,
+      });
+    }
+    return { rows, split: !!this.half, uniform: this.half === null, halfVolume: Vh, cathodeSide: sides ? sides.cathode : null };
+  }
 
   hasElectrodes() { return this.electrodes.length >= 2; }
 
@@ -211,10 +478,14 @@ export class VesselModel {
    *   **上一帧的陈旧值**。本方法只在「bridge 必定造出 `sol:` 支路」的那些条件（非原电池 +
    *   volume>0 + resistance() 有限）下才读它们，因此读到的必是当帧结果，不会是陈旧值。
    *
-   * `null` 的语义（四类，均不抛错）：
+   * `null` 的语义（五类，均不抛错）：
    *   ① 不是本容器的电极（含不存在的 id、非电极实体）；② 容器里不足两根电极；
    *   ③ 拿不到电极实体（容器没有 world 回指，例如未入世界）；④ 判据量不可用：
-   *      非原电池时 |currentU| 与 |currentSigned| 都低于 POLARITY_EPS，或溶液电阻无穷大（不导电）。
+   *      非原电池时 |currentU| 与 |currentSigned| 都低于 POLARITY_EPS，或溶液电阻无穷大（不导电）；
+   *   ⑤ **不在当帧判据对里**（task-37）：判据对 = bridge 当帧真正造出的那条支路的两端 ——
+   *      原电池 = `cell:` 的 (high, low)，电解池 = `sol:` 的 (a, b)（都是**世界顺序的前两根**）。
+   *      容器里可以插 3 根以上电极，而被挤出电路的那根**不携带电流 ⇒ 没有极性可言**；
+   *      过去它 `entId !== anode.id` 就落到阴极分支 ⇒ **non-null 误导**（比 null 更坏）。
    */
   polarityOf(entId) {
     const ids = Array.isArray(this.electrodes) ? this.electrodes : [];
@@ -233,6 +504,8 @@ export class VesselModel {
         if (m.probe.E0 > high.probe.E0) high = m;
       }
       if (high.probe.E0 - low.probe.E0 > 0.05) {
+        // task-37：判据对 = bridge 的 cell: 支路两端 (high, low)；不在这一对里的电极不回答
+        if (entId !== high.id && entId !== low.id) return null;                 // ⑤ 被挤出电路
         return entId === high.id ? 'cathode' : 'anode';                         // 高电位端 = 阴极（还原）
       }
     }
@@ -243,6 +516,8 @@ export class VesselModel {
     const drive = (Number.isFinite(U) && Math.abs(U) > POLARITY_EPS) ? U : I;
     if (!Number.isFinite(drive) || Math.abs(drive) <= POLARITY_EPS) return null; // ④ 无电流 / 无电压
     const anode = drive > 0 ? a : b;                                            // 高电位端 = 阳极（氧化）
+    // task-37：判据对 = bridge 的 sol: 支路两端 (a, b)；不在这一对里的电极不回答
+    if (entId !== a.id && entId !== b.id) return null;                          // ⑤ 被挤出电路
     return entId === anode.id ? 'anode' : 'cathode';
   }
 
@@ -311,6 +586,9 @@ export class VesselModel {
       this._gasRate = 0;
       stepVessel(this, dt);
     }
+
+    // 2.5) 离子迁移（P1）：驱动量取**当帧** electricCurrent（main.js 先 distribute 再 world.step）
+    this.lastMigration = this.migrate(dt);
 
     // 3) 颜色
     this.updateColor();
@@ -393,6 +671,11 @@ export class VesselModel {
     this.color = null;
     this.turbidity = 0;
     this.temp = 25;
+    // P1：倒空 ⇒ 剖面复位 + 带符号的瞬间量归零（不留陈旧值）
+    this.resetSplit();
+    this.currentSigned = 0;
+    this.currentU = 0;
+    this.lastMigration = null;
   }
 
   // ══════════ 存档 ══════════
@@ -402,6 +685,8 @@ export class VesselModel {
       water: this.water || 0, stir: this.stir,
       mol: [...this.mol], solid: [...this.solid],
       gas: [...this.gas], precip: [...this.precip],
+      // P1：两半区剖面随存档走（null = 均匀）
+      half: this.half ? { a: [...this.half.a], b: [...this.half.b] } : null,
     };
   }
 
@@ -416,6 +701,11 @@ export class VesselModel {
     this.solid = new Map(o.solid || []);
     this.gas = new Map(o.gas || []);
     this.precip = new Map(o.precip || []);
+    // P1：剖面随存档恢复；带符号的瞬间量**不进存档** ⇒ 读档后归零（不留陈旧值）
+    this.half = o.half ? { a: new Map(o.half.a || []), b: new Map(o.half.b || []) } : null;
+    this.currentSigned = 0;
+    this.currentU = 0;
+    this.lastMigration = null;
     this.updateColor();
   }
 

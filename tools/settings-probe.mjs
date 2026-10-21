@@ -272,6 +272,16 @@ function connect(url) {
 async function cdpAlive(port) {
   try { return (await fetch(`http://127.0.0.1:${port}/json/version`)).ok; } catch { return false; }
 }
+/** fail-fast（task-42）：静态服务不在就立刻说清 —— 否则要白等 30 s 导航超时，提示还会指向 CDP 端口 */
+async function originAlive() {
+  try {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 2000);
+    await fetch(`${ORIGIN}/index.html`, { signal: ac.signal });   // 任何 HTTP 响应都算「服务在」（不管 404）
+    clearTimeout(t);
+    return true;
+  } catch { return false; }
+}
 
 /** CDP 报错说人话：哪一步、原始错误、常见成因，一次说全，别让下一个人以为环境坏了 */
 function explain(step, err) {
@@ -466,6 +476,12 @@ async function runOnce(attempt) {
 // exit 2 是「本次没拿到结论」（中断/零断言/预检失败），重试不会把结论伪装出来 ✓。
 // 两次都 2 才报 2；若第二次拿到结论就采信第二次，并把两次结果都如实留在上面 ✓。
 async function main() {
+  // ── fail-fast（task-42）：静态服务不在 ⇒ 1 行报错 + exit 2，绝不白等 30 s，也绝不先起浏览器 ──
+  // ⚠ **故意放在 `runOnce` 之外**（Lead 裁决，别顺手挪回去）：静态服务是**环境事实**、不是探针步骤，
+  //   挪进 runOnce 会被「exit 2 才重试一次」放大成 2 遍 × 3 行；重试一个环境事实是白做功，1 行确定胜过 6 行困惑。
+  if (!(await originAlive())) {
+    throw new Error(`静态服务连不上（${ORIGIN}）—— 另开一个终端跑 node server.mjs 再复跑本探针`);
+  }
   const first = await runOnce(0);
   if (first !== 2) return first;
 

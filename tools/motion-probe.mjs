@@ -548,11 +548,25 @@ function connect(url) {
 async function cdpAlive() {
   try { return (await fetch(`http://127.0.0.1:${PORT}/json/version`)).ok; } catch { return false; }
 }
+/** fail-fast（task-42）：静态服务不在就立刻说清 —— 否则要白等 30 s 导航超时，提示还会指向 CDP 端口 */
+async function originAlive() {
+  try {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 2000);
+    await fetch(`${ORIGIN}/index.html`, { signal: ac.signal });   // 任何 HTTP 响应都算「服务在」（不管 404）
+    clearTimeout(t);
+    return true;
+  } catch { return false; }
+}
 
 async function main() {
   const root = process.cwd();
   const results = staticChecks(root);
   if (!EDGE) throw new Error('找不到 Edge/Chrome，可用 EDGE_BIN 环境变量指定路径');
+  // ── fail-fast（task-42）：静态服务不在 ⇒ 1 行报错 + exit 2，绝不白等 30 s，也绝不先起浏览器 ──
+  if (!(await originAlive())) {
+    throw new Error(`静态服务连不上（${ORIGIN}）—— 另开一个终端跑 node server.mjs 再复跑本探针`);
+  }
   if (await cdpAlive()) {
     throw new Error(`CDP 端口 ${PORT} 上已经有别的浏览器在应答：先关掉它，或设 XM_CDP_PORT 换端口（否则断言会跑在别人身上）`);
   }

@@ -28,11 +28,16 @@ function shade(c, k) {
 
 const METAL_COLOR = {
   graphite: '#454b52', Zn: '#b8c0c6', Cu: '#b87333', Fe: '#8e9296',
-  Mg: '#c4c9ce', Al: '#c0c5ca', Ag: '#e2e2e4',
+  Mg: '#c4c9ce', Al: '#c0c5ca', Ag: '#e2e2e4', Pt: '#d9dde3',
 };
 const METAL_NAME = {
-  graphite: '石墨', Zn: '锌', Cu: '铜', Fe: '铁', Mg: '镁', Al: '铝', Ag: '银',
+  graphite: '石墨', Pt: '铂', Zn: '锌', Cu: '铜', Fe: '铁', Mg: '镁', Al: '铝', Ag: '银',
 };
+
+// 惰性电极（E0 记 null ⇒ 不参与原电池排序；判据量就是 E0，见 src/chemistry/vessel.js 的 polarityOf）。
+// 这里的读数字面量与 fields 里的上屏名逐字相同，是同一条口径的两个出口。
+const INERT_LABEL = { graphite: '石墨（惰性）', Pt: '铂（惰性）' };
+const INERT_METALS = new Set(Object.keys(INERT_LABEL));
 
 // ─────────────────────────────────────────────────────────
 // 电极
@@ -44,7 +49,7 @@ class Electrode extends Entity {
   }
   syncProbe() {
     const m = this.props.metal;
-    const e0 = (m === 'graphite') ? null : (SP[m] ? SP[m].E0 : null);
+    const e0 = INERT_METALS.has(m) ? null : (SP[m] ? SP[m].E0 : null);
     this.probe = { kind: 'electrode', metal: m, E0: e0 };
   }
   onProp(k, v) { if (k === 'metal') this.syncProbe(); }
@@ -81,7 +86,7 @@ const electrodeDef = {
   fields: [{
     k: 'metal', label: '电极材料', type: 'select',
     options: [
-      ['graphite', '石墨（惰性）'], ['Zn', '锌片'], ['Cu', '铜片'],
+      ['graphite', INERT_LABEL.graphite], ['Pt', INERT_LABEL.Pt], ['Zn', '锌片'], ['Cu', '铜片'],
       ['Fe', '铁片'], ['Mg', '镁条'], ['Al', '铝片'], ['Ag', '银片'],
     ],
   }],
@@ -91,7 +96,7 @@ const electrodeDef = {
   //      `E0` 那一行带**符号前缀**（正数前加 '+'），`digits`/`unit` 表达不了
   //        ⇒ 整行由 read 返回**字符串**，格式与迁移前逐字一致（含 '+'、' V'、以及无 E0 时的文案）。
   stats: [
-    { label: '电极材料', read: (e) => (e.props.metal === 'graphite' ? '石墨（惰性）' : e.props.metal) },
+    { label: '电极材料', read: (e) => INERT_LABEL[e.props.metal] || e.props.metal },
     { label: '标准电极电势', read: (e) => {
       const p = e.probe;
       if (!p || p.E0 === null || p.E0 === undefined) return '不参与原电池';

@@ -507,7 +507,7 @@ async function runSuite(T, opt) {
       ok(A.v.polarityOf(A.eA.id) === 'anode' && A.v.polarityOf(A.eB.id) === 'cathode',
         'append 情形：契约与 bridge 同对 —— 电极1 ⇒ ' + J(A.v.polarityOf(A.eA.id))
         + '、电极2 ⇒ ' + J(A.v.polarityOf(A.eB.id)) + '；被忽略的第 3 根 ⇒ '
-        + J(A.v.polarityOf(A.x3.id)) + '（它没参与电路，却仍拿到一个答案）');
+        + J(A.v.polarityOf(A.x3.id)) + '（它没参与电路 ⇒ task-37 后必须 null）');
 
       const M = build3('mid');
       ok(M.v.electrodes.length === 3 && M.v.electrodes[0] === M.eA.id
@@ -519,10 +519,9 @@ async function runSuite(T, opt) {
       ok(M.v.polarityOf(M.eA.id) === 'anode' && M.v.polarityOf(M.x3.id) === 'cathode',
         '契约与前两根同序：电极1 ⇒ ' + J(M.v.polarityOf(M.eA.id)) + '、电极3 ⇒ '
         + J(M.v.polarityOf(M.x3.id)) + ' ⇒ 与 bridge 的 sol: 支路两端**逐根一致**');
-      ok(M.v.polarityOf(M.eB.id) === 'cathode',
-        '⚠ 如实记录（**本轮只记录、不改**）：被挤出电路的第 2 根电极仍会被回答 '
-        + J(M.v.polarityOf(M.eB.id)) + ' —— 它根本不在判据对里，这个 non-null 答案有误导风险；'
-        + '改法由 lead 裁定');
+      ok(M.v.polarityOf(M.eB.id) === null,
+        '✅ task-37 已修：被挤出电路的第 2 根电极 ⇒ ' + J(M.v.polarityOf(M.eB.id))
+        + '（它不在当帧判据对里 ⇒ 没有极性可言，返回 null 而不是猜一个阴极）');
       info('⑥ 三条的结论：① 读的时机决定结论（先读落后一帧、且会给出相反答案）'
         + ' ② 存读档后旧 id 与新 id 都必须 null、绝不拿陈旧值猜'
         + ' ③ >2 根电极时 bridge 与本契约同取**前两根**；真实新增（append）不改顺序，'
@@ -530,6 +529,92 @@ async function runSuite(T, opt) {
     }
   }
 
+
+  // ── ⑦ task-37：只有**当帧判据对**里的两根电极才有极（双向断言）──
+  head('⑦ 判据对（task-37）：被挤出电路的电极必须 null，而在对里的两根必须非 null');
+  {
+    // 电解池 + 3 根**石墨**电极（E0 = null ⇒ 一定不会走原电池口径，判据对只由 sol: 决定）
+    const mkElec = (mode, x2) => {
+      const sim = mkSim(T, { entities: [
+        { type: 'battery', x: 100, y: 100, props: { emf: EMF, internalR: RI } },
+        { type: 'beaker', x: 400, y: 300, fill: { liquid: [['CuSO4', 50], ['H2O', 50]] } },
+        { type: 'electrode', x: x2, y: 300, props: { metal: 'graphite' } },
+        { type: 'electrode', x: 412, y: 300, props: { metal: 'graphite' } },
+        { type: 'resistor', x: 250, y: 220, props: { resistance: R_SERIES } },
+      ] });
+      const bat = sim.get(0), beaker = sim.get(1), e1 = sim.get(2), e2 = sim.get(3), rs = sim.get(4);
+      sim.link(bat, 0, rs, 0); sim.link(rs, 1, e1, 0); sim.link(e2, 0, bat, 1);
+      const e3 = T.create('electrode', 400, 300);
+      e3.setProp('metal', 'graphite');
+      sim.world.add(e3, true);
+      sim.link(e3, 0, bat, 1);
+      if (mode === 'mid') {
+        const i = sim.world.entities.indexOf(e3);
+        sim.world.entities.splice(i, 1);
+        sim.world.entities.splice(3, 0, e3);
+      }
+      sim.tick(DT);
+      const sol = sim.cb.branches.find((b) => b.tag === 'solution') || null;
+      return { sim, e1, e2, e3, sol, v: beaker.vessel };
+    };
+    // 「谁拿到了非 null 答案」= 判据对本身 —— 一条断言同时守住两个方向
+    const answered = (v, list) => list.filter((e) => v.polarityOf(e.id) !== null).map((e) => e.id);
+    const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
+
+    const A = mkElec('append', 388);
+    ok(A.v.electrodes.length === 3 && !!A.sol && A.sol.a.e === A.e1.id && A.sol.b.e === A.e2.id,
+      '3 根电极、其中第 3 根**加在末尾** ⇒ bridge 的 sol: 支路仍是（电极1, 电极2）'
+      + ' ⇒ 第 3 根不参与电路（v.electrodes 长度 ' + A.v.electrodes.length + '）');
+    ok(A.v.polarityOf(A.e1.id) === 'anode' && A.v.polarityOf(A.e2.id) === 'cathode',
+      '在对里的两根照旧分派：电极1 ⇒ ' + J(A.v.polarityOf(A.e1.id)) + '、电极2 ⇒ '
+      + J(A.v.polarityOf(A.e2.id)));
+    ok(A.v.polarityOf(A.e3.id) === null,
+      '★ task-37 的判据：被挤出电路的第 3 根 ⇒ ' + J(A.v.polarityOf(A.e3.id))
+      + '（它不在判据对里、不携带电流 ⇒ 没有极性可言，**不是**猜一个阴极）');
+    ok(sameSet(answered(A.v, [A.e1, A.e2, A.e3]), [A.e1.id, A.e2.id]),
+      '双向：三根里**恰好**两根拿到非 null 答案，且正是判据对（实测非 null 集合 = '
+      + J(answered(A.v, [A.e1, A.e2, A.e3]).map((x) => (x === A.e1.id ? 1 : x === A.e2.id ? 2 : 3)))
+      + '）⇒ 上一条的 null 不会是「整个契约坏掉」造成的');
+
+    const M = mkElec('mid', 388);
+    ok(M.v.electrodes.length === 3 && !!M.sol && M.sol.a.e === M.e1.id && M.sol.b.e === M.e3.id,
+      '把第 3 根的下标挪到前两根之间 ⇒ bridge 的 sol: 支路换成（电极1, 电极3）');
+    ok(M.v.polarityOf(M.e1.id) === 'anode' && M.v.polarityOf(M.e3.id) === 'cathode',
+      '换对手之后照旧分派：电极1 ⇒ ' + J(M.v.polarityOf(M.e1.id)) + '、电极3 ⇒ '
+      + J(M.v.polarityOf(M.e3.id)));
+    ok(M.v.polarityOf(M.e2.id) === null,
+      '★★ 这正是 task-37 立案的那一格：**被挤出电路的第 2 根** ⇒ ' + J(M.v.polarityOf(M.e2.id))
+      + '（修复前它会答 cathode —— 一根没接进电路的电极被「告知」自己是阴极）');
+    ok(sameSet(answered(M.v, [M.e1, M.e2, M.e3]), [M.e1.id, M.e3.id]),
+      '双向：非 null 集合 = ' + J(answered(M.v, [M.e1, M.e2, M.e3]).map((x) => (x === M.e1.id ? 1 : x === M.e3.id ? 3 : 2)))
+      + '（恰为换过之后的判据对）');
+
+    // 原电池 + 3 根**金属**：判据对 = cell: 支路的 (high, low) = (Ag, Zn)，Cu 被挤出
+    {
+      const sim = mkSim(T, { entities: [
+        { type: 'beaker', x: 400, y: 300, fill: { liquid: [['CuSO4', 50], ['H2O', 50]] } },
+        { type: 'electrode', x: 386, y: 300, props: { metal: 'Cu' } },
+        { type: 'electrode', x: 400, y: 300, props: { metal: 'Zn' } },
+        { type: 'electrode', x: 414, y: 300, props: { metal: 'Ag' } },
+      ] });
+      const beaker = sim.get(0), eCu = sim.get(1), eZn = sim.get(2), eAg = sim.get(3);
+      sim.tick(DT);
+      const v = beaker.vessel;
+      const br = sim.cb.branches.find((b) => b.tag === 'galvanic') || null;
+      ok(!!br && br.a.e === eAg.id && br.b.e === eZn.id,
+        '三根金属 Cu/Zn/Ag ⇒ bridge 的 cell: 支路两端 = (Ag, Zn)（E0 最高 .80 / 最低 −.76）'
+        + '，Cu（.34）被挤出');
+      ok(v.polarityOf(eAg.id) === 'cathode' && v.polarityOf(eZn.id) === 'anode',
+        '在对里的两根照旧：Ag ⇒ ' + J(v.polarityOf(eAg.id)) + '、Zn ⇒ ' + J(v.polarityOf(eZn.id)));
+      ok(v.polarityOf(eCu.id) === null,
+        '★ 被挤出的 Cu ⇒ ' + J(v.polarityOf(eCu.id)) + '（修复前它答 anode —— 同一族的 non-null 误导）');
+      ok(sameSet(answered(v, [eCu, eZn, eAg]), [eAg.id, eZn.id]),
+        '双向：非 null 集合 = ' + J(answered(v, [eCu, eZn, eAg]).map((x) => (x === eAg.id ? 'Ag' : x === eZn.id ? 'Zn' : 'Cu')))
+        + '（恰为该原电池的判据对）');
+    }
+    info('⑦ 的结论：极性的定义域 = **当帧判据对**（电解池 sol: 两端 / 原电池 cell: 两端），'
+      + '判据对之外一律 null；两侧同时断言 ⇒ 既不许猜、也不许把整段契约变成恒 null。');
+  }
   S.items = S.pass + S.fail;
   S.reds = [...new Set(S.failSec)];
   return S;
@@ -566,7 +651,9 @@ if (MUTATE) {
     const SIG = vlines.find((l) => l.includes('polarityOf(entId) {'));
     const AB2 = vlines.find((l) => l.includes('const [a, b] = ents;'));
     const ENTS = vlines.find((l) => l.includes('ents.some((e) => !e'));
-    const anchorsOk = !!CORE && !!GALV && !!DRIVE && !!THRESH && !!SIG && !!AB2 && !!ENTS && iTail > iBody && iElec > iGalv
+    const GALVPAIR = vlines.find((l) => l.includes('if (entId !== high.id && entId !== low.id)'));
+    const SOLPAIR = vlines.find((l) => l.includes('if (entId !== a.id && entId !== b.id)'));
+    const anchorsOk = !!CORE && !!GALV && !!DRIVE && !!THRESH && !!SIG && !!AB2 && !!ENTS && !!GALVPAIR && !!SOLPAIR && iTail > iBody && iElec > iGalv
       && iBody > 0 && iTail > 0 && iGalv > 0 && iElec > 0;
     out.anchorFrom = 'src/chemistry/vessel.js@' + iBody + '-' + iTail + '/galv@' + iGalv + '-' + (iElec - 1);
     out.anchorsOk = anchorsOk;
@@ -583,7 +670,7 @@ if (MUTATE) {
       + "    const e0 = (e) => (e.probe.E0 === null || e.probe.E0 === undefined ? -99 : e.probe.E0);\n"
       + "    const higher = ents.every((o) => o.id === entId || e0(me) > e0(o));\n"
       + "    return higher ? 'cathode' : 'anode';\n",
-      ['①', '④', '⑤', '⑥'], ['①', '④', '⑤', '⑥']);
+      ['①', '④', '⑤', '⑥', '⑦'], ['①', '④', '⑤', '⑥', '⑦']);
 
     const M2 = MK('M2', '行为型：原电池那一路去偷读容器上的陈旧 currentU/currentSigned（把电解池口径套到原电池上）',
       GALV,
@@ -596,10 +683,10 @@ if (MUTATE) {
       + "        return ((d > 0) === (entId === a.id)) ? 'anode' : 'cathode';\n"
       + "      }\n"
       + "    }\n",
-      ['②', '③', '⑤'], ['②', '③']);
+      ['②', '③', '⑤', '⑥', '⑦'], ['②', '③', '⑤', '⑥', '⑦']);
 
     const M3 = MK('M3', '电解池那一路的符号写反（drive < 0 当阳极）',
-      DRIVE, '    const anode = drive < 0 ? a : b;', ['①', '③', '⑤', '⑥'], ['①', '③', '⑤', '⑥']);
+      DRIVE, '    const anode = drive < 0 ? a : b;', ['①', '③', '⑤', '⑥', '⑦'], ['①', '③', '⑤', '⑥', '⑦']);
 
     const M4 = MK('M4', '金丝雀：删掉「无电流/无电压」阈值 ⇒ 0 也被当成有效驱动',
       THRESH, '    if (!Number.isFinite(drive)) return null;', ['④'], ['④']);
@@ -608,11 +695,17 @@ if (MUTATE) {
     const M5 = MK('M5', '读的时机：电解池那一路忽略符号，把**第一根**永远当阳极 ⇒「先读」与「后读」给出同一个答案',
       DRIVE, '    const anode = a;', ['①', '⑥'], ['①', '⑥']);
 
+    const M8 = MK('M8', '原电池：去掉判据对检查 ⇒ 被挤出的金属电极又被回答一个极（task-37 的病灶）',
+      GALVPAIR, '    // (M8 变异体：原电池判据对检查被移除)', ['⑦'], ['⑦']);
+
+    const M9 = MK('M9', '电解池：去掉判据对检查 ⇒ 被挤出电路的电极又被回答一个极（task-37 的病灶）',
+      SOLPAIR, '    // (M9 变异体：电解池判据对检查被移除)', ['⑥', '⑦'], ['⑥', '⑦']);
+
     const M6 = MK('M6', '存读档：拿不到电极实体时**给猜值**而不是 null ⇒ 旧 id / 无 world 回指都会被猜一个',
       ENTS, ENTS.slice(0, ENTS.indexOf('return null;')) + "return 'cathode';", ['④', '⑥'], ['④', '⑥']);
 
     const M7 = MK('M7', '取序：改成取**后两根** ⇒ >2 根电极时与本契约/bridge 的取序不再一致',
-      AB2, '    const [a, b] = ents.slice(-2);', ['⑥'], ['⑥']);
+      AB2, '    const [a, b] = ents.slice(-2);', ['⑥', '⑦'], ['⑥', '⑦']);
 
     const MNOOP = MK('MNOOP', 'null 对造：语义零改动（1e-6 与 0.000001 同值）⇒ 文本变更但必须 0 红',
       'const POLARITY_EPS = 1e-6;', 'const POLARITY_EPS = 0.000001;', [], []);
@@ -624,7 +717,7 @@ if (MUTATE) {
     const MSYNTAX = MK('MSYNTAX', 'null 对造：往文件末尾追加一条语法错误 ⇒ 模块加载失败（必须落 infra、red 集合为 null）',
       lastLine, lastLine + '\nconst = ;', null, null);
 
-    const MUTANTS = [M1, M2, M3, M4, M5, M6, M7, MNOOP, MCRASH, MSYNTAX];
+    const MUTANTS = [M1, M2, M3, M4, M5, M6, M7, M8, M9, MNOOP, MCRASH, MSYNTAX];
 
     // ── 对照组：仓库本体（未打补丁）必须**确实跑过**且全绿 ──
     const ctrl = await runSuite(await loadTarget(ROOT), { verbose: false });
@@ -699,7 +792,7 @@ console.log('\n' + (S.fail === 0 ? '\x1b[32m全部通过' : '\x1b[31m有失败')
   + (S.fail ? '，失败 ' + S.fail + ' 项' : ''));
 console.log('ELECTRODE_POLARITY_JSON ' + JSON.stringify({
   mode: 'green', items: S.pass + S.fail, pass: S.pass, fail: S.fail,
-  sectionsDone: Object.keys(S.secTotal).length, sectionsTotal: 6, redIds,
+  sectionsDone: Object.keys(S.secTotal).length, sectionsTotal: 7, redIds,
   tmpAbs: TMP, vesselSha: sha256(readFileSync(join(ROOT, TOUCHED[0]))).slice(0, 12),
 }));
 if (S.fail) { console.log('失败明细：'); for (const f of S.failed) console.log('  - ' + f); }
