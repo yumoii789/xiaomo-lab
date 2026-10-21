@@ -14,6 +14,8 @@ import { bus, EV } from '../core/bus.js';
 
 const C_WATER = 4.18;        // J/(g·K)
 const RHO_WATER = 1.0;       // g/mL
+// 电极极性契约的「无电流」阈值：溶液支路 U / I 的绝对值低于它就当没通电（含求解器浮点残差）
+const POLARITY_EPS = 1e-6;
 
 export class VesselModel {
   constructor(ent, capacity = 250) {
@@ -34,7 +36,7 @@ export class VesselModel {
     this.electricCurrent = 0;      // 通过溶液的电流 A
     this.currentSigned = 0;        // 带符号电流（+ 正向 / − 反向），只给化学层定电解方向 A
     this.currentU = 0;             // 带符号电压（与 currentSigned 同参考方向），供面板出「瞬间电压」V
-    this.electrodes = [];          // 插入的电极（字符串描述）
+    this.electrodes = [];          // 插入的电极（**实体 id 列表**，由 coupling/bridge.js 每帧用 `electrodes.map(e => e.id)` 重写）
     this.heatIn = 0;               // 本帧接收的热功率 W（瞬时）
 
     this.color = null;
@@ -189,6 +191,60 @@ export class VesselModel {
   }
 
   hasElectrodes() { return this.electrodes.length >= 2; }
+
+  /**
+   * 电极极性契约（plans/20 §五 P0）：给定电极实体 id ⇒ 'cathode' | 'anode' | null。
+   *
+   * 化学域只说**阴/阳极**（'cathode' = 阴极 = 还原极，'anode' = 阳极 = 氧化极）；
+   * 正/负极是**物理域**的口径，不在本契约里出现 —— 两者关系在两种情形下相反：
+   *   · 原电池（coupling/bridge.js 造出 `cell:` 支路）：**高电位端 = 阴极**（E0 高的那根金属）；
+   *   · 电解池（`sol:` 支路）：**高电位端 = 阳极**（接电源正端那一侧，电流自电解液流向它）。
+   * 于是「谁电位高」这**同一条判据量**在两种情形下给出**相反**的阴/阳结论 —— 本契约的全部内容。
+   *
+   * 判据源一律是**真实求解结果**，不按材料名或摆放位置硬编码：
+   *   · 原电池：先镜像 bridge 造 `cell:` 支路的三个条件（≥2 根带 E0 的金属 / ionConc()>0.05 /
+   *     ΔE0>0.05），成立才按 ΔE0 比较 —— 与 bridge 的 `emf = ΔE0` 结论同源；
+   *   · 电解池：读 `currentU`（= V(电极[0]) − V(电极[1])，由 coupling/bridge.js 从 `rec.U` 写入）。
+   *
+   * ⚠ 为什么必须先排除原电池再读 currentSigned / currentU：bridge.distribute() 每帧只清
+   *   `electrodes` 与 `electricCurrent`，**不清**这两个带符号量 ⇒ `cell:` 支路那一帧它们是
+   *   **上一帧的陈旧值**。本方法只在「bridge 必定造出 `sol:` 支路」的那些条件（非原电池 +
+   *   volume>0 + resistance() 有限）下才读它们，因此读到的必是当帧结果，不会是陈旧值。
+   *
+   * `null` 的语义（四类，均不抛错）：
+   *   ① 不是本容器的电极（含不存在的 id、非电极实体）；② 容器里不足两根电极；
+   *   ③ 拿不到电极实体（容器没有 world 回指，例如未入世界）；④ 判据量不可用：
+   *      非原电池时 |currentU| 与 |currentSigned| 都低于 POLARITY_EPS，或溶液电阻无穷大（不导电）。
+   */
+  polarityOf(entId) {
+    const ids = Array.isArray(this.electrodes) ? this.electrodes : [];
+    if (ids.length < 2 || !ids.includes(entId)) return null;                    // ② ①
+    const world = this.ent && this.ent.world;
+    const ents = ids.map((id) => (world && typeof world.get === 'function' ? world.get(id) : null));
+    if (ents.some((e) => !e || !e.probe || e.probe.kind !== 'electrode')) return null;   // ③
+    const [a, b] = ents;                    // 与 bridge 的 sol: 支路同序（都是 world 顺序）
+
+    // ── 原电池：镜像 coupling/bridge.js 造 cell: 支路的三个条件 ──
+    const metals = ents.filter((e) => e.probe.E0 !== null && e.probe.E0 !== undefined);
+    if (metals.length >= 2 && this.ionConc() > 0.05) {
+      let low = metals[0], high = metals[0];
+      for (const m of metals) {
+        if (m.probe.E0 < low.probe.E0) low = m;
+        if (m.probe.E0 > high.probe.E0) high = m;
+      }
+      if (high.probe.E0 - low.probe.E0 > 0.05) {
+        return entId === high.id ? 'cathode' : 'anode';                         // 高电位端 = 阴极（还原）
+      }
+    }
+
+    // ── 电解池：溶液支路确实成立时才读当帧求解结果 ──
+    if (!(this.volume > 0) || !isFinite(this.resistance())) return null;        // ④ 不导电 ⇒ 没有 sol: 支路
+    const U = Number(this.currentU), I = Number(this.currentSigned);
+    const drive = (Number.isFinite(U) && Math.abs(U) > POLARITY_EPS) ? U : I;
+    if (!Number.isFinite(drive) || Math.abs(drive) <= POLARITY_EPS) return null; // ④ 无电流 / 无电压
+    const anode = drive > 0 ? a : b;                                            // 高电位端 = 阳极（氧化）
+    return entId === anode.id ? 'anode' : 'cathode';
+  }
 
   /** pH 估算 */
   pH() {

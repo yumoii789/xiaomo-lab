@@ -304,6 +304,133 @@ const SUITE = [
     note: 'task-20（spdt 单刀双掷 + led 发光二极管；器材自 117 增至 119）',
   },
   {
+    id: 'toolbar-probe',
+    cmd: ['tools/toolbar-probe.mjs'],
+    // ⚠ expect 必须**从 `{` 开始**：探针把 `TOOLBAR_JSON` 标签包在 ANSI 粗体转义里（本文件共同约定）。
+    expect: '"total":37,"pass":37,"fail":0',
+    label: '画布功能栏 26 项（8 处散落入口去向守恒 + 行为等价逐位读数 + 插槽重建后仍在 + 边界不抛）',
+    layer: 'node',
+    // ★ task-27 新增。两个值钱的读数：
+    //   ① 它抓到的真盲区：`app[MOUNTED]` 复用守卫只对**新实例**生效 ⇒ 只重复 mount 同一实例时，
+    //      变异体落地却一条不红；补 `rebuild.secondInstanceReusesFirst` 才把它钉住。
+    //   ② 插槽重建风险（接缝图点名）实测结论：冷启动 `mountSlots()` 每槽清一次 `innerHTML`；
+    //      热路径 `mountSlot` **体内** `innerHTML` 0 次（剥注释后，体长 2104）；**真刀**是
+    //      **兄弟条目**渲染回调写 `host.innerHTML=`（`ui.toolbar.js` 搬家后 3→2）⇒ 同槽任一条目
+    //      重渲染 = 整槽被抹；换主题**不是**那条路径（`core/theme.js` 0 次、`core/plugin.js` 2 处发
+    //      `slot:changed`）。功能栏挂 `#stage`（插槽之外）⇒ 打不到。**接缝图的怀疑被推翻、但真刀找到了。**
+    //   ⚠ 行为等价给的是**逐位读数**（`setTool` 恰好 1 次 / `zoomAt` 目标 2.5 锚点 400 额外置脏 0 次 /
+    //   复位 true⇒1 次 false⇒0 次），不是目测。
+    note: 'task-27（画布功能栏整合：8 处收拢为 1 条栏，`topbar.tools` 槽不再注册条目 ⇒ 槽 9→8，UI 插件数仍 32）',
+  },
+  {
+    id: 'grid-probe',
+    cmd: ['tools/grid-probe.mjs'],
+    // ⚠ expect 必须**从 `{` 开始**（探针把 `GRID_JSON` 标签包在 ANSI 粗体里 —— 本文件共同约定）。
+    expect: '"items":24,"pass":24,"fail":0',
+    label: '网格/坐标开关 24 项（开态 2 条网格指令 vs 关态 0 条 + 换算唯一出口 + 默认态逐位相同 + 有限值边界）',
+    layer: 'node',
+    // ★ task-28 新增。三个值钱的读数：
+    //   ① **默认态逐位相同由构造成立**：`render()` 三个调用点**无条件**、判断全在方法**入口**
+    //      ⇒ 开关加进来而默认态的绘制指令流一字不变（这是能同时满足「加功能」与「逐位相同」的形状）。
+    //   ② 开/关对照**先证空集不恒真**：ON 有 2 条网格 stroke、OFF 恰好 0 条 ⇒ 两态差异**恰好**是网格。
+    //   ③ 它自己推翻的两条前提：`pan-probe` 的指令流只记 `setTransform/translate/clearRect/scale`
+    //      ⇒ 网格指令从不在那串里、与 §② **无因果**（接缝图⑥ 与我任务书的最大风险都不成立）；
+    //      「`render()` 里加 `if` 就会红」同样不成立。
+    //   ⚠ 它抓到的**真 bug**（本仓级）：`gridSize = 0` 与 `gridSize = Infinity` 都会让
+    //      `for(…; x += s)` **死循环 ⇒ 页面卡死**（不是画得难看）⇒ 守卫 `!Number.isFinite(s) || !(s > 0)`。
+    //      以及 `drawGrid` 可见区方向算反（`floor(pan/s)*s` ⇒ pan≠0 时屏两端各露一条 `2·|pan|` 宽
+    //      的无网格带）⇒ 改走 `(屏幕−pan)/zoom`，末尾 `|| 0` 消 `-0` 保住 pan=0/zoom=1 逐位相同。
+    note: 'task-28（网格 + 坐标读数开关；默认 true，偏好键 `xiaomo.grid.v1` 复用既有 try/catch 写法、未新建存储）',
+  },
+  {
+    id: 'lock-readout-probe',
+    cmd: ['tools/lock-readout-probe.mjs'],
+    // ⚠ expect 必须**从 `{` 开始**（探针把 `LOCK_READOUT_JSON` 标签包在 ANSI 粗体里）。
+    expect: '"items":101,"pass":101,"fail":0',
+    label: '逐件锁定 + 读数 101 项（真值位表 119/119 默认有位 + 存档按需多一键 + 拖动入口就地拦下 + 读数与 Inspector 输出逐字对拍）',
+    layer: 'node',
+    // ★ task-26 新增。三个值钱的读数：
+    //   ① **M2 是次序断言**：「把判定挪到 `this.drag = {` 之后」⇒ **终值一样、次序不同**
+    //      —— 专杀「事后把器材夹回来」这种看起来对、手感错的实现。
+    //   ② 存档选**甲案（扩 toJSON 白名单，按需写）**：未锁定时 `locked` 键**根本不出现**
+    //      ⇒ 旧存档六键 `props,rot,state,type,x,y` 逐字不变，锁定后只多 `locked` 一个键。
+    //   ③ 读数**不复制换算、也不复制格式**：`readout.js` 里 `toFixed(` 出现 0 次、`fmtBy` 来自
+    //      `inspector.js`、且**完全不按 `e.type` 判断** ⇒ 它与侧栏读数是同一口径。
+    //   ⚠ 边界：`def.stats` **一块都没新增**（读数只吃既有 38 块 / 9 文件）；
+    //      `caps.js` 的 `LOCK_CAP` **不进** `CAP_KEYS`/`DEFAULT_CAPS`（那两处键集合与按钮清单
+    //      被 `inspector-caps-probe` §①/§⑤ 冻结）；`inspector.js` 源码**一字未动**（它的 stats 循环
+    //      文本是 `inspector-stats-probe` 的变异锚点 ⇒ 动一个字打红两套探针）。
+    note: 'task-26（逐件锁定 + 画布逐件读数；`lock` 是新默认位、在冻结键集之外 ⇒ inspector-caps 5 键口径未动）',
+  },
+  {
+    id: 'assembly-probe',
+    cmd: ['tools/assembly-probe.mjs'],
+    // ⚠ expect 必须**从 `{` 开始**（本文件共同约定：探针把 JSON 标签包在 ANSI 粗体转义里）。
+    expect: '"items":60,"pass":60,"fail":0',
+    label: '一键组装 60 项（成套预设自带的连线真落台 + 真求解器读数 + 撤销哈希逐位回来 + 幂等/脏台面不残留）',
+    layer: 'node',
+    // ★ task-29 新增。诚实命名是本项最要紧的一条：落地的是「**成套预设（含连线）**」——
+    //   连线来自预设数据**自带的** `wires`，靠 `loadScene()` 整场景替换落地。
+    //   **「组装时算法自动布线」无证据**（两个 umi 包 + 两个编辑器按 `自动连线|自动连接|autoConnect|
+    //   autoWire|自动接线` **0 命中**）⇒ 代码注释与 UI 文案一律不许这么写。
+    //   ⚠ 它专门为此立了一条**能红**的变异体（`M7-naming-claim`）：让代码"声称自动布线" ⇒ 必红 ✓
+    //   —— 把「不是功能、但是红线」的文案口径做成了可证伪断言，这是本项最值钱的一条。
+    //   ⚠ 四类「假绿」各立专项：空集恒真（要求非零读数 >0）· 存在性恒真（`WIRE-ENDPOINTS-*`
+    //   逐根端点对应，不只数条数）· 断言与常量耦合（件数一律取 `build()` 现测）· 数值路径盲区。
+    //   ⚠ 撤销选**甲案**（组装前自动存快照，「撤销组装」= 载回它）：不动 `undo.js` 的
+    //   `OP_KINDS.load`（那是产品语义）；快照必须走**存档形状**，因为 `_applyScene()` 只认
+    //   `fill.liquid/solid`，会**静默丢** mol/gas/precip/temp。
+    note: 'task-29（一键组装：成套预设含连线；撤销 = 载回组装前快照，组装与撤销都**不入撤销栈**）',
+  },
+  {
+    id: 'inspector-stats-probe',
+    cmd: ['tools/inspector-stats-probe.mjs'],
+    expect: '全部通过：171 项',
+    label: '属性检视器读数 171 项（瞬时/有效 并列、额定与实时电阻、自报 stats 位置契约、未接线占位口径）',
+    layer: 'node',
+    // ★ 这一项是**补登**的，起因是一条真实的「闸门外腐烂」：
+    //   它在总网之外已经红着 1/168，谁都没看见 —— 根因是那条断言钉了**代理量**
+    //   （「未接线时 rmsI 是 MNA 浮点残差 ~1e-12」），而求解器后来的实现给出**精确 0**
+    //   ⇒ 断言自己腐了，产品其实一直是对的（面板按 wiredPortsOf(...).size >= 2 判「未接线」，
+    //   是**接线真源** ✓）。⇒ 换成两条：甲）未接线 ⇒ 占位（与 rmsI 取值**无关**，rmsI 只如实记录）；
+    //   乙）**已接线但电流合法为 0** ⇒ 必须给读数 0 A 而不是占位 —— **只有这条是鉴别性的**，
+    //   它证明判据源是接线：谁把 wired 偷换成 rmsI !== 0，乙必红（探针内配了该变异体，实测能红 ✓）。
+    //   两条教训：**钉不变量，不钉附带产物**；**闸门外的绿是假绿** —— 不登记的探针会烂。
+    note: '属性检视器 + 未接线占位口径（判据源是接线真源，不是数值）',
+  },
+  {
+    id: 'electrode-polarity-probe',
+    cmd: ['tools/electrode-polarity-probe.mjs'],
+    expect: '"items":68,"pass":68,"fail":0',
+    label: '电极极性契约 68 项（电解池按电流、原电池按 E0 两种情形分派 + 同种电极只对调接线即翻转 + null 七类 + 无副作用）',
+    layer: 'node',
+    // ★ 本项的判据痛点：vessel.currentU/currentSigned 只由 sol: 支路写，而原电池走 cell: 支路
+    //   不写也不清零（distribute() 只清 electrodes/electricCurrent）⇒ 原电池下它们是陈旧值 ✗。
+    //   实测反例（同一杯、同一对电极实体）：先电解出 currentU=+0.4613 V，再改成 Cu/Zn ⇒ sol: 消失、cell: 接管，
+    //   currentU/currentSigned 与上帧逐位相同而 electricCurrent 已清零 ⇒ 同一根电极由 anode 变 cathode ✓。
+    //   ⇒ 两条写死规则各踩空一次（A 高电位端=阳极 在原电池错 ✗、B E0 高者=阴极 电解池错 ✗）——
+    //   这就是「判据要钉不变量、不许写死单条规则」的可复现反例 ✓。
+    //   ⚠ 另记两条成员自查出来的假绿框架缺陷：① 锚点命中但文本未变的补丁曾被评为通过 ⇒ 现在
+    //   landInCode 量文本增量、命中未变更判 land-fail；② runSuite() 不返回 items 时
+    //   S.items === ctrl.items 两边 undefined、恒真 ⇒ 条数一致断言是假绿 ⇒ 现在显式算好并加
+    //   Number.isFinite 前置 ✓。
+    note: 'task-32（电极极性契约：两种情形分派；行为型变异体偷读陈旧 currentU 必红）',
+  },
+  {
+    id: 'diode-gate-probe',
+    cmd: ['tools/diode-gate-probe.mjs'],
+    expect: '"items":30,"pass":30,"fail":0',
+    label: '二极管与门/或门 30 项（Or 真值表 0111、And 真值表 0001、电平结构互为镜像、统一 3 V 余量、万用表高阻与读负载）',
+    layer: 'node',
+    // ★ 判据口径：统一 3 V 阈值 + 不变量是**电平结构**（Or 高 ≈ Vp−V_D、And 高 ≈ Vp、低 ≈ V_D，高电平差 ≥ 1 V），
+    //   不是「两套阈值必须不同」—— 阈值是**代理量**。
+    // ⚠ 红档要两面镜子：金丝雀必红 **且** null 对照（只动一个标点、语义为零）必 0 红 ——
+    //   只有金丝雀会被「恒红」骗过，只有 null 会被「恒绿」骗过，缺一不可。
+    // ⚠ landInCode 必须四条同时成立（代码区恰命中 1 次 / 送出文本锚归零且 repl 多 1 / 盘上副本同样 /
+    //   实测文本增量 == repl.length − anchor.length），因为**等长替换的 delta 是 0**，光看长度会漏。
+    note: 'task-30（二极管与门：镜像电平结构 + 两面镜子）',
+  },
+  {
     id: 'publish-gate',
     cmd: ['tools/publish-gate.mjs'],
     expect: '发布闸门通过：15 项，可以发布',

@@ -76,6 +76,29 @@ export const SPEEDS = [0.1, 0.25, 0.5, 1, 2, 4];
 export const ZOOM_MIN = 0.25;
 export const ZOOM_MAX = 4;
 
+/**
+ * 网格 / 坐标开关的**持久化键**。仓库没有中心化的设置存储，既有做法是「每特性一个键 +
+ * 用 try/catch 包住访问」（`src/ui/palette.js` 的折叠态、`src/core/inventory.js` /
+ * `src/core/market.js` 都在 `core/` 里这么干）⇒ 沿用同一套，**不自造新存储**。
+ * 读不到（无痕模式、嵌入环境、Node 探针里根本没有 localStorage）⇒ 回默认值 **true**（开）。
+ */
+export const GRID_KEY = 'xiaomo.grid.v1';
+
+function readGridPref() {
+  try {
+    if (typeof localStorage === 'undefined') return true;   // Node / 无痕 / 嵌入环境
+    const v = localStorage.getItem(GRID_KEY);
+    return v === null ? true : v !== '0';                   // 没存过 = 默认开
+  } catch (e) { return true; }
+}
+
+function writeGridPref(on) {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(GRID_KEY, on ? '1' : '0');
+  } catch (e) { /* 存不下（配额/无痕）就只在本次会话生效，与 ui.settings.js 同风格 */ }
+}
+
 export class Engine {
   constructor(canvas, world) {
     this.canvas = canvas;
@@ -111,6 +134,30 @@ export class Engine {
     this._fpsAcc = 0; this._fpsN = 0;
 
     this.gridSize = 24;
+    /**
+     * 网格与坐标读数的**总开关**（项④）。
+     * **默认 true**：改动前 `drawGrid()` 是**无条件**画的（`render()` 里没有任何判断），
+     * 默认开才能兑现「开关开着时绘制指令流与改动前逐位相同」这条硬指标
+     * （`tools/pan-probe.mjs` §②。实测该探针只记 setTransform / clearRect / translate /
+     * scale 四个方法，网格的 stroke 从来不在它的指令流里 ⇒ 这个开关在默认态
+     * **不可能**打破那条判据 —— 但仍然照跑一遍取证）。
+     * ⚠ NB 物理侧的对应设置是 `{"name":"网格","checked":false}`（默认**没有**底纹网格），
+     *   可那是**某个 lab（labId 5）的设置**，我们这里是全局底纹 ⇒ 默认值属**产品决策**
+     *   （`plans/17` ⑥ 原文：「需要用户拍板」）。这里取 true = 不改现状；翻成 false
+     *   只改这一行，且与上面的判据无关。
+     * ⚠ 一根开关管两件事（画网格 + 画坐标读数），照 NB 的 `SHOW_COORDINATE`：
+     *   命令名是「显示坐标」、显示名是「网格」⇒ 一个开关，两个效果。
+     * ⚠ 只改「画不画」：**不动 `gridSize`、不动吸附**（吸附格是 `interact.js` 的 SNAP = 4，
+     *   与这张 24px 的网格从来不是同一张格 —— 顺手对齐会改掉器材拖动落点）。
+     */
+    this.showGrid = readGridPref();
+    /** 坐标读数用的指针位置（**屏幕坐标**，相对画布左上角）；null = 还没收到指针 ⇒ 不画读数 */
+    this.pointerScreen = null;
+    // 坐标读数的指针从 DOM 事件来（读数本身不需要被点中 ⇒ 可以画在 Canvas 上）。
+    // ⚠ 替身画布（Node 里的探针）可能没有 addEventListener ⇒ 全程可选，一律不抛。
+    if (this.canvas && typeof this.canvas.addEventListener === 'function') {
+      this.canvas.addEventListener('pointermove', (ev) => this._onPointerMove(ev), { passive: true });
+    }
     /** UI 层可以在这些钩子里画拖拽预览、连线预览等 */
     this.overlays = [];
     this.onFps = null;
@@ -161,6 +208,59 @@ export class Engine {
 
   /** B1/B5：把「画面需要重绘」交给引擎（UI 层改动场景或选中态时调用） */
   markDirty() { this._needsRender = true; }
+
+  /**
+   * 切换网格 / 坐标读数（项④）。返回切换后的值。
+   *
+   * ⚠ **必须置脏**：状态变了、画面不变，是这条开关最容易漏的一环
+   *   （`plans/17` ④「会假绿的四类」第 4 类「数值路径盲区」明确点名）。
+   * ⚠ 关闭时**不把 `gridSize` 置 0** —— 那样网格确实会消失、只看「有没有 stroke」的
+   *   判据也全绿，但会悄悄污染任何「用 gridSize 反推」的推断（`src/ui/interact.js`
+   *   里就留着这样一条注释）⇒ **常量真源恒为 24，开关另设字段**。
+   */
+  setShowGrid(on) {
+    const v = !!on;
+    if (v === this.showGrid) return this.showGrid;     // 没变就不惊动一帧（与 resetPan 同风格）
+    this.showGrid = v;
+    // 持久化走既有做法（读不到就回默认，见 readGridPref）；存不下也不影响本次会话
+    writeGridPref(v);
+    this.markDirty();
+    return this.showGrid;
+  }
+
+  /**
+   * 坐标读数的指针位置入口（**屏幕坐标**，相对画布左上角）。UI 层从 DOM 事件里取。
+   * ⚠ 只在**读数文本真的会变**时才置脏：坐标取整后 1px 以内的抖动不改变画面，
+   *   否则画布会退化成「鼠标一动就整帧重绘」。
+   * ⚠ 非法数值（NaN / 非数）直接忽略：不崩、不抛（边界判据）。
+   */
+  setPointerScreen(x, y) {
+    const px = Number(x), py = Number(y);
+    if (!Number.isFinite(px) || !Number.isFinite(py)) return;
+    const prev = this.pointerScreen;
+    this.pointerScreen = { x: px, y: py };
+    if (!this.showGrid) return;                        // 关着时读数不画，也就没必要重绘
+    if (prev && this.coordText(prev.x, prev.y) === this.coordText(px, py)) return;
+    this.markDirty();
+  }
+
+  /** 指针移动 ⇒ 更新读数（减掉画布在页面里的位置，得到**画布内**坐标）。 */
+  _onPointerMove(ev) {
+    if (!ev) return;
+    const c = this.canvas;
+    const r = c && typeof c.getBoundingClientRect === 'function' ? c.getBoundingClientRect() : null;
+    this.setPointerScreen(ev.clientX - (r ? r.left : 0), ev.clientY - (r ? r.top : 0));
+  }
+
+  /**
+   * 读数文本（**唯一真源**）：屏幕点 → 世界坐标**只走 `screenToWorld()`**。
+   * ⚠ 这里手写 `(sx - pan.x) / zoom` 与它**数值逐位相同** ⇒ 只有「结构上不许有第二条
+   *   式子」才防得住（`plans/17` ④.4 的数值路径盲区）。
+   */
+  coordText(sx, sy) {
+    const w = this.screenToWorld(sx, sy);
+    return `(${Math.round(w.x)}, ${Math.round(w.y)})`;
+  }
 
   /**
    * 屏幕坐标（相对画布左上角）→ 世界坐标。**唯一的换算出口**。
@@ -359,7 +459,10 @@ export class Engine {
     if (this.zoom !== 1) g.scale(this.zoom, this.zoom);
 
     this.drawBackdrop(g);
+    // 网格与坐标读数：**同一个开关**（项④），所以两个调用点都不带条件 —— 判断在各自方法**入口**。
+    // ⚠ 这样默认（开）时这条指令流与改动前逐字相同，关掉时也只是「两个方法直接 return」。
     this.drawGrid(g);
+    this.drawCoords(g);
 
     const world = this.world;
     this.drawWires(g, world);
@@ -395,7 +498,11 @@ export class Engine {
 
 
   drawGrid(g) {
+    if (!this.showGrid) return;        // 项④：关掉时**一条网格指令都不发**，不是「画成透明」
     const s = this.gridSize;
+    // 格距 ≤ 0 / NaN：直接不画。⚠ 不是「画得难看」那么轻 —— `for (…; x += s)` 在 s === 0 时
+    // **死循环**（页面直接卡死），所以这条守卫必须挡在循环之前。
+    if (!Number.isFinite(s) || !(s > 0)) return;
     // 世界坐标下的可见区 = (屏幕区 − pan) / zoom。这样网格线仍钉在世界格点上，
     // 拖动画布/缩放时是「视角在动」而不是「网格跟着屏幕滑」。
     // ⚠ 起手四舍五入到整格：省掉看不见的屏外线，也让端点落回世界格点。
@@ -424,6 +531,23 @@ export class Engine {
     for (let x = x0; x <= x1; x += s * 5) { g.moveTo(x + .5, y0); g.lineTo(x + .5, y1); }
     for (let y = y0; y <= y1; y += s * 5) { g.moveTo(x0, y + .5); g.lineTo(x1, y + .5); }
     g.stroke();
+  }
+
+  /**
+   * 坐标读数（项④的第二半 —— 与网格**同一个开关**）。照 NB 的 `SHOW_COORDINATE`：
+   * 命令名是「显示坐标」而显示名是「网格」⇒ 一根开关，两个效果。
+   *
+   * ⚠ 换算**只走 `screenToWorld()`**（经 `coordText()`），这里不许出现第二条 `pan`/`zoom` 式子。
+   * ⚠ 画在**左下角**、字号除以 zoom ⇒ 屏幕上恒为 11px，缩放时不会跟着变大变小。
+   * ⚠ 角点位置也用 `screenToWorld()` 求（屏幕原点附近那一点的世界坐标）⇒ 读数整块跟着
+   *   同一个视口变换走，**不需要**再写一条反向式子（反向式子正是 `plans/17` ④.4 点名的盲区）。
+   */
+  drawCoords(g) {
+    if (!this.showGrid || !this.pointerScreen) return;
+    const at = this.screenToWorld(10, this.h - 10);
+    g.font = `${11 / this.zoom}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+    g.fillStyle = C.gridStrong;
+    g.fillText(this.coordText(this.pointerScreen.x, this.pointerScreen.y), at.x, at.y);
   }
 
   drawWires(g, world) {

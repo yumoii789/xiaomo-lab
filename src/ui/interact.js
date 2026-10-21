@@ -36,6 +36,7 @@
 
 import { C } from '../core/theme.js';
 import { canFeed } from '../equipment/lab.js';
+import { installReadout } from './readout.js';
 
 const HIT_PORT = 13;
 /**
@@ -158,6 +159,13 @@ export class Interaction {
     // 对鼠标和滚轮完全惰性 —— 桌面用户既不会因此失去什么，触屏笔记本
     // （主指针是触控板、pointer:fine 为真）也不会漏掉这条。
     this.canvas.style.touchAction = 'none';
+
+    // 逐件就地读数（task-26 项②）+ 锁定开关（项①）的就地层。挂在这里而不是 `src/main.js`：
+    // 主入口是别的写者的文件（一键组装正在改它），而本层与交互层同生共死。
+    // ⚠ 它**不进 `ALL_PLUGINS`**：UI 插件数被 tools/guard-plugins.mjs 冻结在 32，
+    //   这一层是纯视图叠层、没有插件生命周期。
+    /** @type {import('./readout.js').Readout|null} */
+    this.readout = installReadout(app);
 
     this.bind();
   }
@@ -439,6 +447,12 @@ export class Interaction {
       }
       if (ent) {
         this.app.select(ent);
+        // ⚠ **锁定的器材：能选中、不能拖**（task-26 项①）。判定写在这里、`this.drag = {` 之前 ——
+        //   这是全项目唯一把用户手势变成 `ent` 位移的地方，在这里拦下才叫「拖不动」；
+        //   写成「拖完再夹回原位」终值逐位一样，但器材会跟着手指抖一下、撤销栈还会多一条 move
+        //   （`tools/lock-readout-probe.mjs` §① 同时钉数值与这个**次序**，M2 变异体专杀事后夹回）。
+        //   `markDirty()` 不能省：选中框变了，与下面空白处分支同一处副作用（少它＝选中框不重绘）。
+        if (ent.locked) { this.markDirty(); return; }
         // ⚠ dx/dy 用世界坐标算（ent.x 是世界坐标），sx/sy 用屏幕坐标算（起步阈值比的是
         //    手指在屏幕上走了多远）—— 两者在这一处**必然**取不同的点，不是笔误。
         this.drag = {

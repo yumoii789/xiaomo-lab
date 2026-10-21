@@ -473,7 +473,7 @@ head('⑪ 插件装载守卫：真实的 ALL_PLUGINS 全部装得上（本次 bu
     const slots = guardOut.slotNames || [];
     const anchored = slots.filter((n) => guardOut.slotTail && guardOut.slotTail[n]
       && /\.js:\d/.test(String(guardOut.slotTail[n].what || '')));
-    ok(slots.length >= 9 && anchored.length === slots.length
+    ok(slots.length >= 8 && anchored.length === slots.length
       && slots.every((n) => guardOut.renderTrace && guardOut.renderTrace[n]),
       `逐槽痕迹都有代码出处（${anchored.length}/${slots.length}）且每槽都有 renderTrace 读数`);
   }

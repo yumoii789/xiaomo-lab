@@ -64,6 +64,23 @@ export class Entity {
     this.selected = false;
     this.hovered = false;
     this.alive = true;
+    /**
+     * 逐件锁定（task-26 项①）：用户把**这一件**钉在台面上，拖动入口不再接管它的位移。
+     * 与 selected / hovered 同类 —— **每台本体自有**的布尔位，不是 def 上的属性。
+     * ⚠ 位移规则**不在这里**：判定写在拖动入口（`src/ui/interact.js` 的 `onDown`，
+     *   全项目唯一把用户手势变成 `ent` 位移的地方）。写成「拖完再夹回原位」终值一样，
+     *   但器材会跟着手指抖、还会多一条 move 撤销记录（`tools/lock-readout-probe.mjs` §① 钉住这个次序）。
+     * ⚠ 写入口只此一处 `setLocked()`：能力位动作（`caps.js` 的 `applyCap`）与存档回填都走它。
+     */
+    this.locked = false;
+  }
+
+  /** 锁定 / 解锁的唯一写入口；返回**是否真的变了**（重复设同值不算变化） */
+  setLocked(v) {
+    const next = v === true;
+    if (this.locked === next) return false;
+    this.locked = next;
+    return true;
   }
 
   get domain() { return this.def.domain; }
@@ -144,17 +161,29 @@ export class Entity {
   render(g, world) {}
 
   // ─── 序列化 ──────────────────────────────────────────────
+  /**
+   * ⚠ task-26 存档决策（**甲：扩白名单**，而不是「锁定不持久」）：
+   *   锁定是**用户显式意图**（用户当面锁过它）—— 存档 → 读档之后凭空解锁，比存档多一个
+   *   可选字段的兼容成本更糟（`plans/17` 项① 第⑥栏的推荐同判）。
+   *   写法上只做**加法且缺省即不写**：`locked` 为假时**根本不出现这个键** ⇒
+   *   旧存档逐字不变、本文件 `loadJSON` 的「缺省即不覆盖」语义也原封不动 ⇒ 向后兼容零成本。
+   *   判据：`tools/lock-readout-probe.mjs` §⑦（未锁定的器材 toJSON 键集合与改动前逐字相同、
+   *   锁定的多出且只有 `locked:true` 一个键、读回后仍是锁定态）。
+   */
   toJSON() {
     return {
       type: this.type, x: this.x, y: this.y, rot: this.rot,
       props: { ...this.props },
       state: this.serializeState ? this.serializeState() : undefined,
+      ...(this.locked ? { locked: true } : {}),
     };
   }
   loadJSON(o) {
     this.x = o.x; this.y = o.y; this.rot = o.rot || 0;
     Object.assign(this.props, o.props || {});
     if (o.state) this.deserializeState?.(o.state);
+    // 只认 `=== true`：旧存档没有这个键 ⇒ **不覆盖**（与上面「缺省即不覆盖」同一条纪律）
+    if (o.locked === true) this.setLocked(true);
   }
 }
 

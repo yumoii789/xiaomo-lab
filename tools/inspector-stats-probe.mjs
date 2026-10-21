@@ -778,10 +778,44 @@ head('⑩ plans/10 §4 的 B2 / B3 / B5：新增行 + 每条的能红证明');
     `B2 电流并列：同一块交流源上「瞬时电流 i(t)=${get(r2, '瞬时电流 i(t)')}」与「有效电流 I_rms=${get(r2, '有效电流 I_rms')}」同时在场（两行、不合并）`);
   ok(get(r2, '瞬时电流 i(t)') === fmtA(ac.state.I), `B2 瞬时电流取逐拍 rec.I（${fmtA(ac.state.I)}），与求解器同源`);
   ok(get(r2, '有效电流 I_rms') === fmtA(ac.state.rmsI), `B2 有效电流走器材自报 state.rmsI（${fmtA(ac.state.rmsI)}），面板没有另算一份`);
-  // ⚠ 这条是电流半边**特有的陷阱**：未接线时 rmsI 不是精确 0（MNA 浮点残差 ~1e-12）⇒
-  //   若面板拿 rmsI === 0 当"没接线"，就会把未接线误判成"有读数"、上屏一个幻影零。
-  ok(acFree.state.rmsI !== 0 && Math.abs(acFree.state.rmsI) < 1e-9 && get(await rowsWith(app2, acFree), '有效电流 I_rms') === SIGNED_NA,
-    `B2 电流未接线：器材侧 rmsI 是浮点残差（${acFree.state.rmsI}，非精确 0）⇒ 拿 rmsI===0 判"没接线"必判错；实测面板仍给占位 [${SIGNED_NA}]`);
+  // ⚠ 判据源是**接线真源**（`wiredPortsOf(...).size >= 2`，见 src/ui/inspector.js 的 `wired`），
+  //   **不是数值**。本断言原先钉在「未接线时 rmsI 是 MNA 浮点残差（~1e-12）」上 —— 那是求解器的
+  //   **附带产物**，会随实现变化（现测已是**精确 0**）⇒ 钉它等于**钉代理量**：它自己会腐，而且
+  //   它并不能证明"判据源是接线"。⇒ 改成两条，且**只有第二条是鉴别性的**：
+  //     甲）未接线 ⇒ 占位。**无条件**成立（与 rmsI 取值无关）；rmsI 只作为**实况记录**打出来。
+  //     乙）**已接线但电流合法为 0** ⇒ 必须给读数（`0 A`），**不许**给占位
+  //         —— 这一条才能证明判据源是接线：若谁把 `wired` 偷换成 `rmsI !== 0`，乙必红（下面配了变异体）。
+  ok(get(await rowsWith(app2, acFree), '有效电流 I_rms') === SIGNED_NA,
+    `B2 电流未接线：判据走**接线真源**（wiredPortsOf ≥ 2）⇒ 占位 [${SIGNED_NA}]`
+    + `（器材侧 rmsI=${acFree.state.rmsI} —— 本值仅**如实记录**，**不是**判据）`);
+  // 「已接线但电流为 0」的构造：**两个端口各挂一根导线、另一端都悬空** ⇒ wiredPortsOf={0,1} 满足
+  // `wired`，但没有闭合回路 ⇒ 求解器给出 0 电流。这正是"接线 ≠ 有电流"的最小反例。
+  const acStub = create('acsource', 900, 900); w2.add(acStub, true);
+  const stubA = create('lamp', 1000, 900); w2.add(stubA, true);
+  const stubB = create('lamp', 1100, 900); w2.add(stubB, true);
+  w2.connect({ e: acStub.id, p: 0 }, { e: stubA.id, p: 0 }, 'wire');
+  w2.connect({ e: acStub.id, p: 1 }, { e: stubB.id, p: 1 }, 'wire');
+  solveCircuit(w2); acStub.step(1 / 120, w2);
+  const iStub = get(await rowsWith(app2, acStub), '有效电流 I_rms');
+  // 就地重算 `wiredPortsOf`（它在 src/ui/inspector.js 里是**模块内**函数、未导出 ⇒ 只能按同一口径重算：
+  // 该器材有多少个**不同端口**上挂了 kind==='wire' 的导线）。口径必须一致，否则这条断言会自欺。
+  const nStubPorts = new Set(w2.wires
+    .filter((w) => w && w.kind === 'wire')
+    .flatMap((w) => [w.a, w.b])
+    .filter((p) => p && p.e === acStub.id)
+    .map((p) => p.p)).size;
+  ok(iStub !== SIGNED_NA && iStub === fmtA(acStub.state.rmsI),
+    `B2 电流**鉴别性**对照：已接线（${nStubPorts} 个端口挂了导线，须 ≥2）`
+    + `但电流合法为 0 时，必须给读数而不是占位（实测 [${iStub}]，器材自报 rmsI=${acStub.state.rmsI}）`
+    + ` ⇒ 证明判据源是**接线**而不是数值`);
+  // 能红证明：把判据源从「接线真源」偷换成「数值」⇒ 上面那条**鉴别性**断言必红
+  const mWire = "wired && typeof st.rmsI === 'number'";
+  const hitsW = SRC0m.split(mWire).length - 1;
+  ok(hitsW === 1, `B2电流判据源 变异靶点在源码里唯一命中（命中 ${hitsW} 次，必须恰好 1 次）`);
+  const gotW = get(await rowsWith(app2, acStub, SRC0m.replace(mWire, "st.rmsI !== 0 && typeof st.rmsI === 'number'")), '有效电流 I_rms');
+  ok(gotW === SIGNED_NA,
+    `B2电流判据源 能红：把 wired 偷换成 rmsI!==0 ⇒ **已接线但电流为 0** 被误判成"未接线"`
+    + `（变异体实得 [${gotW}] = 占位 ⇒ 鉴别性断言必红；未变异时应为 [${iStub}]）`);
   // ── 能红证明：每条一套，逐个报
   const mutations = [
     { item: 'B3', from: "rows.push(['额定电阻 V²/P'", to: "rows.push(['额定电阻X'", key: '额定电阻 V²/P' },

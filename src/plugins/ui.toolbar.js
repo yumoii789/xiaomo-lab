@@ -1,12 +1,11 @@
-// 顶栏：工具选择、运行控制、存档导出、预置实验
+// 顶栏：运行控制、存档导出、预置实验（**工具选择已搬去画布功能栏**）
+//
+// ⚠ 工具组为什么必须**移走**而不是在两处都留：整合的语义是搬家，不是复制。
+//   `caps.js` 记着同一类病 —— 「两个 UI 面各有一份定义，同一个按钮在两处迟早做不同的事」。
+//   顶栏一套 + 画布一套 = 两份「当前工具」的呈现，迟早不同步。
+//   4 枚图标**逐字**搬进 `src/ui/canvasbar.js` 的 `ICO`（不是重画）。
 
-const ICO = {
-  select: '<path d="M4 2.5l8.5 7.2-3.6.5 2 4.1-1.7.8-2-4.1-2.6 2.6z"/>',
-  wire: '<path d="M3.5 11.5c0-3.9 2.2-7 5-7s5 3.1 5 7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="3.5" cy="12.4" r="1.7"/><circle cx="13.5" cy="12.4" r="1.7"/>',
-  pour: '<path d="M2.5 3h7l-3.5 5v4.2c0 .7.6 1.3 1.3 1.3h1.4c.7 0 1.3-.6 1.3-1.3V8L13.5 3z"/>',
-  erase: '<path d="M5.5 2.5h6l1 2h3v1.5h-13V4.5h3zM4 7h9l-.8 6.2c-.1.8-.8 1.3-1.6 1.3H6.4c-.8 0-1.5-.5-1.6-1.3z"/>',
-};
-const svg = (d) => `<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">${d}</svg>`;
+import { CanvasBar } from '../ui/canvasbar.js';
 
 export default {
   id: 'xiaomo.ui.toolbar',
@@ -21,7 +20,6 @@ export default {
   setup(ctx) {
     const app = ctx.app;
     const $ = (s, r = document) => r.querySelector(s);
-    const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
     // ── C9：撤销 / 重做的入口与状态同步 ──
     // 骨架在 `src/core/undo.js`（不归我改 ✗）。它的公开可读状态够用：`canUndo()` / `canRedo()`
@@ -66,16 +64,15 @@ export default {
     const offTick = app.addTick?.(syncHistory);
     ctx.onDispose(() => { window.removeEventListener('keydown', onKey); if (offTick) offTick(); });
 
-    // ── 工具选择 ──
-    ctx.slot('topbar.tools', (host) => {
-      host.innerHTML = `
-        <button type="button" class="tool-btn active" data-tool="select" title="选择 (V)">${svg(ICO.select)}</button>
-        <button type="button" class="tool-btn" data-tool="wire" title="连线 (W)">${svg(ICO.wire)}</button>
-        <button type="button" class="tool-btn" data-tool="pour" title="倾倒 (P)">${svg(ICO.pour)}</button>
-        <button type="button" class="tool-btn" data-tool="erase" title="删除 (X)">${svg(ICO.erase)}</button>`;
-      $$('[data-tool]', host).forEach(b =>
-        b.addEventListener('click', () => app.setTool(b.dataset.tool)));
-    }, { order: 10 });
+    // ── 画布功能栏：工具选择 + 视口缩放 / 复位（本项把**画布级**操作收拢到这里）──
+    // 容器挂 `#stage` 里（插槽**之外**），理由见 `ui/canvasbar.js` 文件头：顶栏插槽的渲染回调
+    // 写的是 `host.innerHTML=`（本文件另三处也是），同槽任一条目重渲染会连**外来节点**一起抹。
+    // 原 `topbar.tools` 插槽因此**不再注册任何条目** —— 留一个空条目只会每次多跑一趟。
+    // ⚠ `#stage` 此刻已在文档里（模块脚本是 defer 的，`index.html` 先解析完）⇒ setup 期就能挂 ✓。
+    const bar = new CanvasBar(app);
+    bar.mount();
+    app.canvasbar = bar;
+    ctx.onDispose(() => bar.dispose());
 
     // ── 运行与存档 ──
     ctx.slot('topbar.actions', (host) => {

@@ -22,6 +22,7 @@ import { CouplingBus } from './coupling/bridge.js';
 import { UndoStack } from './core/undo.js';
 import { solveCircuit, fmtA } from './physics/circuit.js';
 import { bootTouch } from './ui/touch.js';
+import { assemble as assembleScene, undoAssemble as undoAssembleScene } from './presets/assembly.js';
 
 // ── 插件清单 ──────────────────────────────────────────────
 // 名单在 src/plugins/index.js 里（唯一一份），这里只是转手：
@@ -450,13 +451,45 @@ class App {
     }
   }
 
-  // ══════════ 预置场景 ══════════
+  // ══════════ 预置场景 / 一键组装 ══════════
+  /**
+   * 一键组装：摆出一整套装置（**含预设自带的连线** —— 不是自动布线，理由与检索证据见
+   * `src/presets/assembly.js` 的文件头）。逻辑在那个不依赖 DOM 的模块里，这里只做委托
+   * （`class App` 顶层建 DOM 宿主，无头环境实例化不了 ⇒ 逻辑放模块，探针才测得到真身）。
+   * @returns {{ok:boolean, reason?:string, ...}} 失败是**返回值**，不抛错。
+   */
+  assemble(id) { return assembleScene(this, id); }
+
+  /** 「撤销组装」：回到组装前那一份快照（方案甲，见模块文件头的三案比较）。 */
+  undoAssemble() { return undoAssembleScene(this); }
+
+  /**
+   * 把一份**存档**数据落地到世界里（清空后重建，整体静默），返回器材数。
+   * 与 `load()` 的落地形状同源：存档形状（`{v,entities,wires}` + 逐件 `loadJSON`）才能带回
+   * 容器里的溶解态 / 气体 / 沉淀 / 温度，而 `_applyScene()` 只认 `fill.liquid` 与 `fill.solid`。
+   * 「撤销组装」走这里；一键组装本身走 `loadScene()`（场景形状）。
+   *
+   * ⚠ 用 `undo.runSilent()`，**不要**再手写一次挂起/解挂：`tools/undo-probe.mjs` 会数 main.js 里
+   *   「`beginSilent` 后跟空括号」的出现次数并要求**恰好 2 次**（载入、读档各一处；它按整行注释过滤，
+   *   以 `//`、`*`、`/*` 开头的行不计）。`runSilent()` 正是 `undo.js` 里为「存档载入 / 撤销执行体」
+   *   准备的入口，语义相同 —— 所以这里用一个**已有**入口，而不是再加一处。
+   */
+  applySaveData(data) {
+    this.world.clear();
+    this.select(null);
+    if (this.data) this.data.clear();
+    // 短路警告的「只提示一次」闩：换了电路就该重新有资格提示（与 `loadScene` 一致）
+    this._shortWarned = false;
+    this.undo.runSilent(() => this._applySave(data));
+    // 不必再 emit SCENE_DIRTY：`world.clear()` / `world.connect()` 自己会发（`engine.js` 只拿它置重绘位）
+    return this.world.entities.length;
+  }
+
   loadPreset(id) {
-    const p = (this.services.presets || []).find(x => x.id === id);
-    if (!p) return;
-    this.loadScene(p.build());
-    this.showHint(p.name, p.hint);
-    this.log.push('sys', `载入预置实验：${p.name}`, 0);
+    const r = this.assemble(id);
+    if (!r.ok) return;
+    this.showHint(r.name, r.hint);
+    this.log.push('sys', `载入预置实验：${r.name}`, 0);
     localStorage.setItem('xiaomo.preset.v1', id);
   }
 

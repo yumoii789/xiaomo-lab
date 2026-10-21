@@ -33,6 +33,20 @@ export const CAP_KEYS = Object.freeze({
 export const DEFAULT_CAPS = Object.freeze({ duplicate: true, remove: true });
 
 /**
+ * 与 `DEFAULT_CAPS` **同级**的第二组默认位：每件器材默认都有 `lock`（逐件锁定位置）。
+ *
+ * 为什么不并进 `DEFAULT_CAPS`：那一份的**键集合**被既有探针逐字钉住
+ * （`tools/inspector-caps-probe.mjs` 要求 `CAP_KEYS.length === 5` 且键集合 = CAP_KEYS 的键），
+ * 并进去会当场打红一条**不是**本次任务该动的判据；而 `lock` 也**不该进 `CAP_KEYS`** ——
+ * 那份名单的语义是「按钮文案 / aria 的名单」，`inspector.js` 与 `equipbar.js` 都按各自的
+ * **固定键表**渲染按钮（后者是 `CAP_ORDER`），多一个键并不自动多出一个按钮。
+ * 所以锁定位单独成一组、在 `menuCaps` 里按**同样的按位合并**参与解析 ⇒
+ * 每件器材默认有 `lock`，任一器材仍可用 `def.caps: { lock: false }` 单件关掉。
+ * 动作实现不在这里另写一份：它就是 `applyCap` 里多出的一个 `case`（唯一「位 → 动作」定义处）。
+ */
+export const LOCK_CAP = Object.freeze({ lock: true });
+
+/**
  * 中央表：type → 能力位。只写与「默认位 + 兜底」不同的位。
  * 落表依据：`node tools/inspector-caps-probe.mjs` 每次运行都会把注册表**实测转储**
  * （哪件器材带 switch / flame / vessel 标记）与本表逐件对照，缺一件就红。
@@ -86,7 +100,7 @@ export function menuCaps(e, opts) {
   // 兜底层是**底**，必须真的在合并里：漏掉它的写法（只合并 默认位 + 中央表 + 声明）会让
   // 「注册表里没有 type 的器材」当场掉按钮 —— 用户器材包派生的器材正属此类
   // （中央表按 type 查，派生出的新 type 查不到）。这条是被探针 §④ 的红测逼出来的，不是推测。
-  return { ...DEFAULT_CAPS, ...legacyCaps(e), ...(central || {}), ...(own || {}) };
+  return { ...DEFAULT_CAPS, ...LOCK_CAP, ...legacyCaps(e), ...(central || {}), ...(own || {}) };
 }
 
 /**
@@ -147,6 +161,17 @@ export function applyCap(app, ent, key, refresh) {
     case 'remove':
       if (!app || typeof app.removeEntity !== 'function') return false;
       app.removeEntity(ent); return true;
+    /**
+     * 逐件锁定：**只翻一个布尔位**，位移规则不在这里 —— 「锁住就拖不动」的判定在
+     * 拖动入口（`src/ui/interact.js` 的 `onDown`），因为那是全项目唯一把用户手势变成
+     * `ent` 位移的地方：在那里拦下，器材不会跟着手指抖、也不会留下一条 `move` 撤销记录。
+     * 在这里"事后把坐标夹回去"能让终值一模一样，但那正是本仓最怕的假绿（见
+     * `tools/lock-readout-probe.mjs` §① 的次序断言与 M2 变异体）。
+     */
+    case 'lock':
+      if (typeof ent.setLocked === 'function') ent.setLocked(!ent.locked);
+      else ent.locked = !ent.locked;
+      after(); return true;
     default:
       return false;
   }

@@ -580,7 +580,11 @@ out.touchOk = out.touchReady === true && out.touchError === null && out.touchSte
 out.tailMissing = slotNames.filter((n) => !slotTail[n]);
 out.tailBad = slotNames.filter((n) => slotTail[n] && slotTail[n].want !== true);
 out.renderOk = renderFailures.length === 0
-  && slotNames.length >= 9                       // 空集合会让 every() 恒真（D35）✗ ⇒ 先证明集合非空且足量
+  && slotNames.length >= 8                       // 空集合会让 every() 恒真（D35）✗ ⇒ 先证明集合非空且足量
+                                                // 8 = 当前槽位清单条数（本波把 topbar.tools 的工具组并入画布功能栏 ⇒ 9→8）。
+                                                // 这个常量守的是「槽位清单还在」，不是「条数」：凡清单有意增删，
+                                                // 都要显式改这里并在提交信息里说明理由，不许当噪声绕过去。
+                                                // 覆盖损失看的是 tailMissing / tailBad（两者为 0 才是真没损失）。
   && out.tailMissing.length === 0
   && out.tailBad.length === 0
   && out.touchOk === true                        // 装配跑到了、三步全成了、没有异常残留 ✓
